@@ -15,6 +15,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
+import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import dev.remote.terminal.MainActivity
@@ -26,7 +27,9 @@ object TerminalConnectionRegistry {
 
     fun register(controller: SshTerminalController) { controllers.add(controller) }
     fun unregister(controller: SshTerminalController) { controllers.remove(controller) }
-    fun onDefaultNetworkAvailable() { controllers.forEach(SshTerminalController::onNetworkAvailable) }
+    fun onDefaultNetworkAvailable(recoveryStartedAt: Long) {
+        controllers.forEach { it.onNetworkAvailable(recoveryStartedAt) }
+    }
 }
 
 /** Keeps the app process and CPU alive while its in-memory SSH terminal sessions are active. */
@@ -35,9 +38,11 @@ class TerminalKeepAliveService : Service() {
     private var connectivityManager: ConnectivityManager? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
     @Volatile private var defaultNetwork: Network? = null
+    @Volatile private var hasObservedDefaultNetwork = false
     @Volatile private var defaultNetworkValidated = false
     @Volatile private var hasObservedNetworkCapabilities = false
     @Volatile private var networkRecoveryPending = false
+    @Volatile private var networkRecoveryStartedAt = 0L
     private val networkChangeHandler = Handler(Looper.getMainLooper())
     @Volatile private var pendingNetworkChange: Runnable? = null
 
@@ -88,17 +93,23 @@ class TerminalKeepAliveService : Service() {
         val manager = getSystemService(ConnectivityManager::class.java) ?: return
         connectivityManager = manager
         defaultNetwork = manager.activeNetwork
+        hasObservedDefaultNetwork = defaultNetwork != null
         val initialCapabilities = defaultNetwork?.let { network -> manager.getNetworkCapabilities(network) }
         defaultNetworkValidated = initialCapabilities?.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true
         hasObservedNetworkCapabilities = initialCapabilities != null
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
                 val changed = defaultNetwork != network
+                val previouslyObserved = hasObservedDefaultNetwork
                 defaultNetwork = network
+                hasObservedDefaultNetwork = true
                 if (changed) {
                     defaultNetworkValidated = false
                     hasObservedNetworkCapabilities = false
-                    networkRecoveryPending = true
+                    if (previouslyObserved || networkRecoveryPending) {
+                        networkRecoveryPending = true
+                        networkRecoveryStartedAt = SystemClock.elapsedRealtime()
+                    }
                     cancelNetworkRecovery()
                 }
             }
@@ -109,6 +120,7 @@ class TerminalKeepAliveService : Service() {
                     defaultNetworkValidated = false
                     hasObservedNetworkCapabilities = false
                     networkRecoveryPending = true
+                    networkRecoveryStartedAt = SystemClock.elapsedRealtime()
                     cancelNetworkRecovery()
                 }
             }
@@ -134,7 +146,7 @@ class TerminalKeepAliveService : Service() {
             pendingNetworkChange = null
             if (!networkRecoveryPending || !defaultNetworkValidated || defaultNetwork == null) return@Runnable
             networkRecoveryPending = false
-            TerminalConnectionRegistry.onDefaultNetworkAvailable()
+            TerminalConnectionRegistry.onDefaultNetworkAvailable(networkRecoveryStartedAt)
         }
         pendingNetworkChange = pending
         networkChangeHandler.postDelayed(pending, NETWORK_STABLE_DELAY_MS)

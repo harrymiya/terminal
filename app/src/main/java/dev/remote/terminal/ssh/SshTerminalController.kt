@@ -30,6 +30,7 @@ class SshTerminalController(
         val session: Session,
         val channel: ChannelShell,
         val input: OutputStream,
+        val establishedAt: Long,
     )
 
     private data class PendingInput(
@@ -66,13 +67,13 @@ class SshTerminalController(
         return outgoing.offerLast(PendingInput(text.toByteArray(Charsets.UTF_8), connection))
     }
 
-    fun onNetworkAvailable() {
+    fun onNetworkAvailable(recoveryStartedAt: Long) {
         if (!running.get()) return
         // Android has reported a stable replacement default network. An established
         // TCP socket belongs to the old network and can otherwise remain half-open.
         // Never interrupt an attempt that has not finished connecting yet.
         val connection = activeConnection.get()
-        if (connection != null && activeConnection.compareAndSet(connection, null)) {
+        if (connection != null && connection.establishedAt <= recoveryStartedAt && activeConnection.compareAndSet(connection, null)) {
             pendingDisconnectReason.set("网络已切换")
             onStatus("网络已切换 · 正在恢复 SSH 会话")
             runCatching { connection.channel.disconnect() }
@@ -81,13 +82,13 @@ class SshTerminalController(
         retrySignal.release()
     }
 
-    fun resize(cols: Int, lines: Int) {
+    fun resize(cols: Int, lines: Int, force: Boolean = false) {
         val nextColumns = cols.coerceIn(24, 200)
         val nextRows = lines.coerceIn(8, 100)
-        if (nextColumns == columns && nextRows == rows) return
-        columns = nextColumns
-        rows = nextRows
         synchronized(writeLock) {
+            if (!force && nextColumns == columns && nextRows == rows) return
+            columns = nextColumns
+            rows = nextRows
             val connection = activeConnection.get() ?: return@synchronized
             runCatching { connection.channel.setPtySize(columns, rows, 0, 0) }
         }
@@ -179,12 +180,15 @@ class SshTerminalController(
                 val reader = channel.inputStream
                 channel.connect(20_000)
                 ensureRunning()
-                val connection = ActiveConnection(session, channel, input)
+                val connection = ActiveConnection(session, channel, input, SystemClock.elapsedRealtime())
                 // The initial command must reach the remote shell before queued user input.
                 synchronized(writeLock) {
                     ensureRunning()
                     input.write(buildAttachCommand().toByteArray(Charsets.UTF_8))
                     input.flush()
+                    // A viewport change can arrive while the SSH channel is opening.
+                    // Apply the latest size again before exposing the connection.
+                    channel.setPtySize(columns, rows, 0, 0)
                     pendingDisconnectReason.set(null)
                     activeConnection.set(connection)
                 }

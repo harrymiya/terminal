@@ -947,7 +947,9 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
         if (terminalViewport.width > 0 && terminalViewport.height > 0) {
             kotlinx.coroutines.delay(220)
             session.buffer.resize(viewportColumns, viewportRows)
-            session.controller.resize(viewportColumns, viewportRows)
+            // Re-send the settled dimensions even if our cached dimensions match:
+            // the remote program may not have applied an earlier window change.
+            session.controller.resize(viewportColumns, viewportRows, force = true)
         }
     }
 
