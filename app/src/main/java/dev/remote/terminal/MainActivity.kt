@@ -1026,6 +1026,11 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
                                 paint.color = android.graphics.Color.parseColor("#" + terminalColor(cell.background).toString(16).takeLast(6))
                                 native.drawRect(c * charWidth, drawRow * lineHeight, (c + 1) * charWidth, (drawRow + 1) * lineHeight, paint)
                             }
+                        }
+                        // Paint the whole row's background first: a wide glyph extends
+                        // into the following cell, whose background must not cover it.
+                        for (c in 0 until minOf(line.size, visibleCols)) {
+                            val cell = line[c]
                             if (cell.text.isNotEmpty() && cell.text != " ") {
                                 paint.color = terminalColor(cell.foreground).toInt()
                                 native.drawText(cell.text, c * charWidth, (drawRow + 1) * lineHeight - 2f, paint)
