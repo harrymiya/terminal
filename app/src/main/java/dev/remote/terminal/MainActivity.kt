@@ -962,12 +962,15 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
         val wheel = session.buffer.mouseWheelSequence(delta > 0, column, row)
         if ((wheel != null || session.buffer.isAlternateScreen()) && !hasScrollback && latestScrollbackTopRow == null) {
             wheelRemainder += delta
-            while (kotlin.math.abs(wheelRemainder) >= lineHeightPx) {
+            // Arrow keys navigate the prompt's input history in agent TUIs. When
+            // mouse reporting is unavailable, use page keys to scroll their transcript.
+            val scrollStep = if (wheel != null) lineHeightPx else lineHeightPx * 4
+            while (kotlin.math.abs(wheelRemainder) >= scrollStep) {
                 val up = wheelRemainder > 0
                 val sequence = session.buffer.mouseWheelSequence(up, column, row)
-                    ?: session.buffer.cursorSequence(if (up) 'A' else 'B')
+                    ?: if (up) "\u001b[5~" else "\u001b[6~"
                 session.controller.send(sequence)
-                wheelRemainder += if (up) -lineHeightPx else lineHeightPx
+                wheelRemainder += if (up) -scrollStep else scrollStep
             }
             delta
         } else {
@@ -1106,7 +1109,7 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
             update = { editor -> if (isCurrent && !editor.hasFocus()) editor.requestFocus() },
         )
 
-        Column(Modifier.fillMaxWidth().padding(top = 5.dp, bottom = 2.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        if (keyboardVisible) Column(Modifier.fillMaxWidth().padding(top = 5.dp, bottom = 2.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             val keys = listOf(
                 listOf("ESC" to "\u001b", "/" to "/", "−" to "-", "SESS" to "/sessions", "PG↑" to "\u001b[5~", "HOME" to "", "↑" to "", "END" to ""),
                 listOf("TAB" to "\t", "CTRL" to "", "ALT" to "", "RESU" to "/resume", "PG↓" to "\u001b[6~", "←" to "", "↓" to "", "→" to ""),
