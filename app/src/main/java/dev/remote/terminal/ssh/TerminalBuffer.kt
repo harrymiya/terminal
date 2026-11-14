@@ -65,6 +65,14 @@ class TerminalBuffer(initialColumns: Int = 80, initialRows: Int = 32) {
         return "\u001b[$direction"
     }
 
+    /** Text currently visible on the terminal, used for prompt checks that must not match stale output. */
+    @Synchronized fun visibleTextTail(maxRows: Int = 8): String {
+        val firstRow = (cells.size - maxRows.coerceAtLeast(1)).coerceAtLeast(0)
+        return cells.drop(firstRow)
+            .joinToString("\n") { row -> row.joinToString("") { it.text }.trimEnd() }
+            .trimEnd()
+    }
+
     @Synchronized fun resize(newColumns: Int, newRows: Int) {
         val width = newColumns.coerceIn(24, 200)
         val height = newRows.coerceIn(8, 100)

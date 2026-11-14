@@ -24,6 +24,10 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.rememberScrollableState
+import androidx.compose.foundation.gestures.scrollable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -46,8 +50,6 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
@@ -143,7 +145,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withContext
-import kotlin.math.abs
 import kotlin.math.roundToInt
 import java.util.UUID
 import android.graphics.Paint
@@ -160,6 +161,14 @@ private val Muted = Color(0xFF91A0B2)
 private val Mint = Color(0xFF83E2BD)
 private val Blue = Color(0xFF84B5FF)
 private val Coral = Color(0xFFFF8278)
+private val ActionRequestRegex = Regex("(?i)(approve (this|the)? ?(command|action)?|allow (this|the)? ?(command|action)?|would you like to|run this command\\?|continue\\? ?\\[|\\[(y/n|yes/no)\\]|\\((y/n|yes/no)\\)|press\\s+(enter|return)\\s+to\\s+(continue|confirm|approve)|permission required|needs your approval|批准|是否允许|需要确认|是否继续)")
+private val AutoEnterPromptRegex = Regex("(?:\\[Y/n\\]|\\(Y/n\\)|\\[Yes/no\\]|(?i:press\\s+(?:enter|return)\\s+to\\s+(?:continue|confirm|approve)))\\s*$")
+
+private fun autoEnterPromptSignature(text: String): String? {
+    val visibleText = text.trimEnd()
+    if (!AutoEnterPromptRegex.containsMatchIn(visibleText)) return null
+    return visibleText.lineSequence().filter { it.isNotBlank() }.toList().takeLast(2).joinToString("\n")
+}
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -181,9 +190,10 @@ private class TerminalSessionState(val task: TerminalTask, private val mainHandl
     var unread by mutableStateOf(false)
     var needsAction by mutableStateOf(false)
     var autoEnterEligible by mutableStateOf(false)
+    var autoEnterPromptSignature by mutableStateOf<String?>(null)
+    var handledPromptSignature by mutableStateOf<String?>(null)
     var lastOutputAt by mutableStateOf(0L)
     var isStreaming by mutableStateOf(false)
-    var recentText = StringBuilder()
     var hostFingerprint by mutableStateOf<String?>(null)
     var resolveHostKey: ((Boolean) -> Unit)? = null
     private var autoEnterRunnable: Runnable? = null
@@ -197,31 +207,38 @@ private class TerminalSessionState(val task: TerminalTask, private val mainHandl
     fun pauseAutoEnter() {
         cancelAutoEnter()
         autoEnterEligible = false
+        autoEnterPromptSignature = null
     }
 
     fun onConnectionUnavailable() {
+        autoEnterPromptSignature?.let { handledPromptSignature = it }
         pauseAutoEnter()
-        recentText.setLength(0)
     }
 
     fun clearAttention() {
+        autoEnterPromptSignature?.let { handledPromptSignature = it }
         cancelAutoEnter()
         needsAction = false
         autoEnterEligible = false
+        autoEnterPromptSignature = null
         unread = false
-        recentText.setLength(0)
     }
 
-    fun scheduleAutoEnter(delaySeconds: Int) {
+    fun scheduleAutoEnter(delaySeconds: Int, promptSignature: String, isPromptStillActive: () -> Boolean) {
         cancelAutoEnter()
+        autoEnterPromptSignature = promptSignature
         lateinit var pending: Runnable
         pending = Runnable {
             if (autoEnterRunnable !== pending) return@Runnable
             autoEnterRunnable = null
-            if (needsAction && autoEnterEligible) {
-                if (controller.sendIfConnected("\r")) clearAttention()
-                else autoEnterEligible = false
+            if (!needsAction || !autoEnterEligible || autoEnterPromptSignature != promptSignature || !isPromptStillActive()) {
+                pauseAutoEnter()
+                return@Runnable
             }
+            if (controller.sendIfConnected("\r")) {
+                handledPromptSignature = promptSignature
+                clearAttention()
+            } else pauseAutoEnter()
         }
         autoEnterRunnable = pending
         mainHandler.postDelayed(pending, delaySeconds.coerceIn(1, 30) * 1000L)
@@ -299,31 +316,29 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 } },
                 onBytes = { bytes ->
                     state.buffer.feed(bytes)
-                    val plain = bytes.replace(Regex("\\u001B(?:\\[[0-?]*[ -/]*[@-~]|\\][^\\u0007]*(?:\\u0007|\\u001B\\\\))"), "")
                     mainHandler.post {
                         state.lastOutputAt = android.os.SystemClock.elapsedRealtime()
                         state.isStreaming = true
                         mainHandler.postDelayed({
                             if (android.os.SystemClock.elapsedRealtime() - state.lastOutputAt >= 1_100L) state.isStreaming = false
                         }, 1_150L)
-                        state.recentText.append(plain)
-                        if (state.recentText.length > 1800) state.recentText.delete(0, state.recentText.length - 1800)
-                        val request = Regex("(?i)(approve (this|the)? ?(command|action)?|allow (this|the)? ?(command|action)?|would you like to|run this command\\?|continue\\? ?\\[|\\[(y/n|yes/no)\\]|\\((y/n|yes/no)\\)|press\\s+(enter|return)\\s+to\\s+(continue|confirm|approve)|permission required|needs your approval|批准|是否允许|需要确认|是否继续)")
-                        val autoEnterPrompt = Regex("(?:\\[Y/n\\]|\\(Y/n\\)|\\[Yes/no\\]|\\(Yes/no\\)|(?i:press\\s+(?:enter|return)\\s+to\\s+(?:continue|confirm|approve)))\\s*$")
-                        val hasRequest = request.containsMatchIn(state.recentText)
-                        if (hasRequest) {
-                            state.needsAction = true
-                            val wasEligible = state.autoEnterEligible
-                            state.autoEnterEligible = autoEnterPrompt.containsMatchIn(state.recentText)
-                            if (state.autoEnterEligible && !wasEligible && autoEnterEnabled) {
-                                state.scheduleAutoEnter(autoEnterDelaySeconds)
-                            } else if (!state.autoEnterEligible && wasEligible) {
-                                state.pauseAutoEnter()
+                        val visibleText = state.buffer.visibleTextTail()
+                        val hasRequest = ActionRequestRegex.containsMatchIn(visibleText)
+                        val promptSignature = if (hasRequest) autoEnterPromptSignature(visibleText) else null
+                        val previousPromptSignature = state.autoEnterPromptSignature
+                        state.needsAction = hasRequest
+                        if (promptSignature != null) {
+                            state.autoEnterPromptSignature = promptSignature
+                            state.autoEnterEligible = promptSignature != state.handledPromptSignature
+                            if (state.autoEnterEligible && autoEnterEnabled && previousPromptSignature != promptSignature) {
+                                state.scheduleAutoEnter(autoEnterDelaySeconds, promptSignature) {
+                                    autoEnterPromptSignature(state.buffer.visibleTextTail()) == promptSignature
+                                }
+                            } else if (!state.autoEnterEligible || !autoEnterEnabled) {
+                                state.cancelAutoEnter()
                             }
-                            if (route != AppRoute.TERMINAL || sessions.getOrNull(activePage) !== state) {
-                                state.unread = true
-                            }
-                        } else if (state.autoEnterEligible) {
+                        } else {
+                            state.handledPromptSignature = null
                             state.pauseAutoEnter()
                         }
                         if (route != AppRoute.TERMINAL || sessions.getOrNull(activePage) !== state) {
@@ -344,7 +359,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
             if (route == AppRoute.TERMINAL) route = AppRoute.HOME else route = AppRoute.HOME
         }
 
-        Box(Modifier.fillMaxSize().background(Ink)) {
+        Box(Modifier.fillMaxSize().background(Ink).statusBarsPadding().imePadding().navigationBarsPadding()) {
             when (route) {
                 AppRoute.HOME -> HomeScreen(
                     hosts = hosts, agents = agents, selectedHost = selectedHost, selectedAgent = selectedAgent,
@@ -375,7 +390,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
                     onCloseTask = { index -> sessions.getOrNull(index)?.let { closingSession = it } },
                 )
             }
-            SnackbarHost(snackbars, modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().imePadding().padding(horizontal = 14.dp, vertical = 8.dp))
+            SnackbarHost(snackbars, modifier = Modifier.align(Alignment.BottomCenter).padding(horizontal = 14.dp, vertical = 8.dp))
         }
 
         if (addingHost || editingHost != null) HostEditorDialog(
@@ -440,14 +455,26 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 autoEnterEnabled = enabled
                 store.saveAutoEnterEnabled(enabled)
                 sessions.forEach { session ->
-                    if (enabled && session.needsAction && session.autoEnterEligible) session.scheduleAutoEnter(autoEnterDelaySeconds)
+                    if (enabled && session.needsAction && session.autoEnterEligible) {
+                        session.autoEnterPromptSignature?.let { signature ->
+                            session.scheduleAutoEnter(autoEnterDelaySeconds, signature) {
+                                autoEnterPromptSignature(session.buffer.visibleTextTail()) == signature
+                            }
+                        }
+                    }
                     else if (!enabled) session.cancelAutoEnter()
                 }
             },
             onDelaySecondsChange = { seconds ->
                 autoEnterDelaySeconds = seconds
                 store.saveAutoEnterDelaySeconds(seconds)
-                if (autoEnterEnabled) sessions.filter { it.needsAction && it.autoEnterEligible }.forEach { it.scheduleAutoEnter(seconds) }
+                if (autoEnterEnabled) sessions.filter { it.needsAction && it.autoEnterEligible }.forEach { session ->
+                    session.autoEnterPromptSignature?.let { signature ->
+                        session.scheduleAutoEnter(seconds, signature) {
+                            autoEnterPromptSignature(session.buffer.visibleTextTail()) == signature
+                        }
+                    }
+                }
             },
             onDismiss = { showSettings = false },
         )
@@ -478,7 +505,7 @@ private fun HomeScreen(
     onManage: () -> Unit, onAddHost: () -> Unit, onAddDirectory: () -> Unit, onOpenAgents: () -> Unit, onOpenSettings: () -> Unit,
     onStartTask: (HostProfile, ProjectDirectory, AgentPreset) -> Unit, onResumeSession: (Int) -> Unit,
 ) {
-    Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
         Row(Modifier.fillMaxWidth().padding(top = 24.dp, bottom = 18.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.size(42.dp).clip(RoundedCornerShape(14.dp)).background(PanelRaised), contentAlignment = Alignment.Center) {
                 Icon(Icons.Default.Terminal, null, tint = Mint, modifier = Modifier.size(23.dp))
@@ -601,7 +628,7 @@ private fun ManageScreen(
         else if (visibleHostId !in hosts.map { it.id }) visibleHostId = hosts.firstOrNull()?.id.orEmpty()
     }
     val visibleHost = hosts.firstOrNull { it.id == visibleHostId }
-    Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
         Row(Modifier.fillMaxWidth().padding(top = 15.dp, bottom = 20.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, null, tint = White) }
             Column(Modifier.weight(1f)) {
@@ -708,7 +735,7 @@ private fun EmptyRow(title: String, detail: String, action: () -> Unit, label: S
 
 @Composable
 private fun AgentsScreen(agents: List<AgentPreset>, onBack: () -> Unit, onAdd: () -> Unit, onEdit: (AgentPreset) -> Unit, onDelete: (AgentPreset) -> Unit) {
-    Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(horizontal = 20.dp)) {
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
         Row(Modifier.fillMaxWidth().padding(top = 18.dp, bottom = 22.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, null, tint = White) }
             Column(Modifier.weight(1f)) { Text("Agent 配置", color = White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold); Text("名称、图标和启动命令都可自定义", color = Muted, fontSize = 12.sp) }
@@ -741,7 +768,7 @@ private fun TerminalWorkspace(
     val pager = rememberPagerState(initialPage = initialIndex.coerceIn(0, sessions.lastIndex), pageCount = { sessions.size })
     val scope = rememberCoroutineScope()
     LaunchedEffect(pager.currentPage, sessions.size) { if (pager.currentPage in sessions.indices) onPageSelected(pager.currentPage) }
-    Column(Modifier.fillMaxSize().background(Ink).statusBarsPadding().navigationBarsPadding()) {
+    Column(Modifier.fillMaxSize().background(Ink)) {
         Row(Modifier.fillMaxWidth().padding(start = 5.dp, end = 10.dp, top = 5.dp, bottom = 5.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack, modifier = Modifier.size(42.dp)) { Icon(Icons.Default.ArrowBack, null, tint = White, modifier = Modifier.size(20.dp)) }
             Column(Modifier.weight(1f)) {
@@ -758,7 +785,7 @@ private fun TerminalWorkspace(
                 Spacer(Modifier.width(6.dp))
             }
         }
-        HorizontalPager(state = pager, modifier = Modifier.weight(1f).imePadding(), key = { sessions[it].task.id }) { page ->
+        HorizontalPager(state = pager, modifier = Modifier.weight(1f), key = { sessions[it].task.id }) { page ->
             TerminalPage(sessions[page], page == pager.currentPage)
         }
     }
@@ -822,11 +849,13 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
     val hideKeyboard: () -> Unit = {
         inputView?.let { view -> inputMethodManager.hideSoftInputFromWindow(view.windowToken, 0) }
     }
-    val scrollHistoryBy: (Float) -> Unit = { dragAmount ->
+    val historyScrollState = rememberScrollableState { delta ->
+        if (!isCurrent) return@rememberScrollableState 0f
         val liveTop = latestLiveFirstVisibleRow.toFloat()
         val currentTop = latestScrollbackTopRow ?: liveTop
-        val nextTop = (currentTop - dragAmount / lineHeightPx).coerceIn(0f, liveTop)
+        val nextTop = (currentTop - delta / lineHeightPx).coerceIn(0f, liveTop)
         scrollbackTopRow = if (nextTop >= liveTop) null else nextTop
+        (currentTop - nextTop) * lineHeightPx
     }
 
     // IME transitions resize the canvas over many animation frames. Resize the PTY and
@@ -863,45 +892,15 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
             }
         }
         Box(Modifier.weight(1f).fillMaxWidth().clip(RoundedCornerShape(11.dp)).background(Color(0xFF070B10))) {
-            Canvas(Modifier.fillMaxSize().onSizeChanged { terminalViewport = it }.pointerInput(isCurrent, lineHeightPx) {
-                awaitEachGesture {
-                    val down = awaitFirstDown(requireUnconsumed = false)
-                    val pointerId = down.id
-                    var lastX = down.position.x
-                    var lastY = down.position.y
-                    var totalX = 0f
-                    var totalY = 0f
-                    var verticalDragStarted = false
-                    while (true) {
-                        val event = awaitPointerEvent()
-                        val change = event.changes.firstOrNull { it.id == pointerId } ?: break
-                        if (!change.pressed) {
-                            if (!verticalDragStarted && isCurrent) showKeyboard()
-                            break
-                        }
-                        val deltaX = change.position.x - lastX
-                        val deltaY = change.position.y - lastY
-                        lastX = change.position.x
-                        lastY = change.position.y
-                        totalX += deltaX
-                        totalY += deltaY
-                        if (!verticalDragStarted) {
-                            val horizontalDistance = abs(totalX)
-                            val verticalDistance = abs(totalY)
-                            if (verticalDistance > viewConfiguration.touchSlop && verticalDistance > horizontalDistance) {
-                                verticalDragStarted = true
-                                change.consume()
-                                if (isCurrent) scrollHistoryBy(totalY)
-                            } else if (horizontalDistance > viewConfiguration.touchSlop && horizontalDistance > verticalDistance) {
-                                break
-                            }
-                        } else {
-                            change.consume()
-                            if (isCurrent) scrollHistoryBy(deltaY)
-                        }
-                    }
-                }
-            }) {
+            Canvas(
+                Modifier
+                    .fillMaxSize()
+                    .onSizeChanged { terminalViewport = it }
+                    .scrollable(state = historyScrollState, orientation = Orientation.Vertical)
+                    .pointerInput(isCurrent, inputView) {
+                        detectTapGestures(onTap = { if (isCurrent) showKeyboard() })
+                    },
+            ) {
                 val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                     textSize = 12f * density.density
                     typeface = Typeface.create("monospace", Typeface.NORMAL)
