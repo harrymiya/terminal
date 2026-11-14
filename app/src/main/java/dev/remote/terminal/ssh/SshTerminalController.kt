@@ -82,8 +82,8 @@ class SshTerminalController(
     }
 
     fun resize(cols: Int, lines: Int) {
-        val nextColumns = cols.coerceIn(30, 200)
-        val nextRows = lines.coerceIn(10, 100)
+        val nextColumns = cols.coerceIn(24, 200)
+        val nextRows = lines.coerceIn(8, 100)
         if (nextColumns == columns && nextRows == rows) return
         columns = nextColumns
         rows = nextRows

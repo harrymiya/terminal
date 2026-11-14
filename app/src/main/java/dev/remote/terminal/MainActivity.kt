@@ -15,6 +15,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.animation.animateColor
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -932,22 +933,21 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
             view.post { inputMethodManager.showSoftInput(view, InputMethodManager.SHOW_IMPLICIT) }
         }
     }
-    // IME transitions resize the canvas over many animation frames. Resize the PTY and
-    // backing grid only after the viewport settles, or the agent receives a burst of
-    // window-change requests and the local screen repeatedly truncates/recreates rows.
+    val charWidthPx = remember(density.density) {
+        Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            textSize = 12f * density.density
+            typeface = Typeface.create("monospace", Typeface.NORMAL)
+        }.measureText("M").coerceAtLeast(1f)
+    }
+    val viewportColumns = (terminalViewport.width / charWidthPx).toInt().coerceIn(24, 200)
+    val viewportRows = (terminalViewport.height / lineHeightPx).toInt().coerceIn(8, 100)
+    // Keep the remote grid stable while the keyboard moves; resize it once the
+    // viewport has settled so tmux can redraw for the final dimensions.
     LaunchedEffect(session.task.id, terminalViewport, keyboardVisible) {
         if (terminalViewport.width > 0 && terminalViewport.height > 0) {
             kotlinx.coroutines.delay(220)
-            val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                textSize = 12f * density.density
-                typeface = Typeface.create("monospace", Typeface.NORMAL)
-            }
-            val charWidth = paint.measureText("M").coerceAtLeast(1f)
-            val lineHeight = 16.3f * density.density
-            val cols = (terminalViewport.width / charWidth).toInt().coerceIn(24, 200)
-            val rows = (terminalViewport.height / lineHeight).toInt().coerceIn(8, 100)
-            session.buffer.resize(cols, rows)
-            session.controller.resize(cols, rows)
+            session.buffer.resize(viewportColumns, viewportRows)
+            session.controller.resize(viewportColumns, viewportRows)
         }
     }
 
@@ -1011,12 +1011,13 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
                 val lineHeight = lineHeightPx
                 val visibleCols = (size.width / charWidth).toInt().coerceIn(24, 200)
                 val visibleRows = (size.height / lineHeight).toInt().coerceIn(8, 100)
-                val liveFirstRow = (allRows.size - visibleRows).coerceAtLeast(0)
-                val firstVisibleRow = (scrollbackTopRow ?: liveFirstRow.toFloat()).coerceIn(0f, liveFirstRow.toFloat())
+                // Anchor the live screen to the moving bottom edge at pixel precision.
+                val liveFirstRow = (allRows.size - size.height / lineHeight).coerceAtLeast(0f)
+                val firstVisibleRow = (scrollbackTopRow ?: liveFirstRow).coerceIn(0f, liveFirstRow)
                 val firstVisibleIndex = firstVisibleRow.toInt()
                 drawIntoCanvas { canvas ->
                     val native = canvas.nativeCanvas
-                    val lastVisibleRow = minOf(allRows.size, firstVisibleIndex + visibleRows + 1)
+                    val lastVisibleRow = minOf(allRows.size, firstVisibleIndex + visibleRows + 2)
                     for (screenRow in firstVisibleIndex until lastVisibleRow) {
                         val drawRow = screenRow - firstVisibleRow
                         val line = allRows[screenRow]
@@ -1038,7 +1039,7 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
                         }
                     }
                     val cursorDisplayRow = scrollback.size + terminalCursor.row - firstVisibleRow
-                    if (terminalCursor.visible && terminalCursor.column < visibleCols && cursorDisplayRow >= 0f && cursorDisplayRow < visibleRows) {
+                    if (terminalCursor.visible && terminalCursor.column < visibleCols && cursorDisplayRow > -1f && cursorDisplayRow * lineHeight < size.height) {
                         val left = terminalCursor.column * charWidth
                         val top = cursorDisplayRow * lineHeight
                         paint.color = Mint.copy(alpha = .72f).toArgb()
@@ -1118,7 +1119,8 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
             update = { editor -> if (isCurrent && !editor.hasFocus()) editor.requestFocus() },
         )
 
-        if (keyboardVisible) Column(Modifier.fillMaxWidth().padding(top = 5.dp, bottom = 2.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        AnimatedVisibility(visible = keyboardVisible) {
+        Column(Modifier.fillMaxWidth().padding(top = 5.dp, bottom = 2.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             val keys = listOf(
                 listOf("ESC" to "\u001b", "/" to "/", "−" to "-", "SESS" to "/sessions", "PG↑" to "\u001b[5~", "HOME" to "", "↑" to "", "END" to ""),
                 listOf("TAB" to "\t", "CTRL" to "", "ALT" to "", "RESU" to "/resume", "PG↓" to "\u001b[6~", "←" to "", "↓" to "", "→" to ""),
@@ -1158,6 +1160,7 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
                     }
                 }
             }
+        }
         }
     }
 }
