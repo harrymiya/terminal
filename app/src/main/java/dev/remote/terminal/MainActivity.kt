@@ -1223,7 +1223,7 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
         AnimatedVisibility(visible = keyboardVisible) {
         Column(Modifier.fillMaxWidth().padding(top = 5.dp, bottom = 2.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             val keys = listOf(
-                listOf("ESC" to "\u001b", "/" to "/", "−" to "-", "SESS" to "/sessions", "PG↑" to "\u001b[5~", "HOME" to "", "↑" to "", "END" to ""),
+                listOf("ESC" to "\u001b", "/" to "/", "−" to "-", "PAST" to "", "PG↑" to "\u001b[5~", "HOME" to "", "↑" to "", "END" to ""),
                 listOf("TAB" to "\t", "CTRL" to "", "ALT" to "", "RESU" to "/resume", "PG↓" to "\u001b[6~", "←" to "", "↓" to "", "→" to ""),
             )
             keys.forEach { row ->
@@ -1234,7 +1234,17 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
                             when (label) {
                                 "CTRL" -> { ctrlArmed = !ctrlArmed; altArmed = false }
                                 "ALT" -> { altArmed = !altArmed; ctrlArmed = false }
-                                "SESS", "RESU" -> {
+                                "PAST" -> {
+                                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                    val clip = clipboard.primaryClip
+                                    val text = if (clip != null && clip.itemCount > 0) clip.getItemAt(0).coerceToText(context)?.toString().orEmpty() else ""
+                                    if (text.isNotEmpty()) {
+                                        session.controller.send(session.buffer.pasteSequence(text))
+                                        session.clearAttention()
+                                    }
+                                    ctrlArmed = false; altArmed = false
+                                }
+                                "RESU" -> {
                                     session.controller.send(value)
                                     ctrlArmed = false; altArmed = false
                                     session.clearAttention()
