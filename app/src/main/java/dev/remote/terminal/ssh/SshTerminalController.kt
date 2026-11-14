@@ -1,6 +1,8 @@
 package dev.remote.terminal.ssh
 
 import com.jcraft.jsch.ChannelShell
+import com.jcraft.jsch.ChannelExec
+import org.json.JSONObject
 import com.jcraft.jsch.HostKeyRepository
 import com.jcraft.jsch.JSch
 import com.jcraft.jsch.Session
@@ -25,6 +27,7 @@ class SshTerminalController(
     private val onStatus: (String) -> Unit,
     private val onBytes: (String) -> Unit,
     private val onHostKey: (String, (Boolean) -> Unit) -> Unit,
+    private val onQuota: (List<Pair<Int, Int>>?) -> Unit,
 ) {
     private data class ActiveConnection(
         val session: Session,
@@ -111,6 +114,64 @@ class SshTerminalController(
         onStatus("已断开")
     }
 
+    private fun quotaLoop(connection: ActiveConnection) {
+        while (running.get() && activeConnection.get() === connection && connection.session.isConnected) {
+            val result = runCatching { readCodexQuota(connection.session) }.getOrNull()
+            if (activeConnection.get() !== connection || !running.get()) break
+            onQuota(result)
+            repeat(60) {
+                if (!running.get() || activeConnection.get() !== connection) return
+                Thread.sleep(1_000)
+            }
+        }
+    }
+
+    private fun readCodexQuota(session: Session): List<Pair<Int, Int>>? {
+        val channel = session.openChannel("exec") as ChannelExec
+        try {
+            channel.setCommand("bash -lc 'exec codex app-server --listen stdio://'")
+            val output = channel.outputStream
+            val input = channel.inputStream
+            channel.connect(10_000)
+            output.write(("{\"id\":1,\"method\":\"initialize\",\"params\":{\"clientInfo\":{\"name\":\"remote_dev_terminal\",\"version\":\"1.0\"}}}\n").toByteArray())
+            output.flush()
+            val deadline = SystemClock.elapsedRealtime() + 15_000
+            val pending = StringBuilder()
+            var requested = false
+            while (SystemClock.elapsedRealtime() < deadline && !channel.isClosed && running.get()) {
+                if (input.available() == 0) { Thread.sleep(50); continue }
+                val byte = input.read()
+                if (byte < 0) break
+                if (byte != 10) {
+                    if (pending.length < 1_000_000) pending.append(byte.toChar()) else return null
+                    continue
+                }
+                val message = runCatching { JSONObject(pending.toString()) }.getOrNull()
+                pending.setLength(0)
+                if (message?.optInt("id", -1) == 1 && !requested) {
+                    if (message.has("error")) return null
+                    output.write(("{\"method\":\"initialized\",\"params\":{}}\n" +
+                        "{\"id\":2,\"method\":\"account/rateLimits/read\",\"params\":{}}\n").toByteArray())
+                    output.flush()
+                    requested = true
+                } else if (message?.optInt("id", -1) == 2) {
+                    val snapshot = message.optJSONObject("result")?.optJSONObject("rateLimits") ?: return null
+                    return listOf("primary", "secondary").mapNotNull { name ->
+                        val window = snapshot.optJSONObject(name) ?: return@mapNotNull null
+                        if (!window.has("usedPercent") || window.isNull("usedPercent") ||
+                            !window.has("windowDurationMins") || window.isNull("windowDurationMins")) return@mapNotNull null
+                        val minutes = window.optInt("windowDurationMins", 0)
+                        if (minutes <= 0) return@mapNotNull null
+                        minutes to (100 - window.optInt("usedPercent")).coerceIn(0, 100)
+                    }.takeIf { it.isNotEmpty() }
+                }
+            }
+            return null
+        } finally {
+            channel.disconnect()
+        }
+    }
+
     /** All keystrokes go through one writer. A stale stream can only invalidate its own channel. */
     private fun writerLoop() {
         while (running.get()) {
@@ -195,6 +256,9 @@ class SshTerminalController(
                 }
                 connectedAt = SystemClock.elapsedRealtime()
                 onStatus("已连接 · ${task.host.username}@${task.host.address}")
+                if (task.agent.id == "codex" && task.agent.command.trim().matches(Regex("^codex(?:\\s.*)?$"))) {
+                    Thread({ quotaLoop(connection) }, "codex-quota-${task.id.take(8)}").apply { isDaemon = true; start() }
+                }
                 val textReader = InputStreamReader(reader, Charsets.UTF_8)
                 val buffer = CharArray(4096)
                 var remoteTerminalEnded = false

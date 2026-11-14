@@ -110,16 +110,32 @@ class LocalStore(context: Context) {
         preferences.edit().putString("hosts", root.toString()).apply()
     }
 
-    fun loadAgents(): List<AgentPreset> = runCatching {
-        val items = JSONArray(preferences.getString("agents", null) ?: "")
-        (0 until items.length()).map { items.getJSONObject(it).let { a -> AgentPreset(a.getString("id"), a.getString("name"), a.getString("command"), a.optString("icon", "✳")) } }
-    }.getOrElse {
-        listOf(
-            AgentPreset("codex", "Codex", "codex", "✳"),
-            AgentPreset("claude", "Claude Code", "claude", "◈"),
-            AgentPreset("opencode", "OpenCode", "opencode", "⌘"),
-            AgentPreset("shell", "Shell", "bash -l", "\$_"),
-        ).also(::saveAgents)
+    fun loadAgents(): List<AgentPreset> {
+        var agents = runCatching {
+            val items = JSONArray(preferences.getString("agents", null) ?: "")
+            (0 until items.length()).map { items.getJSONObject(it).let { a -> AgentPreset(a.getString("id"), a.getString("name"), a.getString("command"), a.optString("icon", "✳")) } }
+        }.getOrElse {
+            listOf(
+                AgentPreset("codex", "Codex", "codex", "✳"),
+                AgentPreset("opencode", "OpenCode", "opencode", "⌘"),
+                AgentPreset("antigravity", "Antigravity", "agy", "🚀"),
+                AgentPreset("shell", "Shell", "bash -l", "\$_"),
+            )
+        }
+        val addAntigravity = !preferences.getBoolean("antigravity_preset_migrated", false)
+        val removeDefaultClaude = !preferences.getBoolean("claude_default_removed", false)
+        if (addAntigravity || removeDefaultClaude) {
+            if (addAntigravity && agents.none { it.id == "antigravity" || it.command.trim() == "agy" }) {
+                agents = agents + AgentPreset("antigravity", "Antigravity", "agy", "🚀")
+            }
+            if (removeDefaultClaude) {
+                agents = agents.filterNot { it == AgentPreset("claude", "Claude Code", "claude", "◈") }
+            }
+            saveAgents(agents)
+            preferences.edit().putBoolean("antigravity_preset_migrated", true)
+                .putBoolean("claude_default_removed", true).apply()
+        }
+        return agents
     }
 
     fun saveAgents(agents: List<AgentPreset>) {

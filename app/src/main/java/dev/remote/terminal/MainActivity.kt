@@ -232,6 +232,7 @@ private class TerminalSessionState(val task: TerminalTask, private val mainHandl
     var autoEnterAwaitingResponse = false
     var lastOutputAt by mutableStateOf(0L)
     var isStreaming by mutableStateOf(false)
+    var codexQuota by mutableStateOf<List<Pair<Int, Int>>?>(null)
     var hostFingerprint by mutableStateOf<String?>(null)
     var resolveHostKey: ((Boolean) -> Unit)? = null
     private var autoEnterRunnable: Runnable? = null
@@ -371,11 +372,13 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 task = task, store = store,
                 onStatus = { value -> mainHandler.post {
                     state.status = value
+                    if (!value.startsWith("已连接")) state.codexQuota = null
                     if (value.contains("重连") || value.contains("恢复 SSH") || value == "已断开" || value.startsWith("远端终端已结束")) {
                         state.onConnectionUnavailable()
                     }
                     if (value.startsWith("已连接")) state.resumeAutoEnter(autoEnterDelaySeconds, autoEnterEnabled)
                 } },
+                onQuota = { quota -> mainHandler.post { state.codexQuota = quota } },
                 onBytes = { bytes ->
                     state.buffer.feed(bytes)
                     mainHandler.post {
@@ -885,8 +888,24 @@ private fun SessionTab(session: TerminalSessionState, selected: Boolean, onClick
         border = androidx.compose.foundation.BorderStroke(1.dp, if (selected) color.copy(alpha = .7f) else Edge)) {
         Row(Modifier.padding(start = 10.dp, end = 5.dp, top = 6.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             Box(Modifier.size(7.dp).alpha(if (session.isStreaming) pulse else 1f).background(color, CircleShape))
-            Box(Modifier.width(20.dp), contentAlignment = Alignment.Center) {
-                if (remainingSeconds > 0) Text(remainingSeconds.toString(), color = color, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+            Box(Modifier.width(if (session.task.agent.id == "codex") 52.dp else 20.dp), contentAlignment = Alignment.Center) {
+                if (remainingSeconds > 0) {
+                    Text(remainingSeconds.toString(), color = color, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                } else if (session.task.agent.id == "codex") {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        val quota = session.codexQuota
+                        if (quota == null) Text("额度 --", color = Muted, fontSize = 9.sp, lineHeight = 10.sp)
+                        else quota.take(2).forEach { (minutes, percent) ->
+                            val period = when {
+                                minutes % 10080 == 0 -> "${minutes / 10080}周"
+                                minutes % 1440 == 0 -> "${minutes / 1440}天"
+                                minutes % 60 == 0 -> "${minutes / 60}时"
+                                else -> "${minutes}分"
+                            }
+                            Text("$period $percent%", color = if (percent <= 20) Coral else Muted, fontSize = 9.sp, lineHeight = 10.sp, maxLines = 1)
+                        }
+                    }
+                }
             }
             Text(session.task.displayName, color = if (selected) White else Muted, fontSize = 11.sp, maxLines = 1)
             IconButton(onClick = onClose, modifier = Modifier.size(20.dp)) { Icon(Icons.Default.Close, null, tint = Muted, modifier = Modifier.size(13.dp)) }
