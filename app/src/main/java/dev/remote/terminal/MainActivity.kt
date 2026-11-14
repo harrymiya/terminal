@@ -63,7 +63,6 @@ import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FolderOpen
-import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.Settings
@@ -115,6 +114,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -168,6 +168,26 @@ private fun detectAutoEnterPromptSignature(text: String): String? {
     return visibleText.lineSequence().filter { it.isNotBlank() }.toList().takeLast(2).joinToString("\n")
 }
 
+private fun alertConfirmation(context: Context) {
+    val audio = context.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
+    if (audio.ringerMode != android.media.AudioManager.RINGER_MODE_SILENT) {
+        val vibrator = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+            context.getSystemService(android.os.VibratorManager::class.java).defaultVibrator
+        } else {
+            @Suppress("DEPRECATION")
+            context.getSystemService(Context.VIBRATOR_SERVICE) as android.os.Vibrator
+        }
+        vibrator.vibrate(android.os.VibrationEffect.createOneShot(350, android.os.VibrationEffect.DEFAULT_AMPLITUDE))
+    }
+    if (audio.ringerMode == android.media.AudioManager.RINGER_MODE_NORMAL) {
+        runCatching {
+            val tone = android.media.ToneGenerator(android.media.AudioManager.STREAM_NOTIFICATION, 80)
+            tone.startTone(android.media.ToneGenerator.TONE_PROP_BEEP, 120)
+            Handler(Looper.getMainLooper()).postDelayed({ tone.release() }, 300)
+        }
+    }
+}
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -187,6 +207,7 @@ private class TerminalSessionState(val task: TerminalTask, private val mainHandl
     var status by mutableStateOf("等待连接")
     var unread by mutableStateOf(false)
     var needsAction by mutableStateOf(false)
+    var confirmationAlerted = false
     var autoEnterEligible by mutableStateOf(false)
     var autoEnterPromptSignature by mutableStateOf<String?>(null)
     var handledPromptSignature by mutableStateOf<String?>(null)
@@ -337,6 +358,12 @@ private fun RemoteTerminalApp(store: LocalStore) {
                         }, 1_150L)
                         val visibleText = state.buffer.visibleTextTail()
                         val hasRequest = ActionRequestRegex.containsMatchIn(visibleText)
+                        if (hasRequest && !state.confirmationAlerted) {
+                            state.confirmationAlerted = true
+                            alertConfirmation(appContext)
+                        } else if (!hasRequest) {
+                            state.confirmationAlerted = false
+                        }
                         val promptSignature = if (hasRequest) detectAutoEnterPromptSignature(visibleText) else null
                         val previousPromptSignature = state.autoEnterPromptSignature
                         state.needsAction = hasRequest
@@ -363,7 +390,10 @@ private fun RemoteTerminalApp(store: LocalStore) {
                         }
                     }
                 },
-                onHostKey = { fingerprint, resolver -> mainHandler.post { state.hostFingerprint = fingerprint; state.resolveHostKey = resolver } },
+                onHostKey = { fingerprint, resolver -> mainHandler.post {
+                    state.hostFingerprint = fingerprint; state.resolveHostKey = resolver
+                    alertConfirmation(appContext)
+                } },
             )
             TerminalConnectionRegistry.register(state.controller)
             sessions.add(state)
@@ -772,13 +802,23 @@ private fun TerminalWorkspace(
     if (sessions.isEmpty()) return
     val pager = rememberPagerState(initialPage = initialIndex.coerceIn(0, sessions.lastIndex), pageCount = { sessions.size })
     val scope = rememberCoroutineScope()
+    val currentSession = sessions[pager.currentPage]
     LaunchedEffect(pager.currentPage, sessions.size) { if (pager.currentPage in sessions.indices) onPageSelected(pager.currentPage) }
     Column(Modifier.fillMaxSize().background(Ink)) {
         Row(Modifier.fillMaxWidth().padding(start = 5.dp, end = 10.dp, top = 5.dp, bottom = 5.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack, modifier = Modifier.size(42.dp)) { Icon(Icons.Default.ArrowBack, null, tint = White, modifier = Modifier.size(20.dp)) }
             Column(Modifier.weight(1f)) {
-                Text("${sessions[pager.currentPage].task.host.icon}  ${sessions[pager.currentPage].task.host.name}", color = White, fontWeight = FontWeight.SemiBold, fontSize = 13.sp, maxLines = 1)
-                Text(sessions[pager.currentPage].status, color = statusTint(sessions[pager.currentPage].status), fontSize = 10.sp, maxLines = 1)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("${currentSession.task.host.icon}  ${currentSession.task.host.name}", color = White, fontWeight = FontWeight.SemiBold, fontSize = 13.sp, maxLines = 1, modifier = Modifier.weight(1f, fill = false))
+                    Spacer(Modifier.width(8.dp))
+                    Text(currentSession.status, color = statusTint(currentSession.status), fontSize = 10.sp, maxLines = 1)
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("${currentSession.task.directory.icon}  ", color = Muted, fontSize = 10.sp, maxLines = 1)
+                    Text(currentSession.task.directory.path, color = Muted, fontSize = 10.sp, maxLines = 1,
+                        overflow = TextOverflow.StartEllipsis, modifier = Modifier.weight(1f, fill = false))
+                    Text("  ·  ${currentSession.task.agent.name}", color = Muted, fontSize = 10.sp, maxLines = 1)
+                }
             }
             IconButton(onClick = onNewTask, modifier = Modifier.size(40.dp)) { Icon(Icons.Default.Add, "新建任务", tint = Mint) }
         }
@@ -851,9 +891,6 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
             view.post { inputMethodManager.showSoftInput(view, InputMethodManager.SHOW_IMPLICIT) }
         }
     }
-    val hideKeyboard: () -> Unit = {
-        inputView?.let { view -> inputMethodManager.hideSoftInputFromWindow(view.windowToken, 0) }
-    }
     // IME transitions resize the canvas over many animation frames. Resize the PTY and
     // backing grid only after the viewport settles, or the agent receives a burst of
     // window-change requests and the local screen repeatedly truncates/recreates rows.
@@ -874,28 +911,32 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
     }
 
     Column(Modifier.fillMaxSize().padding(horizontal = 8.dp, vertical = 5.dp)) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 5.dp, vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(session.task.directory.icon, fontSize = 12.sp); Spacer(Modifier.width(5.dp))
-            Text(session.task.directory.path, color = Muted, fontFamily = FontFamily.Monospace, fontSize = 10.sp, maxLines = 1, modifier = Modifier.weight(1f))
-            Text(session.task.agent.name, color = Mint, fontSize = 10.sp, maxLines = 1)
-            Spacer(Modifier.width(4.dp))
-            Surface(onClick = {
-                if (keyboardVisible) hideKeyboard() else showKeyboard()
-            }, color = PanelRaised, shape = RoundedCornerShape(8.dp), border = androidx.compose.foundation.BorderStroke(1.dp, Edge)) {
-                Box(Modifier.size(width = 34.dp, height = 28.dp), contentAlignment = Alignment.Center) {
-                    Icon(Icons.Default.Keyboard, "打开或收起键盘", tint = if (keyboardVisible) Mint else Blue, modifier = Modifier.size(17.dp))
-                }
-            }
-        }
         Box(Modifier.weight(1f).fillMaxWidth().clip(RoundedCornerShape(11.dp)).background(Color(0xFF070B10))) {
             Canvas(
                 Modifier
                     .fillMaxSize()
                     .onSizeChanged { terminalViewport = it }
                     .pointerInput(isCurrent) {
-                        detectVerticalDragGestures { change, dragAmount ->
+                        var wheelRemainder = 0f
+                        detectVerticalDragGestures(onDragStart = { wheelRemainder = 0f }) { change, dragAmount ->
                             if (!isCurrent) return@detectVerticalDragGestures
                             change.consume()
+                            val paint = Paint().apply {
+                                textSize = 12f * density.density
+                                typeface = Typeface.create("monospace", Typeface.NORMAL)
+                            }
+                            val column = (change.position.x / paint.measureText("M").coerceAtLeast(1f)).toInt() + 1
+                            val row = (change.position.y / lineHeightPx).toInt() + 1
+                            val wheel = session.buffer.mouseWheelSequence(dragAmount > 0, column, row)
+                            if (wheel != null) {
+                                wheelRemainder += dragAmount
+                                while (kotlin.math.abs(wheelRemainder) >= lineHeightPx) {
+                                    val up = wheelRemainder > 0
+                                    session.buffer.mouseWheelSequence(up, column, row)?.let(session.controller::send)
+                                    wheelRemainder += if (up) -lineHeightPx else lineHeightPx
+                                }
+                                return@detectVerticalDragGestures
+                            }
                             val liveTop = latestLiveFirstVisibleRow.toFloat()
                             val currentTop = latestScrollbackTopRow ?: liveTop
                             val nextTop = (currentTop - dragAmount / lineHeightPx).coerceIn(0f, liveTop)

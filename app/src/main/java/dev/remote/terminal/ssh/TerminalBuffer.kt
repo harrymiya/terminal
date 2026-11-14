@@ -38,6 +38,8 @@ class TerminalBuffer(initialColumns: Int = 80, initialRows: Int = 32) {
     private var scrollTop = 0
     private var scrollBottom = rows - 1
     private var applicationCursorKeys = false
+    private var mouseTracking = false
+    private var sgrMouse = false
     private var autoWrap = true
     private var wrapPending = false
     private var originMode = false
@@ -55,6 +57,16 @@ class TerminalBuffer(initialColumns: Int = 80, initialRows: Int = 32) {
     val scrollbackBase: StateFlow<Long> = mutableScrollbackBase
     private val mutableCursor = MutableStateFlow(TerminalCursor(x, y, cursorVisible))
     val cursor: StateFlow<TerminalCursor> = mutableCursor
+
+    /** Returns a wheel report only while the remote application has enabled mouse tracking. */
+    @Synchronized fun mouseWheelSequence(up: Boolean, column: Int, row: Int): String? {
+        if (!mouseTracking) return null
+        val button = if (up) 64 else 65
+        val col = column.coerceIn(1, columns)
+        val line = row.coerceIn(1, rows)
+        return if (sgrMouse) "\u001b[<$button;$col;${line}M"
+        else "\u001b[M${(button + 32).toChar()}${(col.coerceAtMost(223) + 32).toChar()}${(line.coerceAtMost(223) + 32).toChar()}"
+    }
 
     @Synchronized fun cursorSequence(direction: Char, control: Boolean = false, alt: Boolean = false): String {
         if (!control && !alt && applicationCursorKeys) return "\u001bO$direction"
@@ -176,7 +188,7 @@ class TerminalBuffer(initialColumns: Int = 80, initialRows: Int = 32) {
                 scrollBottom = (values.getOrNull(1) ?: rows).minus(1).coerceIn(scrollTop, rows - 1)
                 x = 0; y = 0
             }
-            'S' -> repeat(param(0)) { scrollUp() }
+            'S' -> repeat(param(0)) { scrollUp(keepHistory = scrollTop == 0 && !inAlternateScreen) }
             'T' -> repeat(param(0)) { scrollDown() }
             '@' -> repeat(param(0)) { insertCharacter() }
             'P' -> repeat(param(0)) { deleteCharacter() }
@@ -205,6 +217,8 @@ class TerminalBuffer(initialColumns: Int = 80, initialRows: Int = 32) {
                 val enable = command == 'h'
                 if (25 in values) cursorVisible = enable
                 if (1 in values) applicationCursorKeys = enable
+                if (values.any { it == 1000 || it == 1002 || it == 1003 }) mouseTracking = enable
+                if (1006 in values) sgrMouse = enable
                 if (7 in values) autoWrap = enable
                 if (6 in values) { originMode = enable; x = 0; y = if (enable) scrollTop else 0 }
                 when {
