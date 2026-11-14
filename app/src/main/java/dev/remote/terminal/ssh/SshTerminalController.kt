@@ -159,6 +159,7 @@ class SshTerminalController(
                 connectedAt = 0L
                 onStatus(if (retry == 0) "正在连接 ${task.host.address}:${task.host.port}" else "连接中断 · 正在重连 ${retry}…")
                 val jsch = JSch()
+                store.addSshIdentity(jsch)
                 jsch.hostKeyRepository = TrustedHostRepository()
                 val session = jsch.getSession(task.host.username, task.host.address, task.host.port)
                 sessionRef.set(session)

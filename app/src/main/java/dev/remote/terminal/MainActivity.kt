@@ -1,6 +1,8 @@
 package dev.remote.terminal
 
 import android.content.Context
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -522,6 +524,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
         ) }
 
         if (showSettings) AutoEnterSettingsDialog(
+            store = store,
             enabled = autoEnterEnabled,
             delaySeconds = autoEnterDelaySeconds,
             onEnabledChange = { enabled ->
@@ -1176,19 +1179,48 @@ private fun statusTint(status: String): Color = when {
 
 @Composable
 private fun AutoEnterSettingsDialog(
+    store: LocalStore,
     enabled: Boolean,
     delaySeconds: Int,
     onEnabledChange: (Boolean) -> Unit,
     onDelaySecondsChange: (Int) -> Unit,
     onDismiss: () -> Unit,
 ) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var publicKey by remember { mutableStateOf(store.sshPublicKey()) }
+    var generating by remember { mutableStateOf(false) }
+    var keyMessage by remember { mutableStateOf("") }
     var draftDelay by remember(delaySeconds) { mutableStateOf(delaySeconds.toFloat()) }
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = Panel,
-        title = { Text("自动回车设置", color = White, fontWeight = FontWeight.SemiBold) },
+        title = { Text("设置", color = White, fontWeight = FontWeight.SemiBold) },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("SSH 密钥", color = White, fontWeight = FontWeight.SemiBold)
+                Text("生成本机密钥后，将公钥添加到服务器用户的 ~/.ssh/authorized_keys。连接时会优先尝试密钥认证。", color = Muted, fontSize = 12.sp)
+                if (publicKey == null) {
+                    FilledTonalButton(enabled = !generating, onClick = {
+                        generating = true
+                        scope.launch {
+                            val result = withContext(Dispatchers.IO) { runCatching { store.generateSshKey() } }
+                            result.onSuccess { publicKey = it; keyMessage = "密钥已生成" }
+                                .onFailure { keyMessage = "生成失败：${it.localizedMessage ?: "未知错误"}" }
+                            generating = false
+                        }
+                    }) { Text(if (generating) "正在生成…" else "生成本机密钥") }
+                } else {
+                    Text(publicKey.orEmpty(), color = Muted, fontSize = 11.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                    FilledTonalButton(onClick = {
+                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        clipboard.setPrimaryClip(ClipData.newPlainText("SSH 公钥", publicKey.orEmpty()))
+                        keyMessage = "公钥已复制"
+                    }) { Text("复制公钥") }
+                }
+                if (keyMessage.isNotEmpty()) Text(keyMessage, color = Mint, fontSize = 12.sp)
+                Divider()
+                Text("自动回车", color = White, fontWeight = FontWeight.SemiBold)
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     Column(Modifier.weight(1f)) {
                         Text("对默认“是”或选中允许的确认提示自动回车", color = White, fontSize = 13.sp)

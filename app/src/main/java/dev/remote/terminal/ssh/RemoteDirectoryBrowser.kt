@@ -18,7 +18,7 @@ class HostKeyApprovalRequiredException(val fingerprint: String) : Exception("需
 object RemoteDirectoryBrowser {
     fun listDirectories(host: HostProfile, store: LocalStore, requestedPath: String): RemoteDirectoryListing {
         val hostKeys = BrowserHostKeyRepository(host, store)
-        val jsch = JSch().apply { hostKeyRepository = hostKeys }
+        val jsch = JSch().apply { hostKeyRepository = hostKeys; store.addSshIdentity(this) }
         val session = jsch.getSession(host.username, host.address, host.port)
         var channel: ChannelSftp? = null
         try {

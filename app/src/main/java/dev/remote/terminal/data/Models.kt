@@ -4,6 +4,9 @@ import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import com.jcraft.jsch.JSch
+import com.jcraft.jsch.KeyPair
+import java.io.ByteArrayOutputStream
 import org.json.JSONArray
 import org.json.JSONObject
 import java.security.KeyStore
@@ -48,6 +51,33 @@ data class TerminalTask(
 class LocalStore(context: Context) {
     private val preferences = context.getSharedPreferences("remote_dev_terminal", Context.MODE_PRIVATE)
     private val vault = PasswordVault()
+
+    fun sshPublicKey(): String? = preferences.getString("ssh_public_key", null)
+
+    @Synchronized
+    fun generateSshKey(): String {
+        sshPublicKey()?.let { return it }
+        val pair = KeyPair.genKeyPair(JSch(), KeyPair.RSA, 3072)
+        try {
+            val privateBytes = ByteArrayOutputStream().also { pair.writePrivateKey(it) }.toByteArray()
+            val publicBytes = ByteArrayOutputStream().also { pair.writePublicKey(it, "remote-dev-terminal") }.toByteArray()
+            val publicKey = String(publicBytes, Charsets.UTF_8).trim()
+            val saved = preferences.edit().putString("ssh_private_key", vault.encrypt(String(privateBytes, Charsets.UTF_8)))
+                .putString("ssh_public_key", publicKey).commit()
+            check(saved) { "无法保存 SSH 密钥" }
+            privateBytes.fill(0)
+            return publicKey
+        } finally {
+            pair.dispose()
+        }
+    }
+
+    fun addSshIdentity(jsch: JSch) {
+        val encrypted = preferences.getString("ssh_private_key", null) ?: return
+        val privateKey = vault.decrypt(encrypted)
+        check(privateKey.isNotEmpty()) { "无法读取本机 SSH 私钥" }
+        jsch.addIdentity("remote-dev-terminal", privateKey.toByteArray(Charsets.UTF_8), null, null)
+    }
 
     fun loadHosts(): List<HostProfile> = runCatching {
         val items = JSONArray(preferences.getString("hosts", "[]"))
