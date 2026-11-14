@@ -25,7 +25,9 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.rememberScrollableState
+import androidx.compose.foundation.gestures.scrollable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -889,6 +891,9 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
     val latestLiveFirstVisibleRow by rememberUpdatedState(liveFirstVisibleRow)
     val latestScrollbackTopRow by rememberUpdatedState(scrollbackTopRow)
     val hasScrollback by rememberUpdatedState(scrollback.isNotEmpty())
+    LaunchedEffect(liveFirstVisibleRow) {
+        scrollbackTopRow = scrollbackTopRow?.let { if (it >= liveFirstVisibleRow) null else it }
+    }
     LaunchedEffect(scrollbackBase) {
         val discardedRows = (scrollbackBase - observedScrollbackBase).coerceAtLeast(0).toInt()
         if (discardedRows > 0) {
@@ -924,39 +929,48 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
         }
     }
 
+    var wheelRemainder by remember(session.task.id) { mutableStateOf(0f) }
+    var wheelPosition by remember(session.task.id) { mutableStateOf(androidx.compose.ui.geometry.Offset.Zero) }
+    val terminalScroll = rememberScrollableState { delta ->
+        if (!isCurrent) return@rememberScrollableState 0f
+        val liveTop = latestLiveFirstVisibleRow.toFloat()
+        val currentTop = (latestScrollbackTopRow ?: liveTop).coerceIn(0f, liveTop)
+        val charWidth = Paint().apply {
+            textSize = 12f * density.density
+            typeface = Typeface.create("monospace", Typeface.NORMAL)
+        }.measureText("M").coerceAtLeast(1f)
+        val column = (wheelPosition.x / charWidth).toInt() + 1
+        val row = (wheelPosition.y / lineHeightPx).toInt() + 1
+        val wheel = session.buffer.mouseWheelSequence(delta > 0, column, row)
+        if (wheel != null && !hasScrollback && latestScrollbackTopRow == null) {
+            wheelRemainder += delta
+            while (kotlin.math.abs(wheelRemainder) >= lineHeightPx) {
+                val up = wheelRemainder > 0
+                session.buffer.mouseWheelSequence(up, column, row)?.let(session.controller::send)
+                wheelRemainder += if (up) -lineHeightPx else lineHeightPx
+            }
+            delta
+        } else {
+            val nextTop = (currentTop - delta / lineHeightPx).coerceIn(0f, liveTop)
+            scrollbackTopRow = if (nextTop >= liveTop) null else nextTop
+            (currentTop - nextTop) * lineHeightPx
+        }
+    }
     Column(Modifier.fillMaxSize().padding(horizontal = 8.dp, vertical = 5.dp)) {
         Box(Modifier.weight(1f).fillMaxWidth().clip(RoundedCornerShape(11.dp)).background(Color(0xFF070B10))) {
             Canvas(
                 Modifier
                     .fillMaxSize()
                     .onSizeChanged { terminalViewport = it }
-                    .pointerInput(isCurrent) {
-                        var wheelRemainder = 0f
-                        detectVerticalDragGestures(onDragStart = { wheelRemainder = 0f }) { change, dragAmount ->
-                            if (!isCurrent) return@detectVerticalDragGestures
-                            change.consume()
-                            val paint = Paint().apply {
-                                textSize = 12f * density.density
-                                typeface = Typeface.create("monospace", Typeface.NORMAL)
+                    .pointerInput(session.task.id) {
+                        awaitPointerEventScope {
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                event.changes.firstOrNull()?.let { wheelPosition = it.position }
                             }
-                            val column = (change.position.x / paint.measureText("M").coerceAtLeast(1f)).toInt() + 1
-                            val row = (change.position.y / lineHeightPx).toInt() + 1
-                            val wheel = session.buffer.mouseWheelSequence(dragAmount > 0, column, row)
-                            if (wheel != null && !hasScrollback && latestScrollbackTopRow == null) {
-                                wheelRemainder += dragAmount
-                                while (kotlin.math.abs(wheelRemainder) >= lineHeightPx) {
-                                    val up = wheelRemainder > 0
-                                    session.buffer.mouseWheelSequence(up, column, row)?.let(session.controller::send)
-                                    wheelRemainder += if (up) -lineHeightPx else lineHeightPx
-                                }
-                                return@detectVerticalDragGestures
-                            }
-                            val liveTop = latestLiveFirstVisibleRow.toFloat()
-                            val currentTop = latestScrollbackTopRow ?: liveTop
-                            val nextTop = (currentTop - dragAmount / lineHeightPx).coerceIn(0f, liveTop)
-                            scrollbackTopRow = if (nextTop >= liveTop) null else nextTop
                         }
                     }
+                    .scrollable(terminalScroll, Orientation.Vertical, enabled = isCurrent)
                     .pointerInput(isCurrent, inputView) {
                         detectTapGestures(onTap = { if (isCurrent) showKeyboard() })
                     },
