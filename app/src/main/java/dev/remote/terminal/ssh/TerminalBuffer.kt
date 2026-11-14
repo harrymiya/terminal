@@ -38,6 +38,7 @@ class TerminalBuffer(initialColumns: Int = 80, initialRows: Int = 32) {
     private var scrollTop = 0
     private var scrollBottom = rows - 1
     private var applicationCursorKeys = false
+    private var bracketedPaste = false
     private var mouseTracking = false
     private var sgrMouse = false
     private var autoWrap = true
@@ -59,6 +60,10 @@ class TerminalBuffer(initialColumns: Int = 80, initialRows: Int = 32) {
     val cursor: StateFlow<TerminalCursor> = mutableCursor
 
     @Synchronized fun isAlternateScreen(): Boolean = inAlternateScreen
+
+    @Synchronized fun pasteSequence(text: String): String =
+        if (bracketedPaste) "\u001b[200~" + text.replace("\u001b[201~", "") + "\u001b[201~"
+        else text.replace("\r\n", "\r").replace('\n', '\r')
 
     /** Returns a wheel report only while the remote application has enabled mouse tracking. */
     @Synchronized fun mouseWheelSequence(up: Boolean, column: Int, row: Int): String? {
@@ -248,6 +253,7 @@ class TerminalBuffer(initialColumns: Int = 80, initialRows: Int = 32) {
                 val enable = command == 'h'
                 if (25 in values) cursorVisible = enable
                 if (1 in values) applicationCursorKeys = enable
+                if (2004 in values) bracketedPaste = enable
                 if (values.any { it == 1000 || it == 1002 || it == 1003 }) mouseTracking = enable
                 if (1006 in values) sgrMouse = enable
                 if (7 in values) autoWrap = enable

@@ -28,6 +28,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.rememberScrollableState
 import androidx.compose.foundation.gestures.scrollable
@@ -140,6 +141,7 @@ import dev.remote.terminal.ssh.SshTerminalController
 import dev.remote.terminal.ssh.HostKeyApprovalRequiredException
 import dev.remote.terminal.ssh.RemoteDirectoryBrowser
 import dev.remote.terminal.ssh.RemoteDirectoryEntry
+import dev.remote.terminal.ssh.TerminalCell
 import dev.remote.terminal.ssh.TerminalBuffer
 import dev.remote.terminal.ssh.TerminalConnectionRegistry
 import dev.remote.terminal.ssh.TerminalKeepAliveService
@@ -913,6 +915,15 @@ private fun SessionTab(session: TerminalSessionState, selected: Boolean, onClick
     }
 }
 
+private data class TerminalSelection(
+    val rows: List<List<TerminalCell>>,
+    val firstRow: Float,
+    val anchorRow: Int,
+    val anchorColumn: Int,
+    val endRow: Int,
+    val endColumn: Int,
+)
+
 @Composable
 private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
     val scope = rememberCoroutineScope()
@@ -926,6 +937,8 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
     val inputMethodManager = remember(context) { context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager }
     var terminalViewport by remember(session.task.id) { mutableStateOf(androidx.compose.ui.unit.IntSize.Zero) }
     var inputView by remember(session.task.id) { mutableStateOf<EditText?>(null) }
+    var selection by remember(session.task.id) { mutableStateOf<TerminalSelection?>(null) }
+    var selectionMenu by remember(session.task.id) { mutableStateOf(false) }
     var ctrlArmed by remember(session.task.id) { mutableStateOf(false) }
     var altArmed by remember(session.task.id) { mutableStateOf(false) }
     var scrollbackTopRow by remember(session.task.id) { mutableStateOf<Float?>(null) }
@@ -960,6 +973,11 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
             textSize = 12f * density.density
             typeface = Typeface.create("monospace", Typeface.NORMAL)
         }.measureText("M").coerceAtLeast(1f)
+    }
+    fun selectionPosition(position: androidx.compose.ui.geometry.Offset, firstRow: Float, rows: List<List<TerminalCell>>): Pair<Int, Int> {
+        val row = (firstRow + position.y / lineHeightPx).toInt().coerceIn(0, (rows.size - 1).coerceAtLeast(0))
+        val column = (position.x / charWidthPx).toInt().coerceIn(0, ((rows.getOrNull(row)?.size ?: 1) - 1).coerceAtLeast(0))
+        return row to column
     }
     val viewportColumns = (terminalViewport.width / charWidthPx).toInt().coerceIn(24, 200)
     val viewportRows = (terminalViewport.height / lineHeightPx).toInt().coerceIn(8, 100)
@@ -1022,9 +1040,28 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
                             }
                         }
                     }
-                    .scrollable(terminalScroll, Orientation.Vertical, enabled = isCurrent)
-                    .pointerInput(isCurrent, inputView) {
-                        detectTapGestures(onTap = { if (isCurrent) showKeyboard() })
+                    .scrollable(terminalScroll, Orientation.Vertical, enabled = isCurrent && selection == null)
+                    .pointerInput(isCurrent, inputView, allRows, scrollbackTopRow, terminalViewport) {
+                        detectTapGestures(
+                            onTap = { if (isCurrent) { selection = null; selectionMenu = false; showKeyboard() } },
+                            onLongPress = { position ->
+                                if (isCurrent && allRows.isNotEmpty()) {
+                                    val first = (scrollbackTopRow ?: (allRows.size - terminalViewport.height / lineHeightPx).coerceAtLeast(0f))
+                                    val (row, col) = selectionPosition(position, first, allRows)
+                                    selection = TerminalSelection(allRows, first, row, col, row, col)
+                                    selectionMenu = true
+                                }
+                            },
+                        )
+                    }
+                    .pointerInput(selection != null, isCurrent) {
+                        if (selection != null && isCurrent) detectDragGestures { change, _ ->
+                            selection?.let { current ->
+                                val (row, col) = selectionPosition(change.position, current.firstRow, current.rows)
+                                selection = current.copy(endRow = row, endColumn = col)
+                                change.consume()
+                            }
+                        }
                     },
             ) {
                 val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -1036,20 +1073,33 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
                 val visibleCols = (size.width / charWidth).toInt().coerceIn(24, 200)
                 val visibleRows = (size.height / lineHeight).toInt().coerceIn(8, 100)
                 // Anchor the live screen to the moving bottom edge at pixel precision.
-                val liveFirstRow = (allRows.size - size.height / lineHeight).coerceAtLeast(0f)
-                val firstVisibleRow = (scrollbackTopRow ?: liveFirstRow).coerceIn(0f, liveFirstRow)
+                val selected = selection
+                val displayRows = selected?.rows ?: allRows
+                val liveFirstRow = (displayRows.size - size.height / lineHeight).coerceAtLeast(0f)
+                val firstVisibleRow = selected?.firstRow ?: (scrollbackTopRow ?: liveFirstRow).coerceIn(0f, liveFirstRow)
                 val firstVisibleIndex = firstVisibleRow.toInt()
                 drawIntoCanvas { canvas ->
                     val native = canvas.nativeCanvas
-                    val lastVisibleRow = minOf(allRows.size, firstVisibleIndex + visibleRows + 2)
+                    val lastVisibleRow = minOf(displayRows.size, firstVisibleIndex + visibleRows + 2)
                     for (screenRow in firstVisibleIndex until lastVisibleRow) {
                         val drawRow = screenRow - firstVisibleRow
-                        val line = allRows[screenRow]
+                        val line = displayRows[screenRow]
                         for (c in 0 until minOf(line.size, visibleCols)) {
                             val cell = line[c]
                             if (cell.background != 0) {
                                 paint.color = android.graphics.Color.parseColor("#" + terminalColor(cell.background).toString(16).takeLast(6))
                                 native.drawRect(c * charWidth, drawRow * lineHeight, (c + 1) * charWidth, (drawRow + 1) * lineHeight, paint)
+                            }
+                        }
+                        if (selected != null) {
+                            val a = selected.anchorRow * viewportColumns + selected.anchorColumn
+                            val b = selected.endRow * viewportColumns + selected.endColumn
+                            val start = minOf(a, b)
+                            val end = maxOf(a, b)
+                            paint.color = Blue.copy(alpha = .45f).toArgb()
+                            for (c in 0 until minOf(line.size, visibleCols)) {
+                                if (screenRow * viewportColumns + c in start..end)
+                                    native.drawRect(c * charWidth, drawRow * lineHeight, (c + 1) * charWidth, (drawRow + 1) * lineHeight, paint)
                             }
                         }
                         // Paint the whole row's background first: a wide glyph extends
@@ -1063,7 +1113,7 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
                         }
                     }
                     val cursorDisplayRow = scrollback.size + terminalCursor.row - firstVisibleRow
-                    if (terminalCursor.visible && terminalCursor.column < visibleCols && cursorDisplayRow > -1f && cursorDisplayRow * lineHeight < size.height) {
+                    if (selected == null && terminalCursor.visible && terminalCursor.column < visibleCols && cursorDisplayRow > -1f && cursorDisplayRow * lineHeight < size.height) {
                         val left = terminalCursor.column * charWidth
                         val top = cursorDisplayRow * lineHeight
                         paint.color = Mint.copy(alpha = .72f).toArgb()
@@ -1074,6 +1124,33 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
                             native.drawText(cursorCell.text, left, top + lineHeight - 2f, paint)
                         }
                     }
+                }
+            }
+            if (selectionMenu && selection != null) {
+                Row(Modifier.align(Alignment.TopCenter).background(PanelRaised, RoundedCornerShape(8.dp)).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(onClick = {
+                        val current = selection ?: return@TextButton
+                        val a = current.anchorRow * viewportColumns + current.anchorColumn
+                        val b = current.endRow * viewportColumns + current.endColumn
+                        val start = minOf(a, b); val end = maxOf(a, b)
+                        val text = (start / viewportColumns..end / viewportColumns).joinToString("\n") { row ->
+                            val cells = current.rows.getOrNull(row).orEmpty()
+                            val left = if (row == start / viewportColumns) start % viewportColumns else 0
+                            val right = if (row == end / viewportColumns) end % viewportColumns + 1 else cells.size
+                            cells.subList(left.coerceIn(0, cells.size), right.coerceIn(left.coerceIn(0, cells.size), cells.size)).joinToString("") { it.text }.trimEnd()
+                        }
+                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        clipboard.setPrimaryClip(ClipData.newPlainText("终端文本", text))
+                        selection = null; selectionMenu = false
+                    }) { Text("复制") }
+                    TextButton(onClick = {
+                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        val clip = clipboard.primaryClip
+                        val text = if (clip != null && clip.itemCount > 0) clip.getItemAt(0).coerceToText(context)?.toString().orEmpty() else ""
+                        if (text.isNotEmpty()) { session.controller.send(session.buffer.pasteSequence(text)); session.clearAttention() }
+                        selection = null; selectionMenu = false; showKeyboard()
+                    }) { Text("粘贴") }
+                    TextButton(onClick = { selection = null; selectionMenu = false }) { Text("取消") }
                 }
             }
         }
