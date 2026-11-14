@@ -263,7 +263,11 @@ class SshTerminalController(
         val agentInvocation = "$shell -l -i -c ${shellQuote(task.agent.command)}"
         val keepSessionCommand = "$agentInvocation; agent_exit_code=${'$'}?; printf '\\n[Agent exited with status %s. Shell remains open.]\\n' \"${'$'}agent_exit_code\"; exec $shell -l -i"
         val tmuxCommand = shellQuote(keepSessionCommand)
-        return "cd -- $dir && if command -v tmux >/dev/null 2>&1; then tmux new-session -A -D -s $sessionName -c $dir $tmuxCommand; elif command -v screen >/dev/null 2>&1; then screen -D -RR -S $sessionName sh -lc $tmuxCommand; else printf '\\n[提示] 未找到 tmux 或 screen，断线后无法保留 CLI 会话\\n'; $agentInvocation; fi\n"
+        return "cd -- $dir && if command -v tmux >/dev/null 2>&1; then " +
+            "(tmux has-session -t $sessionName 2>/dev/null || tmux new-session -d -s $sessionName -c $dir $tmuxCommand) && " +
+            "tmux set-option -t $sessionName mouse on && tmux attach-session -d -t $sessionName; " +
+            "elif command -v screen >/dev/null 2>&1; then screen -D -RR -S $sessionName sh -lc $tmuxCommand; " +
+            "else printf '\\n[提示] 未找到 tmux 或 screen，断线后无法保留 CLI 会话\\n'; $agentInvocation; fi\n"
     }
 
     private fun shellQuote(value: String): String = "'" + value.replace("'", "'\\''") + "'"

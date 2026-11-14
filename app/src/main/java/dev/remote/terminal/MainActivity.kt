@@ -968,7 +968,7 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
             wheelRemainder += delta
             // Arrow keys navigate the prompt's input history in agent TUIs. When
             // mouse reporting is unavailable, use page keys to scroll their transcript.
-            val scrollStep = if (wheel != null) lineHeightPx else (terminalViewport.height * .75f).coerceAtLeast(lineHeightPx * 4)
+            val scrollStep = if (wheel != null) lineHeightPx else lineHeightPx * 2
             while (kotlin.math.abs(wheelRemainder) >= scrollStep) {
                 val up = wheelRemainder > 0
                 val sequence = session.buffer.mouseWheelSequence(up, column, row)
