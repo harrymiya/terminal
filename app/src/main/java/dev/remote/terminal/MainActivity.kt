@@ -977,7 +977,7 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
         }
     }
     Column(Modifier.fillMaxSize().padding(horizontal = 8.dp, vertical = 5.dp)) {
-        Box(Modifier.weight(1f).fillMaxWidth().clip(RoundedCornerShape(11.dp)).background(Color(0xFF070B10))) {
+        Box(Modifier.weight(1f).fillMaxWidth().background(Color(0xFF070B10))) {
             Canvas(
                 Modifier
                     .fillMaxSize()
@@ -1107,8 +1107,8 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
 
         Column(Modifier.fillMaxWidth().padding(top = 5.dp, bottom = 2.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             val keys = listOf(
-                listOf("ESC" to "\u001b", "/" to "/", "−" to "-", "SESS" to "/sessions", "PG↑" to "\u001b[5~", "HOME" to "", "↑" to "", "END" to ""),
-                listOf("TAB" to "\t", "CTRL" to "", "ALT" to "", "RESU" to "/resume", "PG↓" to "\u001b[6~", "←" to "", "↓" to "", "→" to ""),
+                listOf("ESC" to "\u001b", "/" to "/", "−" to "-", "SESS" to "/sessions\r", "PG↑" to "\u001b[5~", "HOME" to "", "↑" to "", "END" to ""),
+                listOf("TAB" to "\t", "CTRL" to "", "ALT" to "", "RESU" to "/resume\r", "PG↓" to "\u001b[6~", "←" to "", "↓" to "", "→" to ""),
             )
             keys.forEach { row ->
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
