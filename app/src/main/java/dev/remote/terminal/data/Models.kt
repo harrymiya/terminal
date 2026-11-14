@@ -98,7 +98,7 @@ class LocalStore(context: Context) {
         preferences.edit().putString("agents", array.toString()).apply()
     }
 
-    fun loadAutoEnterEnabled(): Boolean = preferences.getBoolean("auto_enter_enabled", true)
+    fun loadAutoEnterEnabled(): Boolean = preferences.getBoolean("auto_enter_enabled", false)
 
     fun saveAutoEnterEnabled(enabled: Boolean) {
         preferences.edit().putBoolean("auto_enter_enabled", enabled).apply()

@@ -33,16 +33,20 @@ class SshTerminalController(
         val input: OutputStream,
     )
 
+    private data class PendingInput(
+        val bytes: ByteArray,
+        val expectedConnection: ActiveConnection? = null,
+    )
+
     private val running = AtomicBoolean(false)
     private val activeConnection = AtomicReference<ActiveConnection?>(null)
     private val sessionRef = AtomicReference<Session?>(null)
     private val channelRef = AtomicReference<ChannelShell?>(null)
-    private val outgoing = LinkedBlockingDeque<ByteArray>()
+    private val outgoing = LinkedBlockingDeque<PendingInput>()
     private val pendingDisconnectReason = AtomicReference<String?>(null)
     private val networkGeneration = AtomicLong(0)
     private val retrySignal = Semaphore(0)
     private val writeLock = Any()
-    @Volatile private var hasConnected = false
     @Volatile private var columns = 80
     @Volatile private var rows = 30
 
@@ -54,7 +58,14 @@ class SshTerminalController(
 
     fun send(text: String) {
         if (text.isEmpty() || !running.get()) return
-        outgoing.offerLast(text.toByteArray(Charsets.UTF_8))
+        outgoing.offerLast(PendingInput(text.toByteArray(Charsets.UTF_8)))
+    }
+
+    /** Queue input only for the currently active SSH connection; never replay it after reconnect. */
+    fun sendIfConnected(text: String): Boolean {
+        if (text.isEmpty() || !running.get()) return false
+        val connection = activeConnection.get() ?: return false
+        return outgoing.offerLast(PendingInput(text.toByteArray(Charsets.UTF_8), connection))
     }
 
     fun onNetworkChanged() = resetConnectionForNetwork(force = true)
@@ -73,7 +84,7 @@ class SshTerminalController(
         }
         if (!shouldReconnect) return
         retrySignal.release()
-        if (!hasConnected) onStatus("网络已变化 · 正在连接")
+        onStatus("网络已变化 · 正在恢复 SSH 会话")
         if (connection != null) {
             runCatching { connection.channel.disconnect() }
             runCatching { connection.session.disconnect() }
@@ -121,13 +132,15 @@ class SshTerminalController(
                     Thread.sleep(40)
                     continue
                 }
-                val bytes = outgoing.pollFirst(100, TimeUnit.MILLISECONDS) ?: continue
+                val pendingInput = outgoing.pollFirst(100, TimeUnit.MILLISECONDS) ?: continue
                 synchronized(writeLock) {
                     if (activeConnection.get() !== connection) {
-                        outgoing.offerFirst(bytes)
+                        if (pendingInput.expectedConnection == null) outgoing.offerFirst(pendingInput)
+                    } else if (pendingInput.expectedConnection != null && pendingInput.expectedConnection !== connection) {
+                        // Auto-confirm input belongs to the old connection and must not reach a resumed session.
                     } else {
                         try {
-                            connection.input.write(bytes)
+                            connection.input.write(pendingInput.bytes)
                             connection.input.flush()
                         } catch (error: Exception) {
                             val reason = error.message?.takeIf { it.isNotBlank() }
@@ -136,7 +149,7 @@ class SshTerminalController(
                                 // A failed write may have been partial. Do not replay queued commands.
                                 outgoing.clear()
                                 pendingDisconnectReason.set("输入发送失败：$reason")
-                                if (!hasConnected) onStatus("输入发送失败：$reason · 正在恢复 SSH")
+                                onStatus("输入发送失败：$reason · 正在恢复 SSH")
                                 retrySignal.release()
                                 runCatching { connection.channel.disconnect() }
                                 runCatching { connection.session.disconnect() }
@@ -156,7 +169,7 @@ class SshTerminalController(
         while (running.get()) {
             try {
                 connectedAt = 0L
-                if (!hasConnected) onStatus(if (retry == 0) "正在连接 ${task.host.address}:${task.host.port}" else "连接中断 · 正在重连 ${retry}…")
+                onStatus(if (retry == 0) "正在连接 ${task.host.address}:${task.host.port}" else "连接中断 · 正在重连 ${retry}…")
                 val attemptNetworkGeneration = networkGeneration.get()
                 val jsch = JSch()
                 jsch.hostKeyRepository = TrustedHostRepository()
@@ -188,7 +201,6 @@ class SshTerminalController(
                     input.flush()
                     pendingDisconnectReason.set(null)
                     activeConnection.set(connection)
-                    hasConnected = true
                 }
                 connectedAt = SystemClock.elapsedRealtime()
                 onStatus("已连接 · ${task.host.username}@${task.host.address}")
@@ -239,7 +251,7 @@ class SshTerminalController(
                 if (!running.get()) break
                 retry++
                 val backoff = (1_000L shl (retry - 1).coerceAtMost(4)).coerceAtMost(15_000L)
-                if (!hasConnected) onStatus("$reason · ${backoff / 1_000L} 秒后重连")
+                onStatus("$reason · ${backoff / 1_000L} 秒后重连")
                 awaitRetry(backoff)
             }
         }
