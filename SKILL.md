@@ -42,6 +42,8 @@ APK_RELEASE_UPDATE_LOG="Remote Dev Terminal 更新说明" bash scripts/upload-ap
 
 也可以通过 `APK_RELEASE_TOKEN_FILE` 指定其他 token 文件。不要把 token 写进源码、命令记录或文档，也不要打印 token。凭据未配置时，先完成打包，再向用户说明需要配置凭据才能上传。
 
+本机已将管理端上传凭据另存到本项目的 `config/app-release-upload.token`（Git 忽略文件），后续优先直接使用，无须重复向用户索要。若文件缺失，先检查 `/home/agent/code/jiankang_app_uniapp/config/app-release-upload.token` 是否存在且非空；存在时可将其复制到本项目的上述路径并设置权限为 `600`，或通过 `APK_RELEASE_TOKEN_FILE` 指向它。只检查文件状态，不输出凭据内容；上述位置均不可用时再告知用户。
+
 ## 上传行为
 
 - 上传目标固定为 APP 测试管理端的 APK 上传接口，地址配置在 `scripts/upload-apk-test.sh` 中。

@@ -99,7 +99,34 @@ class TerminalBuffer(initialColumns: Int = 80, initialRows: Int = 32) {
             scrollbackRows.clear()
             resizedHistory.forEach(scrollbackRows::addLast)
         }
-        if (height < rows) {
+        if (!inAlternateScreen && height != rows) {
+            // Preserve primary-screen rows in history while the viewport changes.
+            resizeRestore = null
+            resizeRestoreOffset = 0
+            if (height < rows) {
+                val shift = (y - height + 1).coerceIn(0, rows - height)
+                repeat(shift) { index -> appendHistory(cells[index].toList()) }
+                cells = Array(height) { r ->
+                    Array(width) { c -> cells[r + shift].getOrElse(c) { TerminalCell() } }
+                }
+                y = (y - shift).coerceAtLeast(0)
+                savedY = (savedY - shift).coerceAtLeast(0)
+            } else {
+                val restored = minOf(height - rows, scrollbackRows.size)
+                val history = ArrayList<List<TerminalCell>>(restored)
+                repeat(restored) { history.add(scrollbackRows.removeLast()) }
+                history.reverse()
+                val oldCells = cells
+                cells = Array(height) { r ->
+                    Array(width) { c ->
+                        if (r < restored) history[r].getOrElse(c) { TerminalCell() }
+                        else oldCells.getOrNull(r - restored)?.getOrNull(c) ?: TerminalCell()
+                    }
+                }
+                y += restored
+                savedY += restored
+            }
+        } else if (height < rows) {
             val shift = (y - height + 1).coerceIn(0, rows - height)
             if (sameWidth) {
                 if (resizeRestore == null) resizeRestore = captureScreen()
@@ -144,6 +171,7 @@ class TerminalBuffer(initialColumns: Int = 80, initialRows: Int = 32) {
                 1 -> when (char) {
                     '[' -> { parser = 2; escape.setLength(0) }
                     ']' -> parser = 3
+                    '(', ')', '*', '+', '-', '.', '/' -> parser = 5
                     'D' -> { lineFeed(); parser = 0 }
                     'E' -> { x = 0; lineFeed(); parser = 0 }
                     'M' -> { reverseIndex(); parser = 0 }
@@ -154,6 +182,7 @@ class TerminalBuffer(initialColumns: Int = 80, initialRows: Int = 32) {
                 2 -> if (char in '@'..'~') { executeCsi(escape.toString(), char); parser = 0 } else escape.append(char)
                 3 -> when (char) { '\u0007' -> parser = 0; '\u001b' -> parser = 4 }
                 4 -> parser = if (char == '\\') 0 else 3
+                5 -> parser = 0 // Character-set designation consumes one more byte.
                 else -> when (char) {
                     '\u001b' -> parser = 1
                     '\r' -> { x = 0; wrapPending = false }
@@ -169,7 +198,7 @@ class TerminalBuffer(initialColumns: Int = 80, initialRows: Int = 32) {
 
     private fun executeCsi(raw: String, command: Char) {
         wrapPending = false
-        val values = raw.trimStart('?').trimStart('>').split(';').mapNotNull { it.toIntOrNull() }
+        val values = raw.trimStart('?').trimStart('>').split(';').map { it.toIntOrNull() ?: 0 }
         fun param(index: Int, fallback: Int = 1) = values.getOrNull(index)?.takeIf { it != 0 } ?: fallback
         val cursorTop = if (originMode) scrollTop else 0
         val cursorBottom = if (originMode) scrollBottom else rows - 1
@@ -198,7 +227,7 @@ class TerminalBuffer(initialColumns: Int = 80, initialRows: Int = 32) {
             'J' -> when (param(0, 0)) {
                 2, 3 -> {
                     cells = Array(rows) { Array(columns) { TerminalCell() } }
-                    resizeRestore = null; resizeRestoreOffset = 0; x = 0; y = 0
+                    resizeRestore = null; resizeRestoreOffset = 0
                     if (param(0, 0) == 3) {
                         scrollbackRows.clear()
                         discardedScrollbackRows = 0
@@ -306,14 +335,18 @@ class TerminalBuffer(initialColumns: Int = 80, initialRows: Int = 32) {
 
     private fun scrollUp(keepHistory: Boolean = false) {
         if (keepHistory) {
-            if (scrollbackRows.size >= MAX_SCROLLBACK_ROWS) {
-                scrollbackRows.removeFirst()
-                discardedScrollbackRows += 1
-            }
-            scrollbackRows.addLast(cells[scrollTop].toList())
+            appendHistory(cells[scrollTop].toList())
         }
         for (r in scrollTop until scrollBottom) cells[r] = cells[r + 1]
         cells[scrollBottom] = Array(columns) { TerminalCell() }
+    }
+
+    private fun appendHistory(row: List<TerminalCell>) {
+        if (scrollbackRows.size >= MAX_SCROLLBACK_ROWS) {
+            scrollbackRows.removeFirst()
+            discardedScrollbackRows += 1
+        }
+        scrollbackRows.addLast(row)
     }
 
     private fun scrollDown() {

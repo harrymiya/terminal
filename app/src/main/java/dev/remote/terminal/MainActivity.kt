@@ -159,13 +159,26 @@ private val Muted = Color(0xFF91A0B2)
 private val Mint = Color(0xFF83E2BD)
 private val Blue = Color(0xFF84B5FF)
 private val Coral = Color(0xFFFF8278)
-private val ActionRequestRegex = Regex("(?i)(approve (this|the)? ?(command|action)?|allow (this|the)? ?(command|action)?|would you like to|run this command\\?|continue\\? ?\\[|\\[(y/n|yes/no)\\]|\\((y/n|yes/no)\\)|press\\s+(enter|return)\\s+to\\s+(continue|confirm|approve)|permission required|needs your approval|批准|是否允许|需要确认|是否继续)")
+private val ActionRequestRegex = Regex("(?i)(approve (this|the)? ?(command|action)?|allow (this|the)? ?(command|action)?|would you like to|do you want to|run this command\\?|continue\\? ?\\[|\\[(y/n|yes/no)\\]|\\((y/n|yes/no)\\)|press\\s+(enter|return)\\s+to\\s+(continue|confirm|approve)|permission required|needs your approval|批准|是否允许|需要确认|是否继续)")
 private val AutoEnterPromptRegex = Regex("(?:\\[Y/n\\]|\\(Y/n\\)|\\[Yes/no\\]|(?i:press\\s+(?:enter|return)\\s+to\\s+(?:continue|confirm|approve)))\\s*$")
+
+private val SelectedApprovalRegex = Regex(
+    "(?i)^\\s*[›❯>➜]\\s*(?:\\d+[.)]\\s*)?(?:yes\\b|allow\\b|approve\\b|proceed\\b|continue\\b|允许|批准|同意|继续|确认)"
+)
 
 private fun detectAutoEnterPromptSignature(text: String): String? {
     val visibleText = text.trimEnd()
-    if (!AutoEnterPromptRegex.containsMatchIn(visibleText)) return null
-    return visibleText.lineSequence().filter { it.isNotBlank() }.toList().takeLast(2).joinToString("\n")
+    if (AutoEnterPromptRegex.containsMatchIn(visibleText)) {
+        return visibleText.lineSequence().filter { it.isNotBlank() }.toList().takeLast(2).joinToString("\n")
+    }
+    // Interactive CLIs draw a menu and often put a keyboard hint below it.
+    // Only accept an explicitly selected affirmative option in an approval prompt.
+    val lines = visibleText.lines()
+    val selectedIndex = lines.indexOfLast { it.trimStart().firstOrNull() in listOf('›', '❯', '>', '➜') }
+    if (selectedIndex < 0 || !SelectedApprovalRegex.containsMatchIn(lines[selectedIndex])) return null
+    val request = lines.take(selectedIndex).takeLast(20).lastOrNull { ActionRequestRegex.containsMatchIn(it) }
+        ?: return null
+    return request.trim() + "\n" + lines[selectedIndex].trim()
 }
 
 private fun alertConfirmation(context: Context) {
@@ -252,7 +265,7 @@ private class TerminalSessionState(val task: TerminalTask, private val mainHandl
         if (!enabled || !needsAction || !autoEnterEligible || autoEnterAwaitingResponse) return
         val signature = autoEnterPromptSignature ?: return
         scheduleAutoEnter(delaySeconds, signature) {
-            detectAutoEnterPromptSignature(buffer.visibleTextTail()) == signature
+            detectAutoEnterPromptSignature(buffer.visibleTextTail(100)) == signature
         }
     }
 
@@ -356,7 +369,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
                         mainHandler.postDelayed({
                             if (android.os.SystemClock.elapsedRealtime() - state.lastOutputAt >= 1_100L) state.isStreaming = false
                         }, 1_150L)
-                        val visibleText = state.buffer.visibleTextTail()
+                        val visibleText = state.buffer.visibleTextTail(100)
                         val hasRequest = ActionRequestRegex.containsMatchIn(visibleText)
                         if (hasRequest && !state.confirmationAlerted) {
                             state.confirmationAlerted = true
@@ -375,7 +388,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
                                 (previousPromptSignature != promptSignature || !state.hasScheduledAutoEnter())
                             ) {
                                 state.scheduleAutoEnter(autoEnterDelaySeconds, promptSignature) {
-                                    detectAutoEnterPromptSignature(state.buffer.visibleTextTail()) == promptSignature
+                                    detectAutoEnterPromptSignature(state.buffer.visibleTextTail(100)) == promptSignature
                                 }
                             } else if (!state.autoEnterEligible || !autoEnterEnabled) {
                                 state.cancelAutoEnter()
@@ -875,6 +888,7 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
     val liveFirstVisibleRow = (allRows.size - gestureVisibleRows).coerceAtLeast(0)
     val latestLiveFirstVisibleRow by rememberUpdatedState(liveFirstVisibleRow)
     val latestScrollbackTopRow by rememberUpdatedState(scrollbackTopRow)
+    val hasScrollback by rememberUpdatedState(scrollback.isNotEmpty())
     LaunchedEffect(scrollbackBase) {
         val discardedRows = (scrollbackBase - observedScrollbackBase).coerceAtLeast(0).toInt()
         if (discardedRows > 0) {
@@ -928,7 +942,7 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
                             val column = (change.position.x / paint.measureText("M").coerceAtLeast(1f)).toInt() + 1
                             val row = (change.position.y / lineHeightPx).toInt() + 1
                             val wheel = session.buffer.mouseWheelSequence(dragAmount > 0, column, row)
-                            if (wheel != null) {
+                            if (wheel != null && !hasScrollback && latestScrollbackTopRow == null) {
                                 wheelRemainder += dragAmount
                                 while (kotlin.math.abs(wheelRemainder) >= lineHeightPx) {
                                     val up = wheelRemainder > 0
@@ -1041,6 +1055,8 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
                     setOnEditorActionListener { _, actionId, event ->
                         val enter = actionId == EditorInfo.IME_ACTION_SEND || event?.keyCode == KeyEvent.KEYCODE_ENTER
                         if (enter) {
+                            if (event != null && event.action != KeyEvent.ACTION_DOWN) return@setOnEditorActionListener true
+                            if (event != null && event.repeatCount > 0) return@setOnEditorActionListener true
                             session.controller.send("\r")
                             session.clearAttention()
                             ignoreChange = true
@@ -1114,7 +1130,7 @@ private fun AutoEnterSettingsDialog(
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     Column(Modifier.weight(1f)) {
-                        Text("仅对默认“是”的确认提示自动回车", color = White, fontSize = 13.sp)
+                        Text("对默认“是”或选中允许的确认提示自动回车", color = White, fontSize = 13.sp)
                         Text("断线时暂停倒计时，恢复连接后重新等待；[y/N] 等默认否的提示需要手动确认", color = Muted, fontSize = 11.sp)
                     }
                     Switch(checked = enabled, onCheckedChange = onEnabledChange)

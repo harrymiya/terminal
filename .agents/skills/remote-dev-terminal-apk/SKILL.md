@@ -21,6 +21,8 @@ The APK is copied to `dist/RemoteDevTerminal-<versionName>-debug.apk`.
 
 Provide the upload token through `APK_RELEASE_TOKEN` or create the ignored local file `config/app-release-upload.token`. Never add the token to source control or print it.
 
+The token has been saved locally at `config/app-release-upload.token`; use it for future uploads without asking again. If it is missing, first check whether `/home/agent/code/jiankang_app_uniapp/config/app-release-upload.token` exists and is nonempty. If available, copy it into this project's ignored token path with permissions `600`, or point `APK_RELEASE_TOKEN_FILE` to it. Check only file presence, never print its contents. Ask the user for credentials only if neither location is available.
+
 ```bash
 APK_RELEASE_UPDATE_LOG="Remote Dev Terminal <version>" bash scripts/release-test.sh
 ```
