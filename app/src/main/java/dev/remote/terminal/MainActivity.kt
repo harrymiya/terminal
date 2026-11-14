@@ -876,10 +876,10 @@ private fun SessionTab(session: TerminalSessionState, selected: Boolean, onClick
         border = androidx.compose.foundation.BorderStroke(1.dp, if (selected) color.copy(alpha = .7f) else Edge)) {
         Row(Modifier.padding(start = 10.dp, end = 5.dp, top = 6.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             Box(Modifier.size(7.dp).alpha(if (session.isStreaming) pulse else 1f).background(color, CircleShape))
-            if (remainingSeconds > 0) Text(remainingSeconds.toString(), color = color, fontWeight = FontWeight.Bold, fontSize = 11.sp)
-            Text(session.task.agent.icon, fontSize = 12.sp)
+            Box(Modifier.width(20.dp), contentAlignment = Alignment.Center) {
+                if (remainingSeconds > 0) Text(remainingSeconds.toString(), color = color, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+            }
             Text(session.task.displayName, color = if (selected) White else Muted, fontSize = 11.sp, maxLines = 1)
-            if (session.needsAction) Text("!", color = Coral, fontWeight = FontWeight.Bold, fontSize = 11.sp)
             IconButton(onClick = onClose, modifier = Modifier.size(20.dp)) { Icon(Icons.Default.Close, null, tint = Muted, modifier = Modifier.size(13.dp)) }
         }
     }
@@ -887,6 +887,7 @@ private fun SessionTab(session: TerminalSessionState, selected: Boolean, onClick
 
 @Composable
 private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
+    val scope = rememberCoroutineScope()
     val screen by session.buffer.screen.collectAsState()
     val scrollback by session.buffer.scrollback.collectAsState()
     val scrollbackBase by session.buffer.scrollbackBase.collectAsState()
@@ -1107,8 +1108,8 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
 
         Column(Modifier.fillMaxWidth().padding(top = 5.dp, bottom = 2.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             val keys = listOf(
-                listOf("ESC" to "\u001b", "/" to "/", "−" to "-", "SESS" to "/sessions\r", "PG↑" to "\u001b[5~", "HOME" to "", "↑" to "", "END" to ""),
-                listOf("TAB" to "\t", "CTRL" to "", "ALT" to "", "RESU" to "/resume\r", "PG↓" to "\u001b[6~", "←" to "", "↓" to "", "→" to ""),
+                listOf("ESC" to "\u001b", "/" to "/", "−" to "-", "SESS" to "/sessions", "PG↑" to "\u001b[5~", "HOME" to "", "↑" to "", "END" to ""),
+                listOf("TAB" to "\t", "CTRL" to "", "ALT" to "", "RESU" to "/resume", "PG↓" to "\u001b[6~", "←" to "", "↓" to "", "→" to ""),
             )
             keys.forEach { row ->
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -1118,6 +1119,15 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
                             when (label) {
                                 "CTRL" -> { ctrlArmed = !ctrlArmed; altArmed = false }
                                 "ALT" -> { altArmed = !altArmed; ctrlArmed = false }
+                                "SESS", "RESU" -> {
+                                    session.controller.send(value)
+                                    ctrlArmed = false; altArmed = false
+                                    session.clearAttention()
+                                    scope.launch {
+                                        kotlinx.coroutines.delay(200)
+                                        inputView?.onEditorAction(EditorInfo.IME_ACTION_SEND)
+                                    }
+                                }
                                 else -> {
                                     val direction = when (label) {
                                         "↑" -> 'A'; "↓" -> 'B'; "→" -> 'C'; "←" -> 'D'; "HOME" -> 'H'; "END" -> 'F'; else -> null
