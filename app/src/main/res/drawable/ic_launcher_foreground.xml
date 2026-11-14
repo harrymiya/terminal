@@ -14,6 +14,6 @@
             android:strokeWidth="7"
             android:strokeLineCap="square"
             android:strokeLineJoin="miter"
-            android:pathData="M32,39 L56,54 L32,69 M59,69 H78" />
+            android:pathData="M35,42 L53,54 L35,66 M59,69 H78" />
     </group>
 </vector>

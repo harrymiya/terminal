@@ -58,6 +58,8 @@ class TerminalBuffer(initialColumns: Int = 80, initialRows: Int = 32) {
     private val mutableCursor = MutableStateFlow(TerminalCursor(x, y, cursorVisible))
     val cursor: StateFlow<TerminalCursor> = mutableCursor
 
+    @Synchronized fun isAlternateScreen(): Boolean = inAlternateScreen
+
     /** Returns a wheel report only while the remote application has enabled mouse tracking. */
     @Synchronized fun mouseWheelSequence(up: Boolean, column: Int, row: Int): String? {
         if (!mouseTracking) return null
@@ -259,17 +261,35 @@ class TerminalBuffer(initialColumns: Int = 80, initialRows: Int = 32) {
     }
 
     private fun applySgr(params: List<Int>) {
-        if (params.isEmpty() || 0 in params) { fg = 7; bg = 0 }
-        params.forEach { code -> when {
+        var i = 0
+        while (i < params.size) {
+            val code = params[i]
+            when {
+            code == 0 -> { fg = 7; bg = 0 }
             code == 1 -> if (fg < 8) fg += 8
-            code == 22 -> fg %= 8
+            code == 22 -> if (fg in 8..15) fg -= 8
             code in 30..37 -> fg = code - 30
             code in 90..97 -> fg = code - 90 + 8
             code == 39 -> fg = 7
             code in 40..47 -> bg = code - 40
             code in 100..107 -> bg = code - 100 + 8
             code == 49 -> bg = 0
-        } }
+            code == 38 || code == 48 -> {
+                val mode = params.getOrNull(i + 1)
+                val color = when (mode) {
+                    5 -> params.getOrNull(i + 2)?.takeIf { it in 0..255 }?.let(::indexedColor)
+                    2 -> if (i + 4 < params.size) {
+                        val components = params.subList(i + 2, i + 5)
+                        if (components.all { it in 0..255 }) 0x1000000 or (components[0] shl 16) or (components[1] shl 8) or components[2] else null
+                    } else null
+                    else -> null
+                }
+                if (color != null) { if (code == 38) fg = color else bg = color }
+                i += when (mode) { 5 -> minOf(2, params.lastIndex - i); 2 -> minOf(4, params.lastIndex - i); else -> 0 }
+            }
+            }
+            i++
+        }
     }
 
     private fun putUtf16(char: Char) {
@@ -437,8 +457,18 @@ class TerminalBuffer(initialColumns: Int = 80, initialRows: Int = 32) {
     }
 }
 
+private fun indexedColor(index: Int): Int = when (index) {
+    in 0..15 -> index
+    in 16..231 -> {
+        val value = index - 16
+        fun component(n: Int) = if (n == 0) 0 else 55 + n * 40
+        0x1000000 or (component(value / 36) shl 16) or (component(value / 6 % 6) shl 8) or component(value % 6)
+    }
+    else -> { val gray = 8 + (index - 232) * 10; 0x1000000 or (gray shl 16) or (gray shl 8) or gray }
+}
+
 fun terminalColor(index: Int): Long = when (index) {
     0 -> 0xFF151B24; 1, 9 -> 0xFFF07178; 2, 10 -> 0xFF8BD49C; 3, 11 -> 0xFFE5C07B
     4, 12 -> 0xFF78A9FF; 5, 13 -> 0xFFC792EA; 6, 14 -> 0xFF62C6DA
-    7, 15 -> 0xFFDCE4EF; 8 -> 0xFF788393; else -> 0xFFF5F7FA
+    7, 15 -> 0xFFDCE4EF; 8 -> 0xFF788393; else -> if (index and 0x1000000 != 0) 0xFF000000 or (index.toLong() and 0xFFFFFF) else 0xFFF5F7FA
 }

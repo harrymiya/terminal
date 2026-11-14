@@ -232,11 +232,14 @@ private class TerminalSessionState(val task: TerminalTask, private val mainHandl
     var hostFingerprint by mutableStateOf<String?>(null)
     var resolveHostKey: ((Boolean) -> Unit)? = null
     private var autoEnterRunnable: Runnable? = null
+    var autoEnterDeadline by mutableStateOf<Long?>(null)
+        private set
     lateinit var controller: SshTerminalController
 
     fun cancelAutoEnter() {
         autoEnterRunnable?.let(mainHandler::removeCallbacks)
         autoEnterRunnable = null
+        autoEnterDeadline = null
     }
 
     fun pauseAutoEnter() {
@@ -278,6 +281,7 @@ private class TerminalSessionState(val task: TerminalTask, private val mainHandl
         pending = Runnable {
             if (autoEnterRunnable !== pending) return@Runnable
             autoEnterRunnable = null
+            autoEnterDeadline = null
             if (!needsAction || !autoEnterEligible || autoEnterPromptSignature != promptSignature || !isPromptStillActive()) {
                 autoEnterAwaitingResponse = false
                 return@Runnable
@@ -289,7 +293,9 @@ private class TerminalSessionState(val task: TerminalTask, private val mainHandl
             }
         }
         autoEnterRunnable = pending
-        mainHandler.postDelayed(pending, delaySeconds.coerceIn(1, 30) * 1000L)
+        val delayMillis = delaySeconds.coerceIn(1, 30) * 1000L
+        autoEnterDeadline = android.os.SystemClock.uptimeMillis() + delayMillis
+        mainHandler.postDelayed(pending, delayMillis)
     }
 }
 
@@ -856,10 +862,21 @@ private fun SessionTab(session: TerminalSessionState, selected: Boolean, onClick
     val transition = rememberInfiniteTransition(label = "activity")
     val pulse by transition.animateFloat(0.35f, 1f, infiniteRepeatable(tween(650), RepeatMode.Reverse), label = "pulse")
     val color = when { session.needsAction -> Coral; selected -> Mint; session.unread -> Blue; else -> statusTint(session.status) }
+    val deadline = session.autoEnterDeadline
+    var remainingSeconds by remember(session, deadline) { mutableIntStateOf(0) }
+    LaunchedEffect(deadline) {
+        while (deadline != null) {
+            val remaining = deadline - android.os.SystemClock.uptimeMillis()
+            if (remaining <= 0) { remainingSeconds = 0; break }
+            remainingSeconds = ((remaining + 999) / 1000).toInt()
+            kotlinx.coroutines.delay((remaining - (remainingSeconds - 1) * 1000L).coerceAtLeast(1))
+        }
+    }
     Surface(onClick = onClick, color = if (selected) PanelRaised else Panel, shape = CircleShape,
         border = androidx.compose.foundation.BorderStroke(1.dp, if (selected) color.copy(alpha = .7f) else Edge)) {
         Row(Modifier.padding(start = 10.dp, end = 5.dp, top = 6.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             Box(Modifier.size(7.dp).alpha(if (session.isStreaming) pulse else 1f).background(color, CircleShape))
+            if (remainingSeconds > 0) Text(remainingSeconds.toString(), color = color, fontWeight = FontWeight.Bold, fontSize = 11.sp)
             Text(session.task.agent.icon, fontSize = 12.sp)
             Text(session.task.displayName, color = if (selected) White else Muted, fontSize = 11.sp, maxLines = 1)
             if (session.needsAction) Text("!", color = Coral, fontWeight = FontWeight.Bold, fontSize = 11.sp)
@@ -942,15 +959,18 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
         val column = (wheelPosition.x / charWidth).toInt() + 1
         val row = (wheelPosition.y / lineHeightPx).toInt() + 1
         val wheel = session.buffer.mouseWheelSequence(delta > 0, column, row)
-        if (wheel != null && !hasScrollback && latestScrollbackTopRow == null) {
+        if ((wheel != null || session.buffer.isAlternateScreen()) && !hasScrollback && latestScrollbackTopRow == null) {
             wheelRemainder += delta
             while (kotlin.math.abs(wheelRemainder) >= lineHeightPx) {
                 val up = wheelRemainder > 0
-                session.buffer.mouseWheelSequence(up, column, row)?.let(session.controller::send)
+                val sequence = session.buffer.mouseWheelSequence(up, column, row)
+                    ?: session.buffer.cursorSequence(if (up) 'A' else 'B')
+                session.controller.send(sequence)
                 wheelRemainder += if (up) -lineHeightPx else lineHeightPx
             }
             delta
         } else {
+            wheelRemainder = 0f
             val nextTop = (currentTop - delta / lineHeightPx).coerceIn(0f, liveTop)
             scrollbackTopRow = if (nextTop >= liveTop) null else nextTop
             (currentTop - nextTop) * lineHeightPx
