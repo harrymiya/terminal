@@ -362,10 +362,6 @@ class TerminalBuffer(initialColumns: Int = 80, initialRows: Int = 32) {
     }
 
     private fun appendHistory(row: List<TerminalCell>) {
-        if (scrollbackRows.size >= MAX_SCROLLBACK_ROWS) {
-            scrollbackRows.removeFirst()
-            discardedScrollbackRows += 1
-        }
         scrollbackRows.addLast(row)
     }
 
@@ -452,9 +448,6 @@ class TerminalBuffer(initialColumns: Int = 80, initialRows: Int = 32) {
         mutableCursor.value = TerminalCursor(x.coerceIn(0, columns - 1), y.coerceIn(0, rows - 1), cursorVisible)
     }
 
-    private companion object {
-        const val MAX_SCROLLBACK_ROWS = 1000
-    }
 }
 
 private fun indexedColor(index: Int): Int = when (index) {

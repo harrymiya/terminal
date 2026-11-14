@@ -349,7 +349,11 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 route = AppRoute.HOME
                 TerminalKeepAliveService.stop(appContext)
             } else {
-                activePage = (index - 1).coerceIn(0, sessions.lastIndex)
+                activePage = when {
+                    index < activePage -> activePage - 1
+                    index == activePage -> (index - 1).coerceAtLeast(0)
+                    else -> activePage
+                }.coerceIn(0, sessions.lastIndex)
             }
         }
 
@@ -823,7 +827,8 @@ private fun TerminalWorkspace(
     if (sessions.isEmpty()) return
     val pager = rememberPagerState(initialPage = initialIndex.coerceIn(0, sessions.lastIndex), pageCount = { sessions.size })
     val scope = rememberCoroutineScope()
-    val currentSession = sessions[pager.currentPage]
+    // Pager may briefly retain a removed page index while it reconciles the new count.
+    val currentSession = sessions.getOrNull(pager.currentPage) ?: sessions.lastOrNull() ?: return
     LaunchedEffect(pager.currentPage, sessions.size) { if (pager.currentPage in sessions.indices) onPageSelected(pager.currentPage) }
     Column(Modifier.fillMaxSize().background(Ink)) {
         Row(Modifier.fillMaxWidth().padding(start = 5.dp, end = 10.dp, top = 5.dp, bottom = 5.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -851,8 +856,8 @@ private fun TerminalWorkspace(
                 Spacer(Modifier.width(6.dp))
             }
         }
-        HorizontalPager(state = pager, modifier = Modifier.weight(1f), key = { sessions[it].task.id }) { page ->
-            TerminalPage(sessions[page], page == pager.currentPage)
+        HorizontalPager(state = pager, modifier = Modifier.weight(1f), userScrollEnabled = false, key = { sessions.getOrNull(it)?.task?.id ?: "removed-$it" }) { page ->
+            sessions.getOrNull(page)?.let { TerminalPage(it, page == pager.currentPage) }
         }
     }
 }
@@ -908,7 +913,6 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
     val liveFirstVisibleRow = (allRows.size - gestureVisibleRows).coerceAtLeast(0)
     val latestLiveFirstVisibleRow by rememberUpdatedState(liveFirstVisibleRow)
     val latestScrollbackTopRow by rememberUpdatedState(scrollbackTopRow)
-    val hasScrollback by rememberUpdatedState(scrollback.isNotEmpty())
     LaunchedEffect(liveFirstVisibleRow) {
         scrollbackTopRow = scrollbackTopRow?.let { if (it >= liveFirstVisibleRow) null else it }
     }
@@ -960,11 +964,11 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
         val column = (wheelPosition.x / charWidth).toInt() + 1
         val row = (wheelPosition.y / lineHeightPx).toInt() + 1
         val wheel = session.buffer.mouseWheelSequence(delta > 0, column, row)
-        if ((wheel != null || session.buffer.isAlternateScreen()) && !hasScrollback && latestScrollbackTopRow == null) {
+        if ((wheel != null || session.buffer.isAlternateScreen()) && latestScrollbackTopRow == null) {
             wheelRemainder += delta
             // Arrow keys navigate the prompt's input history in agent TUIs. When
             // mouse reporting is unavailable, use page keys to scroll their transcript.
-            val scrollStep = if (wheel != null) lineHeightPx else lineHeightPx * 4
+            val scrollStep = if (wheel != null) lineHeightPx else (terminalViewport.height * .75f).coerceAtLeast(lineHeightPx * 4)
             while (kotlin.math.abs(wheelRemainder) >= scrollStep) {
                 val up = wheelRemainder > 0
                 val sequence = session.buffer.mouseWheelSequence(up, column, row)
