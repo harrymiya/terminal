@@ -68,23 +68,21 @@ class SshTerminalController(
         return outgoing.offerLast(PendingInput(text.toByteArray(Charsets.UTF_8), connection))
     }
 
-    fun onNetworkChanged() = resetConnectionForNetwork(force = true)
-
-    fun onNetworkAvailable() = resetConnectionForNetwork(force = false)
-
-    private fun resetConnectionForNetwork(force: Boolean) {
+    fun onNetworkAvailable() {
         if (!running.get()) return
+        // Wake a pending retry, but let an existing TCP connection prove it is dead
+        // before replacing it. Wi-Fi handoffs often recover the same connection.
+        retrySignal.release()
         var shouldReconnect = false
         val connection = synchronized(writeLock) {
-            if (!force && activeConnection.get() != null) return@synchronized null
+            if (!running.get() || activeConnection.get() != null) return@synchronized null
             shouldReconnect = true
             networkGeneration.incrementAndGet()
-            pendingDisconnectReason.set(if (force) "网络已变化，正在恢复 SSH 会话" else "网络已恢复，正在恢复 SSH 会话")
+            pendingDisconnectReason.set("网络已恢复，正在恢复 SSH 会话")
             activeConnection.getAndSet(null)
         }
         if (!shouldReconnect) return
-        retrySignal.release()
-        onStatus("网络已变化 · 正在恢复 SSH 会话")
+        onStatus("网络已恢复 · 正在恢复 SSH 会话")
         if (connection != null) {
             runCatching { connection.channel.disconnect() }
             runCatching { connection.session.disconnect() }
@@ -273,8 +271,10 @@ class SshTerminalController(
     private fun buildAttachCommand(): String {
         val sessionName = "rdt_${task.id.replace("-", "").take(18)}"
         val dir = shellQuote(task.directory.path)
-        val agentInvocation = "\"${'$'}{SHELL:-/bin/bash}\" -l -i -c ${shellQuote(task.agent.command)}"
-        val tmuxCommand = shellQuote(agentInvocation)
+        val shell = "\"${'$'}{SHELL:-/bin/bash}\""
+        val agentInvocation = "$shell -l -i -c ${shellQuote(task.agent.command)}"
+        val keepSessionCommand = "$agentInvocation; agent_exit_code=${'$'}?; printf '\\n[Agent exited with status %s. Shell remains open.]\\n' \"${'$'}agent_exit_code\"; exec $shell -l -i"
+        val tmuxCommand = shellQuote(keepSessionCommand)
         return "cd -- $dir && if command -v tmux >/dev/null 2>&1; then tmux new-session -A -D -s $sessionName -c $dir $tmuxCommand; elif command -v screen >/dev/null 2>&1; then screen -D -RR -S $sessionName sh -lc $tmuxCommand; else printf '\\n[提示] 未找到 tmux 或 screen，断线后无法保留 CLI 会话\\n'; $agentInvocation; fi\n"
     }
 

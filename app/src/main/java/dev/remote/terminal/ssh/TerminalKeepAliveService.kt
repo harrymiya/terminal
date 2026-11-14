@@ -26,7 +26,6 @@ object TerminalConnectionRegistry {
 
     fun register(controller: SshTerminalController) { controllers.add(controller) }
     fun unregister(controller: SshTerminalController) { controllers.remove(controller) }
-    fun onDefaultNetworkChanged() { controllers.forEach(SshTerminalController::onNetworkChanged) }
     fun onDefaultNetworkAvailable() { controllers.forEach(SshTerminalController::onNetworkAvailable) }
 }
 
@@ -38,9 +37,9 @@ class TerminalKeepAliveService : Service() {
     @Volatile private var defaultNetwork: Network? = null
     @Volatile private var defaultNetworkValidated = false
     @Volatile private var hasObservedNetworkCapabilities = false
+    @Volatile private var networkRecoveryPending = false
     private val networkChangeHandler = Handler(Looper.getMainLooper())
     @Volatile private var pendingNetworkChange: Runnable? = null
-    @Volatile private var pendingRecoveryRequiresReconnect = false
 
     override fun onCreate() {
         super.onCreate()
@@ -97,8 +96,10 @@ class TerminalKeepAliveService : Service() {
                 val changed = defaultNetwork != network
                 defaultNetwork = network
                 if (changed) {
+                    defaultNetworkValidated = false
                     hasObservedNetworkCapabilities = false
-                    scheduleNetworkRecovery(requiresReconnect = true)
+                    networkRecoveryPending = true
+                    cancelNetworkRecovery()
                 }
             }
 
@@ -107,35 +108,41 @@ class TerminalKeepAliveService : Service() {
                     defaultNetwork = null
                     defaultNetworkValidated = false
                     hasObservedNetworkCapabilities = false
-                    scheduleNetworkRecovery(requiresReconnect = true)
+                    networkRecoveryPending = true
+                    cancelNetworkRecovery()
                 }
             }
 
             override fun onCapabilitiesChanged(network: Network, capabilities: android.net.NetworkCapabilities) {
                 if (defaultNetwork != network) return
                 val validated = capabilities.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED)
-                val regained = hasObservedNetworkCapabilities && validated && !defaultNetworkValidated
+                val becameAvailable = validated && networkRecoveryPending &&
+                    (!hasObservedNetworkCapabilities || !defaultNetworkValidated)
                 defaultNetworkValidated = validated
                 hasObservedNetworkCapabilities = true
-                if (regained) scheduleNetworkRecovery(requiresReconnect = false)
+                if (becameAvailable) scheduleNetworkRecovery()
+                else if (!validated) cancelNetworkRecovery()
             }
         }
         networkCallback = callback
         runCatching { manager.registerDefaultNetworkCallback(callback) }
     }
 
-    private fun scheduleNetworkRecovery(requiresReconnect: Boolean) {
-        pendingNetworkChange?.let(networkChangeHandler::removeCallbacks)
-        pendingRecoveryRequiresReconnect = pendingRecoveryRequiresReconnect || requiresReconnect
+    private fun scheduleNetworkRecovery() {
+        cancelNetworkRecovery()
         val pending = Runnable {
             pendingNetworkChange = null
-            val reconnect = pendingRecoveryRequiresReconnect
-            pendingRecoveryRequiresReconnect = false
-            if (reconnect) TerminalConnectionRegistry.onDefaultNetworkChanged()
-            else TerminalConnectionRegistry.onDefaultNetworkAvailable()
+            if (!networkRecoveryPending || !defaultNetworkValidated || defaultNetwork == null) return@Runnable
+            networkRecoveryPending = false
+            TerminalConnectionRegistry.onDefaultNetworkAvailable()
         }
         pendingNetworkChange = pending
-        networkChangeHandler.postDelayed(pending, 300L)
+        networkChangeHandler.postDelayed(pending, NETWORK_STABLE_DELAY_MS)
+    }
+
+    private fun cancelNetworkRecovery() {
+        pendingNetworkChange?.let(networkChangeHandler::removeCallbacks)
+        pendingNetworkChange = null
     }
 
     private fun createNotificationChannel() {
@@ -169,6 +176,7 @@ class TerminalKeepAliveService : Service() {
     companion object {
         private const val CHANNEL_ID = "ssh_terminal_keep_alive"
         private const val NOTIFICATION_ID = 4017
+        private const val NETWORK_STABLE_DELAY_MS = 2_000L
         private const val ACTION_START = "dev.remote.terminal.action.START_KEEP_ALIVE"
         private const val ACTION_STOP = "dev.remote.terminal.action.STOP_KEEP_ALIVE"
 

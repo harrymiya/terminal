@@ -24,10 +24,8 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.rememberScrollableState
-import androidx.compose.foundation.gestures.scrollable
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -164,7 +162,7 @@ private val Coral = Color(0xFFFF8278)
 private val ActionRequestRegex = Regex("(?i)(approve (this|the)? ?(command|action)?|allow (this|the)? ?(command|action)?|would you like to|run this command\\?|continue\\? ?\\[|\\[(y/n|yes/no)\\]|\\((y/n|yes/no)\\)|press\\s+(enter|return)\\s+to\\s+(continue|confirm|approve)|permission required|needs your approval|批准|是否允许|需要确认|是否继续)")
 private val AutoEnterPromptRegex = Regex("(?:\\[Y/n\\]|\\(Y/n\\)|\\[Yes/no\\]|(?i:press\\s+(?:enter|return)\\s+to\\s+(?:continue|confirm|approve)))\\s*$")
 
-private fun autoEnterPromptSignature(text: String): String? {
+private fun detectAutoEnterPromptSignature(text: String): String? {
     val visibleText = text.trimEnd()
     if (!AutoEnterPromptRegex.containsMatchIn(visibleText)) return null
     return visibleText.lineSequence().filter { it.isNotBlank() }.toList().takeLast(2).joinToString("\n")
@@ -192,6 +190,7 @@ private class TerminalSessionState(val task: TerminalTask, private val mainHandl
     var autoEnterEligible by mutableStateOf(false)
     var autoEnterPromptSignature by mutableStateOf<String?>(null)
     var handledPromptSignature by mutableStateOf<String?>(null)
+    var autoEnterAwaitingResponse = false
     var lastOutputAt by mutableStateOf(0L)
     var isStreaming by mutableStateOf(false)
     var hostFingerprint by mutableStateOf<String?>(null)
@@ -208,11 +207,12 @@ private class TerminalSessionState(val task: TerminalTask, private val mainHandl
         cancelAutoEnter()
         autoEnterEligible = false
         autoEnterPromptSignature = null
+        autoEnterAwaitingResponse = false
     }
 
     fun onConnectionUnavailable() {
-        autoEnterPromptSignature?.let { handledPromptSignature = it }
-        pauseAutoEnter()
+        cancelAutoEnter()
+        autoEnterAwaitingResponse = false
     }
 
     fun clearAttention() {
@@ -221,7 +221,18 @@ private class TerminalSessionState(val task: TerminalTask, private val mainHandl
         needsAction = false
         autoEnterEligible = false
         autoEnterPromptSignature = null
+        autoEnterAwaitingResponse = false
         unread = false
+    }
+
+    fun hasScheduledAutoEnter(): Boolean = autoEnterRunnable != null
+
+    fun resumeAutoEnter(delaySeconds: Int, enabled: Boolean) {
+        if (!enabled || !needsAction || !autoEnterEligible || autoEnterAwaitingResponse) return
+        val signature = autoEnterPromptSignature ?: return
+        scheduleAutoEnter(delaySeconds, signature) {
+            detectAutoEnterPromptSignature(buffer.visibleTextTail()) == signature
+        }
     }
 
     fun scheduleAutoEnter(delaySeconds: Int, promptSignature: String, isPromptStillActive: () -> Boolean) {
@@ -232,13 +243,14 @@ private class TerminalSessionState(val task: TerminalTask, private val mainHandl
             if (autoEnterRunnable !== pending) return@Runnable
             autoEnterRunnable = null
             if (!needsAction || !autoEnterEligible || autoEnterPromptSignature != promptSignature || !isPromptStillActive()) {
-                pauseAutoEnter()
+                autoEnterAwaitingResponse = false
                 return@Runnable
             }
             if (controller.sendIfConnected("\r")) {
-                handledPromptSignature = promptSignature
-                clearAttention()
-            } else pauseAutoEnter()
+                autoEnterAwaitingResponse = true
+            } else {
+                autoEnterAwaitingResponse = false
+            }
         }
         autoEnterRunnable = pending
         mainHandler.postDelayed(pending, delaySeconds.coerceIn(1, 30) * 1000L)
@@ -313,6 +325,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
                     if (value.contains("重连") || value.contains("恢复 SSH") || value == "已断开" || value.startsWith("远端终端已结束")) {
                         state.onConnectionUnavailable()
                     }
+                    if (value.startsWith("已连接")) state.resumeAutoEnter(autoEnterDelaySeconds, autoEnterEnabled)
                 } },
                 onBytes = { bytes ->
                     state.buffer.feed(bytes)
@@ -324,20 +337,24 @@ private fun RemoteTerminalApp(store: LocalStore) {
                         }, 1_150L)
                         val visibleText = state.buffer.visibleTextTail()
                         val hasRequest = ActionRequestRegex.containsMatchIn(visibleText)
-                        val promptSignature = if (hasRequest) autoEnterPromptSignature(visibleText) else null
+                        val promptSignature = if (hasRequest) detectAutoEnterPromptSignature(visibleText) else null
                         val previousPromptSignature = state.autoEnterPromptSignature
                         state.needsAction = hasRequest
                         if (promptSignature != null) {
+                            if (previousPromptSignature != promptSignature) state.autoEnterAwaitingResponse = false
                             state.autoEnterPromptSignature = promptSignature
                             state.autoEnterEligible = promptSignature != state.handledPromptSignature
-                            if (state.autoEnterEligible && autoEnterEnabled && previousPromptSignature != promptSignature) {
+                            if (state.autoEnterEligible && autoEnterEnabled && !state.autoEnterAwaitingResponse &&
+                                (previousPromptSignature != promptSignature || !state.hasScheduledAutoEnter())
+                            ) {
                                 state.scheduleAutoEnter(autoEnterDelaySeconds, promptSignature) {
-                                    autoEnterPromptSignature(state.buffer.visibleTextTail()) == promptSignature
+                                    detectAutoEnterPromptSignature(state.buffer.visibleTextTail()) == promptSignature
                                 }
                             } else if (!state.autoEnterEligible || !autoEnterEnabled) {
                                 state.cancelAutoEnter()
                             }
                         } else {
+                            state.autoEnterAwaitingResponse = false
                             state.handledPromptSignature = null
                             state.pauseAutoEnter()
                         }
@@ -455,26 +472,14 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 autoEnterEnabled = enabled
                 store.saveAutoEnterEnabled(enabled)
                 sessions.forEach { session ->
-                    if (enabled && session.needsAction && session.autoEnterEligible) {
-                        session.autoEnterPromptSignature?.let { signature ->
-                            session.scheduleAutoEnter(autoEnterDelaySeconds, signature) {
-                                autoEnterPromptSignature(session.buffer.visibleTextTail()) == signature
-                            }
-                        }
-                    }
-                    else if (!enabled) session.cancelAutoEnter()
+                    if (enabled) session.resumeAutoEnter(autoEnterDelaySeconds, enabled)
+                    else session.cancelAutoEnter()
                 }
             },
             onDelaySecondsChange = { seconds ->
                 autoEnterDelaySeconds = seconds
                 store.saveAutoEnterDelaySeconds(seconds)
-                if (autoEnterEnabled) sessions.filter { it.needsAction && it.autoEnterEligible }.forEach { session ->
-                    session.autoEnterPromptSignature?.let { signature ->
-                        session.scheduleAutoEnter(seconds, signature) {
-                            autoEnterPromptSignature(session.buffer.visibleTextTail()) == signature
-                        }
-                    }
-                }
+                if (autoEnterEnabled) sessions.forEach { it.resumeAutoEnter(seconds, autoEnterEnabled) }
             },
             onDismiss = { showSettings = false },
         )
@@ -849,15 +854,6 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
     val hideKeyboard: () -> Unit = {
         inputView?.let { view -> inputMethodManager.hideSoftInputFromWindow(view.windowToken, 0) }
     }
-    val historyScrollState = rememberScrollableState { delta ->
-        if (!isCurrent) return@rememberScrollableState 0f
-        val liveTop = latestLiveFirstVisibleRow.toFloat()
-        val currentTop = latestScrollbackTopRow ?: liveTop
-        val nextTop = (currentTop - delta / lineHeightPx).coerceIn(0f, liveTop)
-        scrollbackTopRow = if (nextTop >= liveTop) null else nextTop
-        (currentTop - nextTop) * lineHeightPx
-    }
-
     // IME transitions resize the canvas over many animation frames. Resize the PTY and
     // backing grid only after the viewport settles, or the agent receives a burst of
     // window-change requests and the local screen repeatedly truncates/recreates rows.
@@ -896,7 +892,16 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
                 Modifier
                     .fillMaxSize()
                     .onSizeChanged { terminalViewport = it }
-                    .scrollable(state = historyScrollState, orientation = Orientation.Vertical)
+                    .pointerInput(isCurrent) {
+                        detectVerticalDragGestures { change, dragAmount ->
+                            if (!isCurrent) return@detectVerticalDragGestures
+                            change.consume()
+                            val liveTop = latestLiveFirstVisibleRow.toFloat()
+                            val currentTop = latestScrollbackTopRow ?: liveTop
+                            val nextTop = (currentTop - dragAmount / lineHeightPx).coerceIn(0f, liveTop)
+                            scrollbackTopRow = if (nextTop >= liveTop) null else nextTop
+                        }
+                    }
                     .pointerInput(isCurrent, inputView) {
                         detectTapGestures(onTap = { if (isCurrent) showKeyboard() })
                     },
@@ -1069,7 +1074,7 @@ private fun AutoEnterSettingsDialog(
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     Column(Modifier.weight(1f)) {
                         Text("仅对默认“是”的确认提示自动回车", color = White, fontSize = 13.sp)
-                        Text("断线会取消倒计时；[y/N] 等默认否的提示需要手动确认", color = Muted, fontSize = 11.sp)
+                        Text("断线时暂停倒计时，恢复连接后重新等待；[y/N] 等默认否的提示需要手动确认", color = Muted, fontSize = 11.sp)
                     }
                     Switch(checked = enabled, onCheckedChange = onEnabledChange)
                 }
