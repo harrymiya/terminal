@@ -15,6 +15,7 @@ import java.io.InputStreamReader
 import java.io.OutputStream
 import java.security.MessageDigest
 import java.util.concurrent.LinkedBlockingDeque
+import java.util.concurrent.Executors
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
@@ -24,6 +25,7 @@ import java.util.concurrent.atomic.AtomicReference
 class SshTerminalController(
     private val task: TerminalTask,
     private val store: LocalStore,
+    private val restoreOnly: Boolean = false,
     private val onStatus: (String) -> Unit,
     private val onBytes: (String) -> Unit,
     private val onHostKey: (String, (Boolean) -> Unit) -> Unit,
@@ -49,6 +51,9 @@ class SshTerminalController(
     private val pendingDisconnectReason = AtomicReference<String?>(null)
     private val retrySignal = Semaphore(0)
     private val writeLock = Any()
+    private val pageScrollExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "tmux-scroll-${task.id.take(8)}").apply { isDaemon = true }
+    }
     @Volatile private var columns = 80
     @Volatile private var rows = 30
 
@@ -61,6 +66,27 @@ class SshTerminalController(
     fun send(text: String) {
         if (text.isEmpty() || !running.get()) return
         outgoing.offerLast(PendingInput(text.toByteArray(Charsets.UTF_8)))
+    }
+
+    /** Enter tmux copy mode and scroll its history without sending page keys to the foreground app. */
+    fun scrollTmuxPage(up: Boolean) {
+        val connection = activeConnection.get() ?: return
+        pageScrollExecutor.execute {
+            if (!running.get() || activeConnection.get() !== connection) return@execute
+            val sessionName = "rdt_${task.id.replace("-", "").take(18)}"
+            val action = if (up) "page-up" else "page-down"
+            val channel = runCatching { connection.session.openChannel("exec") as ChannelExec }.getOrNull() ?: return@execute
+            try {
+                val enterCopyMode = if (up) "if [ \"$(tmux display-message -p -t $sessionName '#{pane_in_mode}')\" = 0 ]; then tmux copy-mode -t $sessionName; fi; " else ""
+                channel.setCommand(enterCopyMode + "tmux send-keys -t $sessionName -X $action")
+                channel.connect(10_000)
+                while (running.get() && !channel.isClosed && activeConnection.get() === connection) Thread.sleep(20)
+            } catch (_: Exception) {
+                // Connection recovery is handled by the main SSH loop.
+            } finally {
+                channel.disconnect()
+            }
+        }
     }
 
     /** Queue input only for the currently active SSH connection; never replay it after reconnect. */
@@ -102,6 +128,7 @@ class SshTerminalController(
 
     fun close() {
         running.set(false)
+        pageScrollExecutor.shutdownNow()
         outgoing.clear()
         retrySignal.release()
         val connection = activeConnection.getAndSet(null)
@@ -381,6 +408,13 @@ class SshTerminalController(
         val agentInvocation = "$shell -l -i -c ${shellQuote(task.agent.command)}"
         val keepSessionCommand = "$agentInvocation; agent_exit_code=${'$'}?; printf '\\n[Agent exited with status %s. Shell remains open.]\\n' \"${'$'}agent_exit_code\"; exec $shell -l -i"
         val tmuxCommand = shellQuote(keepSessionCommand)
+        if (restoreOnly) {
+            return "cd -- $dir && if command -v tmux >/dev/null 2>&1 && tmux has-session -t $sessionName 2>/dev/null; then " +
+                "tmux set-option -t $sessionName mouse on && tmux attach-session -d -t $sessionName; " +
+                "elif command -v screen >/dev/null 2>&1 && screen -ls | grep -q '[.]$sessionName[[:space:]]'; then " +
+                "screen -D -r $sessionName; " +
+                "else printf '\n[提示] 远端会话不存在，无法恢复；请新建会话。\n'; fi\n"
+        }
         return "cd -- $dir && if command -v tmux >/dev/null 2>&1; then " +
             "(tmux has-session -t $sessionName 2>/dev/null || tmux new-session -d -s $sessionName -c $dir $tmuxCommand) && " +
             "tmux set-option -t $sessionName mouse on && tmux attach-session -d -t $sessionName; " +

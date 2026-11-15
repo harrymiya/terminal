@@ -75,10 +75,10 @@ class TerminalBuffer(initialColumns: Int = 80, initialRows: Int = 32) {
         else "\u001b[M${(button + 32).toChar()}${(col.coerceAtMost(223) + 32).toChar()}${(line.coerceAtMost(223) + 32).toChar()}"
     }
 
-    @Synchronized fun cursorSequence(direction: Char, control: Boolean = false, alt: Boolean = false): String {
-        if (!control && !alt && applicationCursorKeys) return "\u001bO$direction"
-        if (control || alt) {
-            val modifier = 1 + (if (alt) 2 else 0) + (if (control) 4 else 0)
+    @Synchronized fun cursorSequence(direction: Char, control: Boolean = false, alt: Boolean = false, shift: Boolean = false): String {
+        if (!control && !alt && !shift && applicationCursorKeys) return "\u001bO$direction"
+        if (control || alt || shift) {
+            val modifier = 1 + (if (shift) 1 else 0) + (if (alt) 2 else 0) + (if (control) 4 else 0)
             return "\u001b[1;${modifier}$direction"
         }
         return "\u001b[$direction"

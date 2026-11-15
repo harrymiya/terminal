@@ -20,15 +20,17 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import dev.remote.terminal.MainActivity
 import dev.remote.terminal.R
-import java.util.concurrent.CopyOnWriteArraySet
+import java.util.concurrent.ConcurrentHashMap
 
 object TerminalConnectionRegistry {
-    private val controllers = CopyOnWriteArraySet<SshTerminalController>()
+    private val controllers = ConcurrentHashMap<String, SshTerminalController>()
 
-    fun register(controller: SshTerminalController) { controllers.add(controller) }
-    fun unregister(controller: SshTerminalController) { controllers.remove(controller) }
+    fun register(id: String, controller: SshTerminalController) {
+        controllers.put(id, controller)?.close()
+    }
+    fun unregister(id: String, controller: SshTerminalController) { controllers.remove(id, controller) }
     fun onDefaultNetworkAvailable(recoveryStartedAt: Long) {
-        controllers.forEach { it.onNetworkAvailable(recoveryStartedAt) }
+        controllers.values.forEach { it.onNetworkAvailable(recoveryStartedAt) }
     }
 }
 

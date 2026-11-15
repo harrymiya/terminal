@@ -134,6 +134,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.viewinterop.AndroidView
 import dev.remote.terminal.data.AgentPreset
 import dev.remote.terminal.data.HostProfile
+import dev.remote.terminal.data.SessionStore
 import dev.remote.terminal.data.LocalStore
 import dev.remote.terminal.data.ProjectDirectory
 import dev.remote.terminal.data.TerminalTask
@@ -321,6 +322,16 @@ private fun RemoteTerminalApp(store: LocalStore) {
         var selectedAgentId by rememberSaveable { mutableStateOf(agents.firstOrNull()?.id.orEmpty()) }
         var route by rememberSaveable { mutableStateOf(AppRoute.HOME) }
         var activePage by rememberSaveable { mutableIntStateOf(0) }
+        val sessionStore = remember { SessionStore(appContext) }
+        var sessionsRestored by remember { mutableStateOf(false) }
+        // Sessions live in memory and cannot be restored from saved instance state.
+        // A restored terminal route without a session would otherwise render a blank screen.
+        LaunchedEffect(route, sessions.size, sessionsRestored) {
+            if (sessionsRestored && route == AppRoute.TERMINAL && sessions.isEmpty()) {
+                activePage = 0
+                route = AppRoute.HOME
+            }
+        }
         var autoEnterEnabled by remember { mutableStateOf(store.loadAutoEnterEnabled()) }
         var autoEnterDelaySeconds by remember { mutableIntStateOf(store.loadAutoEnterDelaySeconds()) }
         var showSettings by rememberSaveable { mutableStateOf(false) }
@@ -347,8 +358,9 @@ private fun RemoteTerminalApp(store: LocalStore) {
         fun closeSession(session: TerminalSessionState) {
             val index = sessions.indexOf(session)
             if (index < 0) return
+            sessionStore.remove(session.task.id)
             session.cancelAutoEnter()
-            TerminalConnectionRegistry.unregister(session.controller)
+            TerminalConnectionRegistry.unregister(session.task.id, session.controller)
             session.controller.close()
             sessions.removeAt(index)
             if (sessions.isEmpty()) {
@@ -363,15 +375,16 @@ private fun RemoteTerminalApp(store: LocalStore) {
             }
         }
 
-        fun openTask(host: HostProfile, directory: ProjectDirectory, agent: AgentPreset) {
+        fun openTask(host: HostProfile, directory: ProjectDirectory, agent: AgentPreset, restoredTask: TerminalTask? = null) {
             runCatching { TerminalKeepAliveService.start(appContext) }
                 .onFailure { error -> scope.launch { snackbars.showSnackbar("后台 SSH 保活未能启动：${error.message ?: "系统拒绝启动服务"}") } }
             val same = sessions.count { it.task.host.id == host.id && it.task.directory.id == directory.id && it.task.agent.id == agent.id }
-            val task = TerminalTask(UUID.randomUUID().toString(), host, directory, agent,
+            val task = restoredTask ?: TerminalTask(UUID.randomUUID().toString(), host, directory, agent,
                 if (same == 0) agent.name else "${agent.name} ${same + 1}")
+            if (restoredTask == null) sessionStore.save(task)
             val state = TerminalSessionState(task, mainHandler)
             state.controller = SshTerminalController(
-                task = task, store = store,
+                task = task, store = store, restoreOnly = restoredTask != null,
                 onStatus = { value -> mainHandler.post {
                     state.status = value
                     if (!value.startsWith("已连接")) state.codexQuota = null
@@ -428,11 +441,21 @@ private fun RemoteTerminalApp(store: LocalStore) {
                     alertConfirmation(appContext)
                 } },
             )
-            TerminalConnectionRegistry.register(state.controller)
+            TerminalConnectionRegistry.register(task.id, state.controller)
             sessions.add(state)
-            activePage = sessions.lastIndex
-            route = AppRoute.TERMINAL
+            if (restoredTask == null) {
+                activePage = sessions.lastIndex
+                route = AppRoute.TERMINAL
+            }
             state.controller.start()
+        }
+
+        LaunchedEffect(Unit) {
+            sessionStore.load(hosts, agents).forEach { task ->
+                openTask(task.host, task.directory, task.agent, task)
+            }
+            activePage = activePage.coerceIn(0, (sessions.size - 1).coerceAtLeast(0))
+            sessionsRestored = true
         }
 
         BackHandler(enabled = route != AppRoute.HOME) {
@@ -941,6 +964,7 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
     var selection by remember(session.task.id) { mutableStateOf<TerminalSelection?>(null) }
     var selectionMenu by remember(session.task.id) { mutableStateOf(false) }
     var ctrlArmed by remember(session.task.id) { mutableStateOf(false) }
+    var shiftArmed by remember(session.task.id) { mutableStateOf(false) }
     var altArmed by remember(session.task.id) { mutableStateOf(false) }
     var scrollbackTopRow by remember(session.task.id) { mutableStateOf<Float?>(null) }
     var observedScrollbackBase by remember(session.task.id) { mutableStateOf(0L) }
@@ -1175,14 +1199,14 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
                         if (removed > 0) {
                             val backspace = if (ctrlArmed) "\b" else "\u007f"
                             session.controller.send((if (altArmed) "\u001b" else "") + backspace.repeat(removed))
-                            ctrlArmed = false; altArmed = false
+                            ctrlArmed = false; altArmed = false; shiftArmed = false
                         }
                         if (added.isNotEmpty()) {
-                            var outgoing = added
+                            var outgoing = if (shiftArmed) added.uppercase() else added
                             if (ctrlArmed && added.length == 1 && added[0].code in 32..126) outgoing = (added[0].lowercaseChar().code and 0x1f).toChar().toString()
                             if (altArmed) outgoing = "\u001b$outgoing"
                             session.controller.send(outgoing)
-                            ctrlArmed = false; altArmed = false
+                            ctrlArmed = false; altArmed = false; shiftArmed = false
                         }
                         if (added.isNotEmpty() || removed > 0) session.clearAttention()
                         previous = next
@@ -1208,6 +1232,7 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
                             if (event != null && event.action != KeyEvent.ACTION_DOWN) return@setOnEditorActionListener true
                             if (event != null && event.repeatCount > 0) return@setOnEditorActionListener true
                             session.controller.send("\r")
+                            ctrlArmed = false; altArmed = false; shiftArmed = false
                             session.clearAttention()
                             ignoreChange = true
                             setText("")
@@ -1224,17 +1249,23 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
         AnimatedVisibility(visible = keyboardVisible) {
         Column(Modifier.fillMaxWidth().padding(top = 5.dp, bottom = 2.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             val keys = listOf(
-                listOf("ESC" to "\u001b", "/" to "/", "−" to "-", "PAST" to "", "PG↑" to "\u001b[5~", "HOME" to "", "↑" to "", "END" to ""),
-                listOf("TAB" to "\t", "CTRL" to "", "ALT" to "", "RESU" to "/resume", "PG↓" to "\u001b[6~", "←" to "", "↓" to "", "→" to ""),
+                listOf("ESC" to "\u001b", "SHIFT" to "", "/" to "/", "PAST" to "", "PG↑" to "", "HOME" to "", "↑" to "", "END" to ""),
+                listOf("TAB" to "\t", "CTRL" to "", "ALT" to "", "RESU" to "/resume", "PG↓" to "", "←" to "", "↓" to "", "→" to ""),
             )
             keys.forEach { row ->
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
                     row.forEach { (label, value) ->
-                        val armed = (label == "CTRL" && ctrlArmed) || (label == "ALT" && altArmed)
+                        val armed = (label == "CTRL" && ctrlArmed) || (label == "ALT" && altArmed) || (label == "SHIFT" && shiftArmed)
                         Surface(onClick = {
                             when (label) {
+                                "SHIFT" -> { shiftArmed = !shiftArmed }
                                 "CTRL" -> { ctrlArmed = !ctrlArmed; altArmed = false }
                                 "ALT" -> { altArmed = !altArmed; ctrlArmed = false }
+                                "PG↑", "PG↓" -> {
+                                    scrollbackTopRow = null
+                                    session.controller.scrollTmuxPage(label == "PG↑")
+                                    ctrlArmed = false; altArmed = false; shiftArmed = false
+                                }
                                 "PAST" -> {
                                     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                                     val clip = clipboard.primaryClip
@@ -1243,11 +1274,11 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
                                         session.controller.send(session.buffer.pasteSequence(text))
                                         session.clearAttention()
                                     }
-                                    ctrlArmed = false; altArmed = false
+                                    ctrlArmed = false; altArmed = false; shiftArmed = false
                                 }
                                 "RESU" -> {
                                     session.controller.send(value)
-                                    ctrlArmed = false; altArmed = false
+                                    ctrlArmed = false; altArmed = false; shiftArmed = false
                                     session.clearAttention()
                                     scope.launch {
                                         kotlinx.coroutines.delay(200)
@@ -1258,10 +1289,11 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
                                     val direction = when (label) {
                                         "↑" -> 'A'; "↓" -> 'B'; "→" -> 'C'; "←" -> 'D'; "HOME" -> 'H'; "END" -> 'F'; else -> null
                                     }
-                                    var send = direction?.let { session.buffer.cursorSequence(it, ctrlArmed, altArmed) } ?: value
+                                    var send = direction?.let { session.buffer.cursorSequence(it, ctrlArmed, altArmed, shiftArmed) } ?: value
+                                    if (direction == null && shiftArmed && send == "/") send = "?"
                                     if (direction == null && ctrlArmed && send.length == 1 && send[0].code in 32..126) send = (send[0].lowercaseChar().code and 0x1f).toChar().toString()
                                     if (direction == null && altArmed) send = "\u001b$send"
-                                    session.controller.send(send); ctrlArmed = false; altArmed = false
+                                    session.controller.send(send); ctrlArmed = false; altArmed = false; shiftArmed = false
                                     session.clearAttention()
                                 }
                             }
