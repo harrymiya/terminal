@@ -75,6 +75,18 @@ class TerminalBuffer(initialColumns: Int = 80, initialRows: Int = 32) {
         else "\u001b[M${(button + 32).toChar()}${(col.coerceAtMost(223) + 32).toChar()}${(line.coerceAtMost(223) + 32).toChar()}"
     }
 
+    /** Send a left-button press and release only when the application requested mouse input. */
+    @Synchronized fun mouseClickSequence(column: Int, row: Int): String? {
+        if (!mouseTracking) return null
+        val col = column.coerceIn(1, columns)
+        val line = row.coerceIn(1, rows)
+        return if (sgrMouse) "\u001b[<0;$col;${line}M\u001b[<0;$col;${line}m"
+        else {
+            val position = "${(col.coerceAtMost(223) + 32).toChar()}${(line.coerceAtMost(223) + 32).toChar()}"
+            "\u001b[M ${position}\u001b[M#${position}"
+        }
+    }
+
     @Synchronized fun cursorSequence(direction: Char, control: Boolean = false, alt: Boolean = false, shift: Boolean = false): String {
         if (!control && !alt && !shift && applicationCursorKeys) return "\u001bO$direction"
         if (control || alt || shift) {

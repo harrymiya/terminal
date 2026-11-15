@@ -1069,9 +1069,24 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
                         }
                     }
                     .scrollable(terminalScroll, Orientation.Vertical, enabled = isCurrent && selection == null)
-                    .pointerInput(isCurrent, inputView, allRows, scrollbackTopRow, terminalViewport) {
+                    .pointerInput(isCurrent, inputView, allRows, scrollbackTopRow, terminalViewport, selection) {
                         detectTapGestures(
-                            onTap = { if (isCurrent) { selection = null; selectionMenu = false; showKeyboard() } },
+                            onTap = { position ->
+                                if (isCurrent) {
+                                    if (selection == null && scrollbackTopRow == null) {
+                                        val first = (allRows.size - terminalViewport.height / lineHeightPx).coerceAtLeast(0f)
+                                        val row = (first + position.y / lineHeightPx).toInt() - scrollback.size
+                                        val column = (position.x / charWidthPx).toInt()
+                                        if (row in screen.indices && column in 0 until viewportColumns) {
+                                            session.buffer.mouseClickSequence(column + 1, row + 1)?.let {
+                                                resetInput?.invoke()
+                                                session.controller.send(it)
+                                            }
+                                        }
+                                    }
+                                    selection = null; selectionMenu = false; showKeyboard()
+                                }
+                            },
                             onLongPress = { position ->
                                 if (isCurrent && allRows.isNotEmpty()) {
                                     val first = (scrollbackTopRow ?: (allRows.size - terminalViewport.height / lineHeightPx).coerceAtLeast(0f))
