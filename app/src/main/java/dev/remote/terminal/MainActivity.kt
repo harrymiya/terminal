@@ -890,10 +890,11 @@ private fun SessionTab(session: TerminalSessionState, selected: Boolean, onClick
         border = androidx.compose.foundation.BorderStroke(1.dp, if (selected) color.copy(alpha = .7f) else Edge)) {
         Row(Modifier.padding(start = 10.dp, end = 5.dp, top = 6.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             Box(Modifier.size(7.dp).alpha(if (session.isStreaming) pulse else 1f).background(color, CircleShape))
-            Box(Modifier.width(if (session.task.agent.id == "codex") 52.dp else 20.dp), contentAlignment = Alignment.Center) {
+            val supportsQuota = session.task.agent.id == "codex" || session.task.agent.id == "antigravity"
+            Box(Modifier.width(if (supportsQuota) 52.dp else 20.dp), contentAlignment = Alignment.Center) {
                 if (remainingSeconds > 0) {
                     Text(remainingSeconds.toString(), color = color, fontWeight = FontWeight.Bold, fontSize = 11.sp)
-                } else if (session.task.agent.id == "codex") {
+                } else if (supportsQuota) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         val quota = session.codexQuota
                         if (quota == null) Text("额度 --", color = Muted, fontSize = 9.sp, lineHeight = 10.sp)

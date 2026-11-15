@@ -116,7 +116,13 @@ class SshTerminalController(
 
     private fun quotaLoop(connection: ActiveConnection) {
         while (running.get() && activeConnection.get() === connection && connection.session.isConnected) {
-            val result = runCatching { readCodexQuota(connection.session) }.getOrNull()
+            val result = runCatching {
+                when (task.agent.id) {
+                    "codex" -> readCodexQuota(connection.session)
+                    "antigravity" -> readAntigravityQuota(connection.session)
+                    else -> null
+                }
+            }.getOrNull()
             if (activeConnection.get() !== connection || !running.get()) break
             onQuota(result)
             repeat(60) {
@@ -167,6 +173,48 @@ class SshTerminalController(
                 }
             }
             return null
+        } finally {
+            channel.disconnect()
+        }
+    }
+
+    private fun readAntigravityQuota(session: Session): List<Pair<Int, Int>>? {
+        val channel = session.openChannel("exec") as ChannelExec
+        try {
+            channel.setCommand("bash -lc 'agy -p \"/usage\" --output-format json'")
+            channel.connect(10_000)
+            val input = channel.inputStream
+            val output = StringBuilder()
+            val deadline = SystemClock.elapsedRealtime() + 15_000
+            while (SystemClock.elapsedRealtime() < deadline && !channel.isClosed && running.get()) {
+                if (input.available() == 0) { Thread.sleep(50); continue }
+                val byte = input.read()
+                if (byte < 0) break
+                if (output.length >= 1_000_000) return null
+                output.append(byte.toChar())
+            }
+            val root = runCatching { JSONObject(output.toString()) }.getOrNull() ?: return null
+            val groups = root.optJSONObject("command")?.optJSONObject("data")?.optJSONArray("groups") ?: return null
+            val quota = linkedMapOf<String, Int>()
+            for (groupIndex in 0 until groups.length()) {
+                val group = groups.optJSONObject(groupIndex) ?: continue
+                val buckets = group.optJSONArray("buckets") ?: continue
+                for (bucketIndex in 0 until buckets.length()) {
+                    val bucket = buckets.optJSONObject(bucketIndex) ?: continue
+                    val id = bucket.optString("id").lowercase()
+                    if (!id.contains("gemini")) continue
+                    val minutes = when {
+                        id.contains("weekly") || id.contains("7d") -> 10080
+                        id.contains("5h") || id.contains("session") -> 300
+                        else -> continue
+                    }
+                    val remaining = bucket.optDouble("remaining_fraction", Double.NaN)
+                    if (!remaining.isFinite()) continue
+                    quota[if (minutes == 300) "hour" else "week"] = (remaining * 100).toInt().coerceIn(0, 100)
+                }
+            }
+            return listOfNotNull(quota["hour"]?.let { 300 to it }, quota["week"]?.let { 10080 to it })
+                .takeIf { it.isNotEmpty() }
         } finally {
             channel.disconnect()
         }
@@ -256,7 +304,8 @@ class SshTerminalController(
                 }
                 connectedAt = SystemClock.elapsedRealtime()
                 onStatus("已连接 · ${task.host.username}@${task.host.address}")
-                if (task.agent.id == "codex" && task.agent.command.trim().matches(Regex("^codex(?:\\s.*)?$"))) {
+                if ((task.agent.id == "codex" && task.agent.command.trim().matches(Regex("^codex(?:\\s.*)?$"))) ||
+                    (task.agent.id == "antigravity" && task.agent.command.trim().matches(Regex("^agy(?:\\s.*)?$")))) {
                     Thread({ quotaLoop(connection) }, "codex-quota-${task.id.take(8)}").apply { isDaemon = true; start() }
                 }
                 val textReader = InputStreamReader(reader, Charsets.UTF_8)
