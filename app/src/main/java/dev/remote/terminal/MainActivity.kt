@@ -12,6 +12,8 @@ import android.text.TextWatcher
 import android.view.KeyEvent
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
+import android.view.inputmethod.InputConnection
+import android.view.inputmethod.InputConnectionWrapper
 import android.widget.EditText
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -961,6 +963,7 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
     val inputMethodManager = remember(context) { context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager }
     var terminalViewport by remember(session.task.id) { mutableStateOf(androidx.compose.ui.unit.IntSize.Zero) }
     var inputView by remember(session.task.id) { mutableStateOf<EditText?>(null) }
+    var resetInput by remember(session.task.id) { mutableStateOf<(() -> Unit)?>(null) }
     var selection by remember(session.task.id) { mutableStateOf<TerminalSelection?>(null) }
     var selectionMenu by remember(session.task.id) { mutableStateOf(false) }
     var ctrlArmed by remember(session.task.id) { mutableStateOf(false) }
@@ -1172,7 +1175,7 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
                         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                         val clip = clipboard.primaryClip
                         val text = if (clip != null && clip.itemCount > 0) clip.getItemAt(0).coerceToText(context)?.toString().orEmpty() else ""
-                        if (text.isNotEmpty()) { session.controller.send(session.buffer.pasteSequence(text)); session.clearAttention() }
+                    if (text.isNotEmpty()) { resetInput?.invoke(); session.controller.send(session.buffer.pasteSequence(text)); session.clearAttention() }
                         selection = null; selectionMenu = false; showKeyboard()
                     }) { Text("粘贴") }
                     TextButton(onClick = { selection = null; selectionMenu = false }) { Text("取消") }
@@ -1212,7 +1215,41 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
                         previous = next
                     }
                 }
-                editor = EditText(viewContext).apply {
+                fun sendBackspace() {
+                    session.controller.send((if (altArmed) "\u001b" else "") + if (ctrlArmed) "\b" else "\u007f")
+                    ctrlArmed = false; altArmed = false; shiftArmed = false
+                    session.clearAttention()
+                }
+                editor = object : EditText(viewContext) {
+                    override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection? {
+                        val connection = super.onCreateInputConnection(outAttrs) ?: return null
+                        return object : InputConnectionWrapper(connection, true) {
+                            override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean {
+                                if (beforeLength > 0 && selectionStart == 0 && selectionEnd == 0) {
+                                    repeat(beforeLength) { sendBackspace() }
+                                    return true
+                                }
+                                return super.deleteSurroundingText(beforeLength, afterLength)
+                            }
+
+                            override fun deleteSurroundingTextInCodePoints(beforeLength: Int, afterLength: Int): Boolean {
+                                if (beforeLength > 0 && selectionStart == 0 && selectionEnd == 0) {
+                                    repeat(beforeLength) { sendBackspace() }
+                                    return true
+                                }
+                                return super.deleteSurroundingTextInCodePoints(beforeLength, afterLength)
+                            }
+
+                            override fun sendKeyEvent(event: KeyEvent): Boolean {
+                                if (event.keyCode == KeyEvent.KEYCODE_DEL && selectionStart == 0 && selectionEnd == 0) {
+                                    if (event.action == KeyEvent.ACTION_DOWN) sendBackspace()
+                                    return true
+                                }
+                                return super.sendKeyEvent(event)
+                            }
+                        }
+                    }
+                }.apply {
                     setTextColor(android.graphics.Color.TRANSPARENT)
                     setHintTextColor(android.graphics.Color.TRANSPARENT)
                     setBackgroundColor(android.graphics.Color.TRANSPARENT)
@@ -1239,6 +1276,10 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
                             true
                         } else false
                     }
+                }
+                resetInput = {
+                    ignoreChange = true
+                    editor.setText("")
                 }
                 inputView = editor
                 editor
@@ -1271,12 +1312,14 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
                                     val clip = clipboard.primaryClip
                                     val text = if (clip != null && clip.itemCount > 0) clip.getItemAt(0).coerceToText(context)?.toString().orEmpty() else ""
                                     if (text.isNotEmpty()) {
+                                        resetInput?.invoke()
                                         session.controller.send(session.buffer.pasteSequence(text))
                                         session.clearAttention()
                                     }
                                     ctrlArmed = false; altArmed = false; shiftArmed = false
                                 }
                                 "RESU" -> {
+                                    resetInput?.invoke()
                                     session.controller.send(value)
                                     ctrlArmed = false; altArmed = false; shiftArmed = false
                                     session.clearAttention()
@@ -1290,6 +1333,7 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
                                         "↑" -> 'A'; "↓" -> 'B'; "→" -> 'C'; "←" -> 'D'; "HOME" -> 'H'; "END" -> 'F'; else -> null
                                     }
                                     var send = direction?.let { session.buffer.cursorSequence(it, ctrlArmed, altArmed, shiftArmed) } ?: value
+                                    resetInput?.invoke()
                                     if (direction == null && shiftArmed && send == "/") send = "?"
                                     if (direction == null && ctrlArmed && send.length == 1 && send[0].code in 32..126) send = (send[0].lowercaseChar().code and 0x1f).toChar().toString()
                                     if (direction == null && altArmed) send = "\u001b$send"

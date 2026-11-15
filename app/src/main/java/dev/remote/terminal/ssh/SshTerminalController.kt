@@ -54,6 +54,8 @@ class SshTerminalController(
     private val pageScrollExecutor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "tmux-scroll-${task.id.take(8)}").apply { isDaemon = true }
     }
+    // Accessed only on pageScrollExecutor, so paging and subsequent input stay ordered.
+    private var copyModeConnection: ActiveConnection? = null
     @Volatile private var columns = 80
     @Volatile private var rows = 30
 
@@ -65,7 +67,36 @@ class SshTerminalController(
 
     fun send(text: String) {
         if (text.isEmpty() || !running.get()) return
-        outgoing.offerLast(PendingInput(text.toByteArray(Charsets.UTF_8)))
+        queueInput(text, null)
+    }
+
+    private fun queueInput(text: String, expectedConnection: ActiveConnection?): Boolean = runCatching {
+        pageScrollExecutor.execute {
+            val connection = activeConnection.get()
+            if (copyModeConnection != null) {
+                if (connection != null && connection === copyModeConnection) runTmuxCommand(connection, "cancel")
+                copyModeConnection = null
+            }
+            if (running.get() && (expectedConnection == null || activeConnection.get() === expectedConnection)) {
+                outgoing.offerLast(PendingInput(text.toByteArray(Charsets.UTF_8), expectedConnection))
+            }
+        }
+        true
+    }.getOrDefault(false)
+
+    private fun runTmuxCommand(connection: ActiveConnection, action: String, enterCopyMode: Boolean = false) {
+        val sessionName = "rdt_${task.id.replace("-", "").take(18)}"
+        val channel = runCatching { connection.session.openChannel("exec") as ChannelExec }.getOrNull() ?: return
+        try {
+            val enter = if (enterCopyMode) "if [ \"$(tmux display-message -p -t $sessionName '#{pane_in_mode}')\" = 0 ]; then tmux copy-mode -t $sessionName; fi; " else ""
+            channel.setCommand(enter + "tmux send-keys -t $sessionName -X $action")
+            channel.connect(10_000)
+            while (running.get() && !channel.isClosed && activeConnection.get() === connection) Thread.sleep(20)
+        } catch (_: Exception) {
+            // Connection recovery is handled by the main SSH loop.
+        } finally {
+            channel.disconnect()
+        }
     }
 
     /** Enter tmux copy mode and scroll its history without sending page keys to the foreground app. */
@@ -73,19 +104,8 @@ class SshTerminalController(
         val connection = activeConnection.get() ?: return
         pageScrollExecutor.execute {
             if (!running.get() || activeConnection.get() !== connection) return@execute
-            val sessionName = "rdt_${task.id.replace("-", "").take(18)}"
-            val action = if (up) "page-up" else "page-down"
-            val channel = runCatching { connection.session.openChannel("exec") as ChannelExec }.getOrNull() ?: return@execute
-            try {
-                val enterCopyMode = if (up) "if [ \"$(tmux display-message -p -t $sessionName '#{pane_in_mode}')\" = 0 ]; then tmux copy-mode -t $sessionName; fi; " else ""
-                channel.setCommand(enterCopyMode + "tmux send-keys -t $sessionName -X $action")
-                channel.connect(10_000)
-                while (running.get() && !channel.isClosed && activeConnection.get() === connection) Thread.sleep(20)
-            } catch (_: Exception) {
-                // Connection recovery is handled by the main SSH loop.
-            } finally {
-                channel.disconnect()
-            }
+            runTmuxCommand(connection, if (up) "page-up" else "page-down-and-cancel", enterCopyMode = up)
+            if (up) copyModeConnection = connection
         }
     }
 
@@ -93,7 +113,7 @@ class SshTerminalController(
     fun sendIfConnected(text: String): Boolean {
         if (text.isEmpty() || !running.get()) return false
         val connection = activeConnection.get() ?: return false
-        return outgoing.offerLast(PendingInput(text.toByteArray(Charsets.UTF_8), connection))
+        return queueInput(text, connection)
     }
 
     fun onNetworkAvailable(recoveryStartedAt: Long) {
