@@ -41,6 +41,7 @@ class SshTerminalController(
     private data class PendingInput(
         val bytes: ByteArray,
         val expectedConnection: ActiveConnection? = null,
+        val exitCopyMode: Boolean = false,
     )
 
     private val running = AtomicBoolean(false)
@@ -56,6 +57,7 @@ class SshTerminalController(
     }
     // Accessed only on pageScrollExecutor, so paging and subsequent input stay ordered.
     private var copyModeConnection: ActiveConnection? = null
+    private var checkedCopyModeConnection: ActiveConnection? = null
     @Volatile private var columns = 80
     @Volatile private var rows = 30
 
@@ -70,19 +72,27 @@ class SshTerminalController(
         queueInput(text, null)
     }
 
-    private fun queueInput(text: String, expectedConnection: ActiveConnection?): Boolean = runCatching {
+    private fun queueInput(text: String, expectedConnection: ActiveConnection?, scroll: Boolean = false): Boolean = runCatching {
         pageScrollExecutor.execute {
             val connection = activeConnection.get()
-            if (copyModeConnection != null) {
-                if (connection != null && connection === copyModeConnection) runTmuxCommand(connection, "cancel")
-                copyModeConnection = null
-            }
             if (running.get() && (expectedConnection == null || activeConnection.get() === expectedConnection)) {
-                outgoing.offerLast(PendingInput(text.toByteArray(Charsets.UTF_8), expectedConnection))
+                val exitCopyMode = !scroll && connection != null &&
+                    (connection === copyModeConnection || connection !== checkedCopyModeConnection)
+                outgoing.offerLast(PendingInput(text.toByteArray(Charsets.UTF_8), expectedConnection, exitCopyMode))
+                if (scroll) copyModeConnection = connection
+                else if (exitCopyMode) {
+                    copyModeConnection = null
+                    checkedCopyModeConnection = connection
+                }
             }
         }
         true
     }.getOrDefault(false)
+
+    /** A tmux mouse-wheel binding can enter copy mode outside our page buttons. */
+    fun sendScroll(text: String) {
+        if (text.isNotEmpty() && running.get()) queueInput(text, null, scroll = true)
+    }
 
     private fun runTmuxCommand(connection: ActiveConnection, action: String, enterCopyMode: Boolean = false) {
         val sessionName = "rdt_${task.id.replace("-", "").take(18)}"
@@ -277,6 +287,10 @@ class SshTerminalController(
                     continue
                 }
                 val pendingInput = outgoing.pollFirst(100, TimeUnit.MILLISECONDS) ?: continue
+                if (pendingInput.exitCopyMode && activeConnection.get() === connection &&
+                    (pendingInput.expectedConnection == null || pendingInput.expectedConnection === connection)) {
+                    runTmuxCommand(connection, "cancel")
+                }
                 synchronized(writeLock) {
                     if (activeConnection.get() !== connection) {
                         if (pendingInput.expectedConnection == null) outgoing.offerFirst(pendingInput)

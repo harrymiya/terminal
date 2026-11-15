@@ -1043,7 +1043,7 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
                 val up = wheelRemainder > 0
                 val sequence = session.buffer.mouseWheelSequence(up, column, row)
                     ?: if (up) "\u001b[5~" else "\u001b[6~"
-                session.controller.send(sequence)
+                session.controller.sendScroll(sequence)
                 wheelRemainder += if (up) -scrollStep else scrollStep
             }
             delta
@@ -1214,6 +1214,7 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
                         val removedText = previous.substring(prefix, previous.length - suffix)
                         val removed = removedText.codePointCount(0, removedText.length)
                         val added = next.substring(prefix, next.length - suffix.coerceAtMost(next.length - prefix))
+                        if (added.isNotEmpty() || removed > 0) scrollbackTopRow = null
                         if (removed > 0) {
                             val backspace = if (ctrlArmed) "\b" else "\u007f"
                             session.controller.send((if (altArmed) "\u001b" else "") + backspace.repeat(removed))
@@ -1231,6 +1232,7 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
                     }
                 }
                 fun sendBackspace() {
+                    scrollbackTopRow = null
                     session.controller.send((if (altArmed) "\u001b" else "") + if (ctrlArmed) "\b" else "\u007f")
                     ctrlArmed = false; altArmed = false; shiftArmed = false
                     session.clearAttention()
@@ -1327,6 +1329,7 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
                                     val clip = clipboard.primaryClip
                                     val text = if (clip != null && clip.itemCount > 0) clip.getItemAt(0).coerceToText(context)?.toString().orEmpty() else ""
                                     if (text.isNotEmpty()) {
+                                        scrollbackTopRow = null
                                         resetInput?.invoke()
                                         session.controller.send(session.buffer.pasteSequence(text))
                                         session.clearAttention()
