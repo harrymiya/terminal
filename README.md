@@ -31,3 +31,7 @@ for the full packaging workflow.
 - Interactive SSH PTY with reconnect attempts and a separate tmux session for every task.
 - Multiple task tabs with horizontal swipe, output activity, unread indicators, and approval-prompt notices.
 - Termux-style fixed two-row key strip, transparent terminal input, double-width CJK rendering, and a keyboard toggle.
+
+# Omarchy / Linux 桌面版
+
+Linux 桌面版本位于 [omarchy/](omarchy/README.md)，与 Android 版本并列维护。

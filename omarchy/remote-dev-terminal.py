@@ -1,0 +1,429 @@
+#!/usr/bin/env python3
+import sys
+import os
+import json
+import shlex
+import subprocess
+import tempfile
+import threading
+import uuid
+import select
+import time
+import shutil
+from pathlib import Path
+import gi
+gi.require_version("Gtk", "3.0")
+gi.require_version("Vte", "2.91")
+from gi.repository import Gtk, Vte, GLib
+from core import load_config, save_config, ssh_argv, auto_enter_signature, quota_from_codex, quota_from_agy
+
+
+class App(Gtk.Window):
+    def __init__(self):
+        super().__init__(title="Remote Dev Terminal")
+        self.set_default_size(1200, 760)
+        try:
+            self.data = load_config()
+        except (OSError, ValueError) as exc:
+            self.message("无法读取配置", str(exc))
+            raise SystemExit(1)
+        root = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.add(root)
+        sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=12)
+        sidebar.set_size_request(260, -1)
+        root.pack_start(sidebar, False, False, 0)
+        for title, attr in [("主机", "hosts"), ("项目目录", "directories"), ("命令预设", "agents")]:
+            sidebar.pack_start(Gtk.Label(label=title, xalign=0), False, False, 0)
+            combo = Gtk.ComboBoxText()
+            setattr(self, attr, combo)
+            sidebar.pack_start(combo, False, False, 0)
+            buttons = Gtk.Box(spacing=4)
+            for label, action in [("添加", "add"), ("编辑", "edit"), ("删除", "delete")]:
+                button = Gtk.Button(label=label)
+                button.connect("clicked", self.manage, attr, action)
+                buttons.pack_start(button, True, True, 0)
+            sidebar.pack_start(buttons, False, False, 0)
+        self.hosts.connect("changed", lambda *_: self.refresh_directories())
+        button = Gtk.Button(label="打开终端")
+        button.connect("clicked", self.open_terminal)
+        sidebar.pack_start(button, False, False, 8)
+        settings = Gtk.Box(spacing=5)
+        self.auto_enter = Gtk.CheckButton(label="自动回车")
+        self.auto_enter.set_active(self.data.get("auto_enter", False))
+        self.auto_enter.connect("toggled", self.save_settings)
+        settings.pack_start(self.auto_enter, False, False, 0)
+        self.delay = Gtk.SpinButton.new_with_range(1, 30, 1)
+        self.delay.set_value(self.data.get("auto_enter_delay", 3))
+        self.delay.connect("value-changed", self.save_settings)
+        settings.pack_start(self.delay, False, False, 0)
+        settings.pack_start(Gtk.Label(label="秒"), False, False, 0)
+        sidebar.pack_start(settings, False, False, 0)
+        hint = Gtk.Label(label="SSH 密码和密钥由系统 SSH 处理。\n关闭标签会断开连接；tmux 会话保留在远端。", xalign=0)
+        hint.set_line_wrap(True)
+        sidebar.pack_start(hint, False, False, 0)
+        self.tabs = Gtk.Notebook(scrollable=True)
+        root.pack_start(self.tabs, True, True, 0)
+        self.refresh()
+        self.connect("destroy", Gtk.main_quit)
+
+    def save_settings(self, *_):
+        self.data["auto_enter"] = self.auto_enter.get_active()
+        self.data["auto_enter_delay"] = self.delay.get_value_as_int()
+        self.persist()
+
+    def message(self, title, detail):
+        dialog = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.ERROR, buttons=Gtk.ButtonsType.CLOSE, text=title)
+        dialog.format_secondary_text(detail)
+        dialog.run()
+        dialog.destroy()
+
+    def refresh(self):
+        for combo, items in [(self.hosts, self.data["hosts"]), (self.agents, self.data["agents"])]:
+            selected = combo.get_active()
+            combo.remove_all()
+            for item in items:
+                combo.append_text(item["name"])
+            if items:
+                combo.set_active(min(max(selected, 0), len(items)-1))
+        self.refresh_directories()
+
+    def current_host(self):
+        index = self.hosts.get_active()
+        return self.data["hosts"][index] if index >= 0 else None
+
+    def refresh_directories(self):
+        selected = self.directories.get_active()
+        self.directories.remove_all()
+        host = self.current_host()
+        directories = host.get("directories", []) if host else []
+        for item in directories:
+            self.directories.append_text(item["name"])
+        if directories:
+            self.directories.set_active(min(max(selected, 0), len(directories)-1))
+
+    def persist(self):
+        try:
+            save_config(self.data)
+        except OSError as exc:
+            self.message("保存失败", str(exc))
+
+    def manage(self, _button, kind, action):
+        host = self.current_host()
+        if kind == "directories" and not host:
+            self.message("请先选择主机", "添加项目目录前需要先添加主机。")
+            return
+        items = host.setdefault("directories", []) if kind == "directories" else self.data[kind]
+        index = getattr(self, kind).get_active()
+        if action != "add" and index < 0:
+            return
+        if action == "delete":
+            dialog = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.QUESTION, buttons=Gtk.ButtonsType.YES_NO, text="删除「%s」？" % items[index]["name"])
+            result = dialog.run()
+            dialog.destroy()
+            if result == Gtk.ResponseType.YES:
+                items.pop(index)
+                self.persist()
+                self.refresh()
+            return
+        fields = {"hosts": [("name", "名称"), ("address", "地址"), ("port", "端口"), ("username", "用户名")], "directories": [("name", "名称"), ("path", "远端绝对路径")], "agents": [("name", "名称"), ("command", "启动命令")]}[kind]
+        old = items[index] if action == "edit" else {"port": 22}
+        dialog = Gtk.Dialog(title="编辑" if action == "edit" else "添加", transient_for=self, modal=True)
+        dialog.add_buttons("取消", Gtk.ResponseType.CANCEL, "保存", Gtk.ResponseType.OK)
+        grid = Gtk.Grid(column_spacing=12, row_spacing=8, margin=16)
+        dialog.get_content_area().add(grid)
+        entries = {}
+        for row, (key, label) in enumerate(fields):
+            grid.attach(Gtk.Label(label=label, xalign=0), 0, row, 1, 1)
+            entry = Gtk.Entry(text=str(old.get(key, "")))
+            grid.attach(entry, 1, row, 1, 1)
+            entries[key] = entry
+        if kind == "directories":
+            browse = Gtk.Button(label="浏览远端目录…")
+            browse.connect("clicked", lambda *_: self.browse_directories(host, entries["path"], dialog))
+            grid.attach(browse, 1, len(fields), 1, 1)
+        dialog.show_all()
+        while dialog.run() == Gtk.ResponseType.OK:
+            values = {key: entry.get_text().strip() for key, entry in entries.items()}
+            try:
+                if not all(values.values()):
+                    raise ValueError("所有字段均为必填项")
+                if kind == "hosts":
+                    values["port"] = int(values["port"])
+                    if not 1 <= values["port"] <= 65535 or values["address"].startswith("-"):
+                        raise ValueError("主机地址或端口无效")
+                    values["directories"] = old.get("directories", [])
+                if kind == "directories" and not values["path"].startswith("/"):
+                    raise ValueError("请填写远端绝对路径")
+            except ValueError as exc:
+                self.message("输入无效", str(exc))
+                continue
+            if action == "edit":
+                items[index] = values
+            else:
+                items.append(values)
+            self.persist()
+            self.refresh()
+            break
+        dialog.destroy()
+
+    def browse_directories(self, host, target, parent):
+        dialog = Gtk.Dialog(title="浏览远端目录", transient_for=parent, modal=True)
+        dialog.add_buttons("取消", Gtk.ResponseType.CANCEL, "选择当前目录", Gtk.ResponseType.OK)
+        box = dialog.get_content_area()
+        box.set_spacing(6)
+        box.set_border_width(10)
+        path = Gtk.Entry(text=target.get_text())
+        box.add(path)
+        row = Gtk.Box(spacing=5)
+        up = Gtk.Button(label="上一级")
+        load = Gtk.Button(label="打开路径")
+        row.pack_start(up, False, False, 0)
+        row.pack_start(load, False, False, 0)
+        box.add(row)
+        status = Gtk.Label(label="", xalign=0)
+        box.add(status)
+        listing = Gtk.ListBox()
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_min_content_height(300)
+        scroll.set_min_content_width(450)
+        scroll.add(listing)
+        box.add(scroll)
+        state = {"generation": 0, "alive": True, "loaded": None}
+        def fetch(requested):
+            state["generation"] += 1
+            generation = state["generation"]
+            state["loaded"] = None
+            status.set_text("正在连接并读取目录…")
+            dialog.set_response_sensitive(Gtk.ResponseType.OK, False)
+            def worker():
+                # The first NUL-delimited item is canonical cwd, followed by directory names.
+                command = "cd -- " + (shlex.quote(requested) if requested else '"$HOME"') + " && printf '%s\\0' \"$PWD\" && find -L . -mindepth 1 -maxdepth 1 -type d -printf '%f\\0'"
+                argv = ["ssh", "-o", "ConnectTimeout=20", "-p", str(host["port"]), "-l", host["username"], "--", host["address"], command]
+                env = os.environ.copy()
+                env.update(SSH_ASKPASS=str(Path(__file__).with_name("askpass.py")), SSH_ASKPASS_REQUIRE="force")
+                try:
+                    proc = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, timeout=60, start_new_session=True)
+                    if proc.returncode:
+                        raise RuntimeError(proc.stderr.decode(errors="replace").strip() or "SSH 连接失败")
+                    parts = proc.stdout.decode("utf-8", errors="replace").split("\0")
+                    if not parts[0].startswith("/"):
+                        raise RuntimeError("远端返回的目录无效")
+                    result, error = (parts[0], sorted((x for x in parts[1:] if x), key=str.casefold)), None
+                except (OSError, subprocess.TimeoutExpired, RuntimeError) as exc:
+                    result, error = None, str(exc)
+                def finish():
+                    if not state["alive"] or generation != state["generation"]:
+                        return False
+                    if error:
+                        status.set_text(error)
+                        return False
+                    current, names = result
+                    state["loaded"] = current
+                    path.set_text(current)
+                    for child in listing.get_children():
+                        listing.remove(child)
+                    for name in names:
+                        item = Gtk.ListBoxRow()
+                        item.add(Gtk.Label(label=name, xalign=0, margin=6))
+                        item.directory_name = name
+                        listing.add(item)
+                    listing.show_all()
+                    status.set_text("%d 个目录" % len(names))
+                    dialog.set_response_sensitive(Gtk.ResponseType.OK, True)
+                    return False
+                GLib.idle_add(finish)
+            threading.Thread(target=worker, daemon=True).start()
+        load.connect("clicked", lambda *_: fetch(path.get_text().strip()))
+        path.connect("activate", lambda *_: fetch(path.get_text().strip()))
+        up.connect("clicked", lambda *_: fetch(os.path.dirname(path.get_text().rstrip("/")) or "/"))
+        listing.connect("row-activated", lambda _list, row: fetch(state["loaded"].rstrip("/") + "/" + row.directory_name))
+        dialog.show_all()
+        fetch(path.get_text().strip())
+        if dialog.run() == Gtk.ResponseType.OK and state["loaded"]:
+            target.set_text(state["loaded"])
+        state["alive"] = False
+        dialog.destroy()
+
+    def open_terminal(self, _button):
+        host = self.current_host()
+        di, ai = self.directories.get_active(), self.agents.get_active()
+        if not host or di < 0 or ai < 0:
+            self.message("无法打开终端", "请选择主机、项目目录和命令预设。")
+            return
+        directory, agent = host["directories"][di], self.data["agents"][ai]
+        socket_dir = tempfile.mkdtemp(prefix="rdt-")
+        socket_path = os.path.join(socket_dir, "ssh")
+        argv, _ = ssh_argv(host, directory["path"], agent["command"], control_path=socket_path)
+        terminal = Vte.Terminal()
+        terminal.set_scrollback_lines(10000)
+        label = Gtk.Box(spacing=5)
+        label.pack_start(Gtk.Label(label=directory["name"] + " · " + agent["name"]), True, True, 0)
+        close = Gtk.Button.new_from_icon_name("window-close-symbolic", Gtk.IconSize.MENU)
+        close.set_relief(Gtk.ReliefStyle.NONE)
+        label.pack_start(close, False, False, 0)
+        state = {"closed": False, "connected": False, "retry": 0, "retry_source": None, "timer": None, "signature": None, "handled": None, "quota_busy": False, "connected_at": 0}
+        def close_tab(*_):
+            state["closed"] = True
+            if state["timer"]:
+                GLib.source_remove(state["timer"])
+            if state["retry_source"]:
+                GLib.source_remove(state["retry_source"])
+            self.tabs.remove_page(self.tabs.page_num(terminal))
+            # Stop the multiplex master as well as the visible SSH client.
+            subprocess.Popen(["ssh", "-S", socket_path, "-O", "exit", "-p", str(host["port"]), "-l", host["username"], "--", host["address"]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            shutil.rmtree(socket_dir, ignore_errors=True)
+        close.connect("clicked", close_tab)
+        self.tabs.append_page(terminal, label)
+        self.tabs.show_all()
+        self.tabs.set_current_page(-1)
+        def spawned(_terminal, _pid, error, *_):
+            if error:
+                self.message("无法启动 SSH", str(error))
+        reconnect = Gtk.Button(label="重连")
+        label.pack_start(reconnect, False, False, 0)
+        quota = Gtk.Label(label="")
+        label.pack_start(quota, False, False, 0)
+        def read_quota():
+            if state["closed"]:
+                return False
+            if state["quota_busy"] or not state["connected"]:
+                return True
+            command = agent["command"].strip()
+            kind = "codex" if command == "codex" or command.startswith("codex ") else "agy" if command == "agy" or command.startswith("agy ") else None
+            if not kind:
+                return False
+            state["quota_busy"] = True
+            def worker():
+                result = []
+                base = ["ssh", "-S", socket_path, "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-p", str(host["port"]), "-l", host["username"], "--", host["address"]]
+                try:
+                    if kind == "agy":
+                        output = subprocess.check_output(base + ["bash -lc 'agy -p \"/usage\" --output-format json'"], stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+                        result = quota_from_agy(json.loads(output))
+                    else:
+                        proc = subprocess.Popen(base + ["bash -lc 'exec codex app-server --listen stdio://'"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
+                        try:
+                            proc.stdin.write(b'{"id":1,"method":"initialize","params":{"clientInfo":{"name":"remote_dev_terminal","version":"1.0"}}}\n')
+                            deadline = time.monotonic() + 15
+                            pending = b""
+                            while time.monotonic() < deadline and len(pending) < 1000000:
+                                ready, _, _ = select.select([proc.stdout], [], [], max(0, deadline - time.monotonic()))
+                                if not ready:
+                                    break
+                                chunk = os.read(proc.stdout.fileno(), 4096)
+                                if not chunk:
+                                    break
+                                pending += chunk
+                                while b"\n" in pending:
+                                    line, pending = pending.split(b"\n", 1)
+                                    try:
+                                        msg = json.loads(line)
+                                    except ValueError:
+                                        continue
+                                    if msg.get("id") == 1 and "error" not in msg:
+                                        proc.stdin.write(b'{"method":"initialized","params":{}}\n{"id":2,"method":"account/rateLimits/read","params":{}}\n')
+                                    elif msg.get("id") == 2:
+                                        result = quota_from_codex(msg)
+                                        break
+                                if result:
+                                    break
+                        finally:
+                            proc.kill()
+                            proc.communicate()
+                except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+                    pass
+                def finish():
+                    state["quota_busy"] = False
+                    if not state["closed"]:
+                        quota.set_text(" / ".join(f"{minutes // 60}h {remaining}%" if minutes < 1440 else f"{minutes // 1440}d {remaining}%" for minutes, remaining in result) if result else "配额不可用")
+                    return False
+                GLib.idle_add(finish)
+            threading.Thread(target=worker, daemon=True).start()
+            return True
+        GLib.timeout_add_seconds(60, read_quota)
+        def visible_signature():
+            try:
+                _, row = terminal.get_cursor_position()
+                text, _ = terminal.get_text_range_format(Vte.Format.TEXT, max(0, row - 99), 0, row, terminal.get_column_count() - 1)
+                return auto_enter_signature(text or "")
+            except (TypeError, ValueError):
+                return None
+        def changed(*_):
+            if not state["connected"] or not self.auto_enter.get_active():
+                return
+            signature = visible_signature()
+            if signature != state["signature"]:
+                if state["timer"]:
+                    GLib.source_remove(state["timer"])
+                    state["timer"] = None
+                state["signature"] = signature
+                if signature and signature != state["handled"]:
+                    def confirm():
+                        state["timer"] = None
+                        if not state["closed"] and state["connected"] and self.auto_enter.get_active() and visible_signature() == signature:
+                            state["handled"] = signature
+                            terminal.feed_child(b"\r")
+                        return False
+                    state["timer"] = GLib.timeout_add_seconds(self.delay.get_value_as_int(), confirm)
+                elif not signature:
+                    state["handled"] = None
+        terminal.connect("contents-changed", changed)
+        def key_pressed(*_):
+            if state["timer"]:
+                GLib.source_remove(state["timer"])
+                state["timer"] = None
+            state["handled"] = state["signature"]
+            return False
+        terminal.connect("key-press-event", key_pressed)
+        def start(*_):
+            if state["closed"]:
+                return False
+            if state["retry_source"]:
+                GLib.source_remove(state["retry_source"])
+                state["retry_source"] = None
+            reconnect.hide()
+            terminal.spawn_async(Vte.PtyFlags.DEFAULT, None, argv, None, GLib.SpawnFlags.SEARCH_PATH, None, None, -1, None, spawned, None)
+            return False
+        reconnect.connect("clicked", start)
+        def child_exited(_terminal, status):
+            state["connected"] = False
+            quota.set_text("")
+            if state["timer"]:
+                GLib.source_remove(state["timer"])
+                state["timer"] = None
+            state["signature"] = None
+            if state["closed"]:
+                return
+            code = os.waitstatus_to_exitcode(status)
+            if code == 255:
+                if state["connected_at"] and time.monotonic() - state["connected_at"] >= 30:
+                    state["retry"] = 0
+                state["connected_at"] = 0
+                state["retry"] += 1
+                seconds = min(15, 2 ** min(state["retry"] - 1, 4))
+                reconnect.set_label(f"{seconds} 秒后重连")
+                reconnect.show()
+                def retry():
+                    state["retry_source"] = None
+                    return start()
+                state["retry_source"] = GLib.timeout_add_seconds(seconds, retry)
+            else:
+                reconnect.set_label("重连")
+                reconnect.show()
+        terminal.connect("child-exited", child_exited)
+        def check_connection():
+            if state["closed"]:
+                return False
+            if not state["connected"] and os.path.exists(socket_path):
+                state["connected"] = True
+                state["connected_at"] = time.monotonic()
+                read_quota()
+                changed()
+            return True
+        GLib.timeout_add_seconds(1, check_connection)
+        start()
+
+
+if __name__ == "__main__":
+    App().show_all()
+    Gtk.main()
