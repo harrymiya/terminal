@@ -64,8 +64,8 @@ class App(Gtk.Window):
             .tile-focused { box-shadow: inset 0 0 0 2px #86dbb8; }
             .tile-focused .tile-header { background: #2b5146; }
             paned.tile-paned > separator { background-color: #293748; margin: 0; padding: 0; }
-            paned.tile-paned.horizontal > separator { min-width: 6px; }
-            paned.tile-paned.vertical > separator { min-height: 6px; }
+            paned.tile-paned.horizontal > separator { min-width: 2px; }
+            paned.tile-paned.vertical > separator { min-height: 2px; }
             paned.tile-paned > separator:hover, paned.tile-paned > separator:active { background-color: #86dbb8; }
             .empty { color: #91a5b8; font-size: 15px; }
             .host-button { background: #1d2a39; border: 1px solid #34485b; padding: 8px; }
@@ -250,10 +250,10 @@ class App(Gtk.Window):
                 return f"{prop}:{re.sub(r'(\d+)px', scale_font, val_str)}"
             elif prop == "min-height":
                 orig = int(re.search(r'\d+', val_str).group(0)) if re.search(r'\d+', val_str) else 24
-                floor = 22 if orig >= 20 else 4
+                floor = 22 if orig >= 20 else 2
                 return f"{prop}:{re.sub(r'(\d+)px', lambda m: f'{max(floor, round(int(m.group(1)) * factor))}px', val_str)}"
             elif prop == "min-width":
-                return f"{prop}:{re.sub(r'(\d+)px', lambda m: f'{max(4, round(int(m.group(1)) * factor))}px', val_str)}"
+                return f"{prop}:{re.sub(r'(\d+)px', lambda m: f'{max(2, round(int(m.group(1)) * factor))}px', val_str)}"
             elif "padding" in prop:
                 return f"{prop}:{re.sub(r'(\d+)px', lambda m: f'{max(2, round(int(m.group(1)) * factor))}px', val_str)}"
             elif "margin" in prop:
