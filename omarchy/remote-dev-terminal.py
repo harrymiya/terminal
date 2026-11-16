@@ -10,43 +10,99 @@ import uuid
 import select
 import time
 import shutil
+import re
 from pathlib import Path
 import gi
 gi.require_version("Gtk", "3.0")
 gi.require_version("Vte", "2.91")
-from gi.repository import Gtk, Vte, GLib
-from core import load_config, save_config, ssh_argv, auto_enter_signature, quota_from_codex, quota_from_agy
+from gi.repository import Gtk, Vte, GLib, Gdk
+from core import load_config, save_config, ssh_argv, auto_enter_signature, quota_from_codex, quota_from_agy, format_quota
 
 
 class App(Gtk.Window):
     def __init__(self):
         super().__init__(title="Remote Dev Terminal")
         self.set_default_size(1200, 760)
+        self.set_size_request(700, 450)
+        self.sessions = []
+        self.tiled = False
         try:
             self.data = load_config()
         except (OSError, ValueError) as exc:
             self.message("无法读取配置", str(exc))
             raise SystemExit(1)
-        root = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.scale = self.data.get("ui_scale", 100)
+        if not isinstance(self.scale, int) or isinstance(self.scale, bool) or not 50 <= self.scale <= 200:
+            self.scale = 100
+        self.css = Gtk.CssProvider()
+        self.base_css = '''
+            window { background: #0c1119; color: #e8eef6; font-size: 13px; }
+            .sidebar { background: #151e2a; border-right: 1px solid #293748; }
+            .brand { font-size: 19px; font-weight: bold; color: #a2e8cc; }
+            .subtitle { color: #9aabbc; font-size: 11px; }
+            .section { color: #a8b9ca; font-weight: bold; margin-top: 12px; }
+            .toolbar { background: #111a25; border-bottom: 1px solid #293748; padding: 8px 12px; }
+            .workspace-title { font-weight: bold; font-size: 15px; }
+            .primary { background: #86dbb8; color: #101c1a; font-weight: bold; border: 0; }
+            .tile { background: #111a25; border: 1px solid #344558; border-radius: 6px; }
+            .tile-header { padding: 5px 8px; background: #1b2735; }
+            .empty { color: #91a5b8; font-size: 15px; }
+            .host-button { background: #1d2a39; border: 1px solid #34485b; padding: 8px; }
+            .host-selected { background: #29483f; border-color: #86dbb8; color: #d8fff0; }
+            .project-button { background: #202e3d; border: 1px solid #34485b; padding: 10px; }
+            .project-button:hover { background: #2b483f; border-color: #86dbb8; }
+            .manage-button { padding: 4px 7px; }
+        '''
+        self.apply_scale_css()
+        Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), self.css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        root = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
         self.add(root)
-        sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=12)
-        sidebar.set_size_request(260, -1)
-        root.pack_start(sidebar, False, False, 0)
-        for title, attr in [("主机", "hosts"), ("项目目录", "directories"), ("命令预设", "agents")]:
-            sidebar.pack_start(Gtk.Label(label=title, xalign=0), False, False, 0)
+        self.sidebar_revealer = Gtk.Revealer(reveal_child=True)
+        self.sidebar_revealer.set_transition_type(Gtk.RevealerTransitionType.SLIDE_RIGHT)
+        root.pack_start(self.sidebar_revealer, False, False, 0)
+        sidebar_frame = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        sidebar_frame.get_style_context().add_class("sidebar")
+        self.sidebar_revealer.add(sidebar_frame)
+        sidebar_scroll = Gtk.ScrolledWindow()
+        sidebar_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        sidebar_frame.pack_start(sidebar_scroll, True, True, 0)
+        sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=16)
+        self.sidebar = sidebar
+        sidebar.set_size_request(round(250 * self.scale / 100), -1)
+        sidebar.set_spacing(round(8 * self.scale / 100))
+        sidebar.set_margin_start(round(16 * self.scale / 100))
+        sidebar.set_margin_end(round(16 * self.scale / 100))
+        sidebar.set_margin_top(round(16 * self.scale / 100))
+        sidebar.set_margin_bottom(round(16 * self.scale / 100))
+        sidebar_scroll.add(sidebar)
+        brand = Gtk.Label(label="REMOTE DEV", xalign=0)
+        brand.get_style_context().add_class("brand")
+        sidebar.pack_start(brand, False, False, 0)
+        subtitle = Gtk.Label(label="远程开发工作台", xalign=0)
+        subtitle.get_style_context().add_class("subtitle")
+        sidebar.pack_start(subtitle, False, False, 0)
+        self.refreshing = False
+        for title, attr in [("主机", "hosts"), ("当前 Agent", "agents"), ("工作区 · 点击直达", "directories")]:
+            heading = Gtk.Label(label=title, xalign=0)
+            heading.get_style_context().add_class("section")
+            sidebar.pack_start(heading, False, False, 0)
             combo = Gtk.ComboBoxText()
             setattr(self, attr, combo)
-            sidebar.pack_start(combo, False, False, 0)
+            if attr == "agents":
+                sidebar.pack_start(combo, False, False, 0)
+            else:
+                items_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+                setattr(self, attr + "_list", items_box)
+                sidebar.pack_start(items_box, False, False, 0)
             buttons = Gtk.Box(spacing=4)
-            for label, action in [("添加", "add"), ("编辑", "edit"), ("删除", "delete")]:
+            actions = [("添加工作区", "add")] if attr == "directories" else [("添加", "add"), ("编辑", "edit"), ("删除", "delete")]
+            for label, action in actions:
                 button = Gtk.Button(label=label)
                 button.connect("clicked", self.manage, attr, action)
                 buttons.pack_start(button, True, True, 0)
             sidebar.pack_start(buttons, False, False, 0)
-        self.hosts.connect("changed", lambda *_: self.refresh_directories())
-        button = Gtk.Button(label="打开终端")
-        button.connect("clicked", self.open_terminal)
-        sidebar.pack_start(button, False, False, 8)
+        self.hosts.connect("changed", self.host_changed)
+        self.agents.connect("changed", self.agent_changed)
         settings = Gtk.Box(spacing=5)
         self.auto_enter = Gtk.CheckButton(label="自动回车")
         self.auto_enter.set_active(self.data.get("auto_enter", False))
@@ -60,11 +116,114 @@ class App(Gtk.Window):
         sidebar.pack_start(settings, False, False, 0)
         hint = Gtk.Label(label="SSH 密码和密钥由系统 SSH 处理。\n关闭标签会断开连接；tmux 会话保留在远端。", xalign=0)
         hint.set_line_wrap(True)
+        hint.get_style_context().add_class("subtitle")
         sidebar.pack_start(hint, False, False, 0)
+        workspace = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        root.pack_start(workspace, True, True, 0)
+        toolbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        toolbar.get_style_context().add_class("toolbar")
+        workspace.pack_start(toolbar, False, False, 0)
+        menu = Gtk.ToggleButton(label="☰  菜单")
+        menu.set_active(True)
+        menu.connect("toggled", lambda button: self.sidebar_revealer.set_reveal_child(button.get_active()))
+        toolbar.pack_start(menu, False, False, 0)
+        title = Gtk.Label(label="工作区", xalign=0)
+        title.get_style_context().add_class("workspace-title")
+        toolbar.pack_start(title, True, True, 0)
+        self.count_label = Gtk.Label(label="0 / 8")
+        self.count_label.get_style_context().add_class("subtitle")
+        toolbar.pack_start(self.count_label, False, False, 0)
+        self.view_button = Gtk.ToggleButton(label="▦  平铺模式")
+        self.view_button.connect("toggled", self.change_view)
+        toolbar.pack_start(self.view_button, False, False, 0)
+        zoom = Gtk.SpinButton.new_with_range(50, 200, 1)
+        zoom.set_numeric(True)
+        zoom.set_value(self.scale)
+        zoom.set_tooltip_text("界面缩放")
+        zoom.connect("value-changed", self.change_scale)
+        toolbar.pack_start(zoom, False, False, 0)
+        toolbar.pack_start(Gtk.Label(label="%"), False, False, 0)
+        self.views = Gtk.Stack()
+        self.views.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
+        workspace.pack_start(self.views, True, True, 0)
         self.tabs = Gtk.Notebook(scrollable=True)
-        root.pack_start(self.tabs, True, True, 0)
+        self.views.add_named(self.tabs, "tabs")
+        self.grid = Gtk.Grid(column_spacing=6, row_spacing=6, margin=8, column_homogeneous=True, row_homogeneous=True)
+        self.grid.set_hexpand(True)
+        self.grid.set_vexpand(True)
+        self.views.add_named(self.grid, "grid")
+        self.empty = Gtk.Label(label="选择左侧主机和 Agent，然后点击工作区直达终端。")
+        self.empty.get_style_context().add_class("empty")
+        self.views.add_named(self.empty, "empty")
+        self.views.set_visible_child_name("empty")
         self.refresh()
         self.connect("destroy", Gtk.main_quit)
+
+    def change_view(self, button):
+        self.tiled = button.get_active()
+        button.set_label("▤  标签模式" if self.tiled else "▦  平铺模式")
+        self.rebuild_view()
+
+    def apply_scale_css(self):
+        factor = self.scale / 100
+        css = re.sub(r"(\d+)px", lambda match: f"{max(1, round(int(match.group(1)) * factor)) if int(match.group(1)) else 0}px", self.base_css)
+        self.css.load_from_data(css.encode("utf-8"))
+
+    def change_scale(self, spin):
+        self.scale = spin.get_value_as_int()
+        self.data["ui_scale"] = self.scale
+        self.apply_scale_css()
+        factor = self.scale / 100
+        self.sidebar.set_size_request(round(250 * factor), -1)
+        self.sidebar.set_spacing(round(8 * factor))
+        for setter in (self.sidebar.set_margin_start, self.sidebar.set_margin_end,
+                       self.sidebar.set_margin_top, self.sidebar.set_margin_bottom):
+            setter(round(16 * factor))
+        for session in self.sessions:
+            session["terminal"].set_font_scale(factor)
+        self.persist()
+
+    def rebuild_view(self, selected=None):
+        if selected is None and not self.tiled:
+            selected = self.tabs.get_nth_page(self.tabs.get_current_page())
+        # Keep each terminal alive while moving it between containers.
+        while self.tabs.get_n_pages():
+            self.tabs.remove_page(0)
+        for session in self.sessions:
+            for widget in (session["terminal"], session["label"]):
+                parent = widget.get_parent()
+                if parent:
+                    parent.remove(widget)
+        for child in self.grid.get_children():
+            self.grid.remove(child)
+        self.count_label.set_text(f"{len(self.sessions)} / 8")
+        if not self.sessions:
+            self.views.set_visible_child_name("empty")
+            return
+        if self.tiled:
+            columns = len(self.sessions) if len(self.sessions) <= 4 else (len(self.sessions) + 1) // 2
+            for index, session in enumerate(self.sessions):
+                frame = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+                frame.get_style_context().add_class("tile")
+                frame.set_hexpand(True)
+                frame.set_vexpand(True)
+                header = Gtk.Box()
+                header.get_style_context().add_class("tile-header")
+                header.pack_start(session["label"], True, True, 0)
+                frame.pack_start(header, False, False, 0)
+                frame.pack_start(session["terminal"], True, True, 0)
+                self.grid.attach(frame, index % columns, index // columns, 1, 1)
+            self.grid.show_all()
+            self.views.set_visible_child_name("grid")
+        else:
+            for session in self.sessions:
+                self.tabs.append_page(session["terminal"], session["label"])
+            self.tabs.show_all()
+            self.views.set_visible_child_name("tabs")
+            if selected:
+                index = self.tabs.page_num(selected)
+                if index >= 0:
+                    self.tabs.set_current_page(index)
 
     def save_settings(self, *_):
         self.data["auto_enter"] = self.auto_enter.get_active()
@@ -78,13 +237,50 @@ class App(Gtk.Window):
         dialog.destroy()
 
     def refresh(self):
-        for combo, items in [(self.hosts, self.data["hosts"]), (self.agents, self.data["agents"])]:
-            selected = combo.get_active()
-            combo.remove_all()
-            for item in items:
-                combo.append_text(item["name"])
-            if items:
-                combo.set_active(min(max(selected, 0), len(items)-1))
+        selected = self.hosts.get_active()
+        self.refreshing = True
+        self.hosts.remove_all()
+        for host in self.data["hosts"]:
+            self.hosts.append_text(host["name"])
+        if self.data["hosts"]:
+            self.hosts.set_active(min(max(selected, 0), len(self.data["hosts"]) - 1))
+        self.refreshing = False
+        self.refresh_host_content()
+
+    def host_changed(self, *_):
+        if not self.refreshing:
+            self.refresh_host_content()
+
+    def agent_changed(self, *_):
+        host = self.current_host()
+        if not self.refreshing and host and self.agents.get_active() >= 0:
+            host["selected_agent"] = self.agents.get_active()
+            self.persist()
+
+    def host_agents(self, host):
+        return host.setdefault("agents", [dict(agent) for agent in self.data["agents"]])
+
+    def refresh_host_content(self):
+        host = self.current_host()
+        selected = self.hosts.get_active()
+        for child in self.hosts_list.get_children():
+            self.hosts_list.remove(child)
+        for index, item in enumerate(self.data["hosts"]):
+            button = Gtk.Button(label=item["name"] + "  ·  " + item["address"])
+            button.get_style_context().add_class("host-button")
+            if index == selected:
+                button.get_style_context().add_class("host-selected")
+            button.connect("clicked", lambda _button, i=index: self.hosts.set_active(i))
+            self.hosts_list.pack_start(button, False, False, 0)
+        self.hosts_list.show_all()
+        self.refreshing = True
+        self.agents.remove_all()
+        agents = self.host_agents(host) if host else []
+        for agent in agents:
+            self.agents.append_text(agent["name"])
+        if agents:
+            self.agents.set_active(min(max(host.get("selected_agent", 0), 0), len(agents) - 1))
+        self.refreshing = False
         self.refresh_directories()
 
     def current_host(self):
@@ -92,14 +288,39 @@ class App(Gtk.Window):
         return self.data["hosts"][index] if index >= 0 else None
 
     def refresh_directories(self):
-        selected = self.directories.get_active()
         self.directories.remove_all()
+        for child in self.directories_list.get_children():
+            self.directories_list.remove(child)
         host = self.current_host()
         directories = host.get("directories", []) if host else []
-        for item in directories:
+        for index, item in enumerate(directories):
             self.directories.append_text(item["name"])
-        if directories:
-            self.directories.set_active(min(max(selected, 0), len(directories)-1))
+            row = Gtk.Box(spacing=4)
+            button = Gtk.Button(label="▸  " + item["name"])
+            button.set_tooltip_text(item["path"] + "\n点击使用当前 Agent 打开")
+            button.get_style_context().add_class("project-button")
+            button.connect("clicked", self.open_directory, index)
+            row.pack_start(button, True, True, 0)
+            for label, action in [("✎", "edit"), ("×", "delete")]:
+                edit = Gtk.Button(label=label)
+                edit.set_tooltip_text("编辑工作区" if action == "edit" else "删除工作区")
+                edit.get_style_context().add_class("manage-button")
+                edit.connect("clicked", self.manage_directory, index, action)
+                row.pack_start(edit, False, False, 0)
+            self.directories_list.pack_start(row, False, False, 0)
+        if not directories:
+            hint = Gtk.Label(label="请先选择主机并添加工作区", xalign=0)
+            hint.get_style_context().add_class("subtitle")
+            self.directories_list.pack_start(hint, False, False, 0)
+        self.directories_list.show_all()
+
+    def open_directory(self, _button, index):
+        self.directories.set_active(index)
+        self.open_terminal(None)
+
+    def manage_directory(self, button, index, action):
+        self.directories.set_active(index)
+        self.manage(button, "directories", action)
 
     def persist(self):
         try:
@@ -109,10 +330,10 @@ class App(Gtk.Window):
 
     def manage(self, _button, kind, action):
         host = self.current_host()
-        if kind == "directories" and not host:
-            self.message("请先选择主机", "添加项目目录前需要先添加主机。")
+        if kind in ("directories", "agents") and not host:
+            self.message("请先选择主机", "请先添加并选择主机。")
             return
-        items = host.setdefault("directories", []) if kind == "directories" else self.data[kind]
+        items = host.setdefault("directories", []) if kind == "directories" else self.host_agents(host) if kind == "agents" else self.data[kind]
         index = getattr(self, kind).get_active()
         if action != "add" and index < 0:
             return
@@ -122,6 +343,8 @@ class App(Gtk.Window):
             dialog.destroy()
             if result == Gtk.ResponseType.YES:
                 items.pop(index)
+                if kind == "agents":
+                    host["selected_agent"] = min(index, max(0, len(items) - 1))
                 self.persist()
                 self.refresh()
             return
@@ -152,6 +375,8 @@ class App(Gtk.Window):
                     if not 1 <= values["port"] <= 65535 or values["address"].startswith("-"):
                         raise ValueError("主机地址或端口无效")
                     values["directories"] = old.get("directories", [])
+                    values["agents"] = old.get("agents", [dict(agent) for agent in self.data["agents"]])
+                    values["selected_agent"] = old.get("selected_agent", 0)
                 if kind == "directories" and not values["path"].startswith("/"):
                     raise ValueError("请填写远端绝对路径")
             except ValueError as exc:
@@ -161,8 +386,12 @@ class App(Gtk.Window):
                 items[index] = values
             else:
                 items.append(values)
+                if kind == "agents":
+                    host["selected_agent"] = len(items) - 1
             self.persist()
             self.refresh()
+            if kind == "hosts" and action == "add":
+                self.hosts.set_active(len(items) - 1)
             break
         dialog.destroy()
 
@@ -250,14 +479,33 @@ class App(Gtk.Window):
         if not host or di < 0 or ai < 0:
             self.message("无法打开终端", "请选择主机、项目目录和命令预设。")
             return
-        directory, agent = host["directories"][di], self.data["agents"][ai]
+        directory, agent = host["directories"][di], self.host_agents(host)[ai]
+        key = (host["address"], host["port"], host["username"], directory["path"], agent["command"])
+        existing = next((item for item in self.sessions if item["key"] == key), None)
+        if existing:
+            terminal = existing["terminal"]
+            if not self.tiled:
+                self.tabs.set_current_page(self.tabs.page_num(terminal))
+            terminal.grab_focus()
+            return
+        if len(self.sessions) >= 8:
+            self.message("终端已达上限", "最多同时打开 8 个终端，请先关闭一个终端。")
+            return
         socket_dir = tempfile.mkdtemp(prefix="rdt-")
         socket_path = os.path.join(socket_dir, "ssh")
         argv, _ = ssh_argv(host, directory["path"], agent["command"], control_path=socket_path)
         terminal = Vte.Terminal()
+        terminal.set_font_scale(self.scale / 100)
+        terminal.set_size(24, 8)
+        terminal.set_hexpand(True)
+        terminal.set_vexpand(True)
         terminal.set_scrollback_lines(10000)
         label = Gtk.Box(spacing=5)
         label.pack_start(Gtk.Label(label=directory["name"] + " · " + agent["name"]), True, True, 0)
+        command = agent["command"].strip()
+        kind = "codex" if command == "codex" or command.startswith("codex ") else "agy" if command == "agy" or command.startswith("agy ") else None
+        quota = Gtk.Label(label=format_quota([]) if kind else "")
+        label.pack_start(quota, False, False, 0)
         close = Gtk.Button.new_from_icon_name("window-close-symbolic", Gtk.IconSize.MENU)
         close.set_relief(Gtk.ReliefStyle.NONE)
         label.pack_start(close, False, False, 0)
@@ -268,28 +516,35 @@ class App(Gtk.Window):
                 GLib.source_remove(state["timer"])
             if state["retry_source"]:
                 GLib.source_remove(state["retry_source"])
-            self.tabs.remove_page(self.tabs.page_num(terminal))
+            if terminal.get_parent():
+                parent = terminal.get_parent()
+                if parent is self.tabs:
+                    self.tabs.remove_page(self.tabs.page_num(terminal))
+                else:
+                    parent.remove(terminal)
+            label_parent = label.get_parent()
+            if label_parent:
+                label_parent.remove(label)
+            self.sessions[:] = [item for item in self.sessions if item["terminal"] is not terminal]
+            self.rebuild_view()
             # Stop the multiplex master as well as the visible SSH client.
             subprocess.Popen(["ssh", "-S", socket_path, "-O", "exit", "-p", str(host["port"]), "-l", host["username"], "--", host["address"]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             shutil.rmtree(socket_dir, ignore_errors=True)
         close.connect("clicked", close_tab)
-        self.tabs.append_page(terminal, label)
-        self.tabs.show_all()
-        self.tabs.set_current_page(-1)
+        self.sessions.append({"terminal": terminal, "label": label, "key": key})
+        self.rebuild_view(selected=terminal)
         def spawned(_terminal, _pid, error, *_):
             if error:
                 self.message("无法启动 SSH", str(error))
         reconnect = Gtk.Button(label="重连")
+        reconnect.set_no_show_all(True)
         label.pack_start(reconnect, False, False, 0)
-        quota = Gtk.Label(label="")
-        label.pack_start(quota, False, False, 0)
+        label.reorder_child(close, -1)
         def read_quota():
             if state["closed"]:
                 return False
             if state["quota_busy"] or not state["connected"]:
                 return True
-            command = agent["command"].strip()
-            kind = "codex" if command == "codex" or command.startswith("codex ") else "agy" if command == "agy" or command.startswith("agy ") else None
             if not kind:
                 return False
             state["quota_busy"] = True
@@ -334,8 +589,8 @@ class App(Gtk.Window):
                     pass
                 def finish():
                     state["quota_busy"] = False
-                    if not state["closed"]:
-                        quota.set_text(" / ".join(f"{minutes // 60}h {remaining}%" if minutes < 1440 else f"{minutes // 1440}d {remaining}%" for minutes, remaining in result) if result else "配额不可用")
+                    if not state["closed"] and state["connected"]:
+                        quota.set_text(format_quota(result))
                     return False
                 GLib.idle_add(finish)
             threading.Thread(target=worker, daemon=True).start()
@@ -387,7 +642,7 @@ class App(Gtk.Window):
         reconnect.connect("clicked", start)
         def child_exited(_terminal, status):
             state["connected"] = False
-            quota.set_text("")
+            quota.set_text(format_quota([]) if kind else "")
             if state["timer"]:
                 GLib.source_remove(state["timer"])
                 state["timer"] = None

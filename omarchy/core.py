@@ -96,3 +96,11 @@ def quota_from_agy(message):
             if minutes and value is not None:
                 result[minutes] = max(0, min(100, int(float(value) * 100)))
     return sorted(result.items())
+
+
+def format_quota(quota):
+    """Show both requested windows even when only one is available."""
+    values = dict(quota)
+    def value(minutes):
+        return f"{values[minutes]}%" if minutes in values else "--"
+    return f"{value(300)} · {value(10080)}"
