@@ -449,15 +449,15 @@ class SshTerminalController(
         val tmuxCommand = shellQuote(keepSessionCommand)
         if (restoreOnly) {
             return "cd -- $dir && if command -v tmux >/dev/null 2>&1 && tmux has-session -t $sessionName 2>/dev/null; then " +
-                "tmux set-option -t $sessionName mouse on && tmux attach-session -d -t $sessionName; " +
+                "tmux set-option -t $sessionName mouse on && tmux attach-session -t $sessionName; " +
                 "elif command -v screen >/dev/null 2>&1 && screen -ls | grep -q '[.]$sessionName[[:space:]]'; then " +
-                "screen -D -r $sessionName; " +
+                "screen -x $sessionName; " +
                 "else printf '\n[提示] 远端会话不存在，无法恢复；请新建会话。\n'; fi\n"
         }
         return "cd -- $dir && if command -v tmux >/dev/null 2>&1; then " +
             "(tmux has-session -t $sessionName 2>/dev/null || tmux new-session -d -s $sessionName -c $dir $tmuxCommand) && " +
-            "tmux set-option -t $sessionName mouse on && tmux attach-session -d -t $sessionName; " +
-            "elif command -v screen >/dev/null 2>&1; then screen -D -RR -S $sessionName sh -lc $tmuxCommand; " +
+            "tmux set-option -t $sessionName mouse on && tmux attach-session -t $sessionName; " +
+            "elif command -v screen >/dev/null 2>&1; then screen -xRR -S $sessionName sh -lc $tmuxCommand; " +
             "else printf '\\n[提示] 未找到 tmux 或 screen，断线后无法保留 CLI 会话\\n'; $agentInvocation; fi\n"
     }
 

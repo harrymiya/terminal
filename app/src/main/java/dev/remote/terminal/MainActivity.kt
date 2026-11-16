@@ -478,10 +478,10 @@ private fun RemoteTerminalApp(store: LocalStore) {
             state.controller.start()
         }
 
-        fun openSharedSession(host: HostProfile, item: org.json.JSONObject) {
+        fun openSharedSession(host: HostProfile, item: org.json.JSONObject, activate: Boolean = true) {
             val id = item.getString("id")
             val existing = sessions.indexOfFirst { it.task.id.replace("-", "") == id && it.task.host.id == host.id }
-            if (existing >= 0) { activePage = existing; route = AppRoute.TERMINAL; return }
+            if (existing >= 0) { if (activate) { activePage = existing; route = AppRoute.TERMINAL }; return }
             val currentHost = hosts.firstOrNull { it.id == host.id } ?: return
             val path = item.getString("directory_path")
             val directory = currentHost.directories.firstOrNull { it.path == path }
@@ -494,7 +494,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
             val task = TerminalTask(id, updatedHost, directory, agent, item.getString("display_name"))
             sessionStore.save(task)
             openTask(updatedHost, directory, agent, task)
-            activePage = sessions.lastIndex; route = AppRoute.TERMINAL
+            if (activate) { activePage = sessions.lastIndex; route = AppRoute.TERMINAL }
         }
 
         fun refreshShared(host: HostProfile) {
@@ -513,14 +513,26 @@ private fun RemoteTerminalApp(store: LocalStore) {
             }
             activePage = activePage.coerceIn(0, (sessions.size - 1).coerceAtLeast(0))
             sessionsRestored = true
-            val configuredHosts = hosts.filter { it.syncUrl.isNotBlank() }
-            syncLoading = configuredHosts.isNotEmpty()
-            configuredHosts.forEach { host ->
-                runCatching { withContext(SyncClient.dispatcher) { SyncClient.list(host) } }
-                    .onSuccess { items -> startupShared = startupShared.filterNot { it.first.id == host.id } + items.map { host to it } }
-                    .onFailure { scope.launch { snackbars.showSnackbar("${host.name} 启动同步失败：${it.message}") } }
+        }
+
+        val syncHosts = hosts.filter { it.syncUrl.isNotBlank() }
+        LaunchedEffect(syncHosts) {
+            startupShared = startupShared.filter { entry -> syncHosts.any { it.id == entry.first.id } }
+            syncLoading = syncHosts.isNotEmpty()
+            while (true) {
+                syncHosts.forEach { host ->
+                    runCatching { withContext(SyncClient.dispatcher) { SyncClient.list(host) } }
+                        .onSuccess { items ->
+                            startupShared = startupShared.filterNot { it.first.id == host.id } + items.map { host to it }
+                            val hadSessions = sessions.isNotEmpty()
+                            items.forEach { item -> openSharedSession(host, item, activate = false) }
+                            if (!hadSessions && sessions.isNotEmpty()) { activePage = 0; route = AppRoute.TERMINAL }
+                            if (sharedHost?.id == host.id && sharedSessions != null) sharedSessions = items
+                        }
+                }
+                syncLoading = false
+                kotlinx.coroutines.delay(5_000)
             }
-            syncLoading = false
         }
 
         BackHandler(enabled = route != AppRoute.HOME) {
@@ -532,21 +544,11 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 AppRoute.HOME -> HomeScreen(
                     hosts = hosts, agents = agents, selectedHost = selectedHost, selectedAgent = selectedAgent,
                     sessions = sessions, onSelectHost = { selectedHostId = it.id }, onSelectAgent = { selectedAgentId = it.id },
-                    shared = startupShared.filter { (host, item) -> sessions.none { it.task.host.id == host.id && it.task.id.replace("-", "") == item.optString("id") } },
-                    syncLoading = syncLoading, onOpenShared = ::openSharedSession,
+                    syncLoading = syncLoading,
                     onManage = { route = AppRoute.MANAGE }, onAddHost = { addingHost = true },
                     onAddDirectory = { selectedHost?.let { editingDirectory = it.id to null } },
                     onOpenAgents = { route = AppRoute.AGENTS },
                     onOpenSettings = { showSettings = true },
-                    onSharedSessions = {
-                        selectedHost?.let { host ->
-                            scope.launch {
-                                runCatching { withContext(SyncClient.dispatcher) { SyncClient.list(host) } }
-                                    .onSuccess { sharedHost = host; sharedSessions = it; startupShared = startupShared.filterNot { entry -> entry.first.id == host.id } + it.map { item -> host to item } }
-                                    .onFailure { snackbars.showSnackbar("读取共享会话失败：${it.message}") }
-                            }
-                        }
-                    },
                     onStartTask = { host, dir, agent -> openTask(host, dir, agent) },
                     onResumeSession = { index -> activePage = index; sessions[index].unread = false; route = AppRoute.TERMINAL },
                 )
@@ -693,9 +695,7 @@ private fun HomeScreen(
     sessions: List<TerminalSessionState>, onSelectHost: (HostProfile) -> Unit, onSelectAgent: (AgentPreset) -> Unit,
     onManage: () -> Unit, onAddHost: () -> Unit, onAddDirectory: () -> Unit, onOpenAgents: () -> Unit, onOpenSettings: () -> Unit,
     onStartTask: (HostProfile, ProjectDirectory, AgentPreset) -> Unit, onResumeSession: (Int) -> Unit,
-    onSharedSessions: () -> Unit,
-    shared: List<Pair<HostProfile, org.json.JSONObject>>, syncLoading: Boolean,
-    onOpenShared: (HostProfile, org.json.JSONObject) -> Unit,
+    syncLoading: Boolean,
 ) {
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
         Row(Modifier.fillMaxWidth().padding(top = 24.dp, bottom = 18.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -718,18 +718,7 @@ private fun HomeScreen(
             }
         }
 
-        if (selectedHost?.syncUrl?.isNotBlank() == true) {
-            TextButton(onClick = onSharedSessions) { Text("查看共享会话 · ${selectedHost.name}", color = Mint) }
-        }
         if (syncLoading) Text("正在同步共享会话…", color = Muted, fontSize = 12.sp)
-        if (shared.isNotEmpty()) {
-            Text("共享会话", color = White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-            shared.forEach { (host, item) ->
-                TextButton(onClick = { onOpenShared(host, item) }) {
-                    Text("${host.name} · ${item.optString("display_name")} · ${item.optString("directory_name")}", color = Mint)
-                }
-            }
-        }
 
         if (sessions.isNotEmpty()) {
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(bottom = 10.dp)) {

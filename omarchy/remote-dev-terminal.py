@@ -29,6 +29,7 @@ class App(Gtk.Window):
         self.set_size_request(700, 450)
         self.sessions = []
         self.shared_by_host = {}
+        self.sync_pending = set()
         self.sync_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="session-sync")
         self.tiled = False
         try:
@@ -125,11 +126,6 @@ class App(Gtk.Window):
         settings.pack_start(self.delay, False, False, 0)
         settings.pack_start(Gtk.Label(label="秒"), False, False, 0)
         sidebar.pack_start(settings, False, False, 0)
-        shared_title = Gtk.Label(label="共享会话", xalign=0)
-        shared_title.get_style_context().add_class("section")
-        sidebar.pack_start(shared_title, False, False, 0)
-        self.shared_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
-        sidebar.pack_start(self.shared_list, False, False, 0)
         hint = Gtk.Label(label="SSH 密码和密钥由系统 SSH 处理。\n关闭标签会断开连接；tmux 会话保留在远端。", xalign=0)
         hint.set_line_wrap(True)
         hint.get_style_context().add_class("subtitle")
@@ -152,9 +148,6 @@ class App(Gtk.Window):
         title = Gtk.Label(label="工作区", xalign=0)
         title.get_style_context().add_class("workspace-title")
         toolbar.pack_start(title, True, True, 0)
-        shared = Gtk.Button(label="共享会话")
-        shared.connect("clicked", self.show_shared_sessions)
-        toolbar.pack_start(shared, False, False, 0)
         self.count_label = Gtk.Label(label="0 / 8")
         self.count_label.get_style_context().add_class("subtitle")
         toolbar.pack_start(self.count_label, False, False, 0)
@@ -186,6 +179,7 @@ class App(Gtk.Window):
         self.views.set_visible_child_name("empty")
         self.refresh()
         self.refresh_all_shared()
+        GLib.timeout_add_seconds(5, self.poll_shared)
         self.scale_layout(self)
         self.connect("destroy", Gtk.main_quit)
 
@@ -666,41 +660,36 @@ class App(Gtk.Window):
     def shared_host_key(host):
         return (host.get("address"), host.get("port"), host.get("username"), host.get("sync_url"))
 
-    def render_shared(self):
-        for child in self.shared_list.get_children():
-            self.shared_list.remove(child)
-        for host in self.data["hosts"]:
-            entry = self.shared_by_host.get(self.shared_host_key(host))
-            if not entry:
-                continue
-            if isinstance(entry, str):
-                label = Gtk.Label(label=host["name"] + " · " + entry, xalign=0)
-                label.set_line_wrap(True)
-                self.shared_list.pack_start(label, False, False, 0)
-                continue
-            for item in entry:
-                button = Gtk.Button(label=host["name"] + " · " + item["display_name"])
-                button.connect("clicked", lambda _button, h=host, i=item: self.open_terminal(None, h, i))
-                self.shared_list.pack_start(button, False, False, 0)
-        self.shared_list.show_all()
-
     def refresh_host_shared(self, host):
         if not host.get("sync_url"):
             return
         key = self.shared_host_key(host)
         snapshot = dict(host)
+        pending_key = (key, snapshot.get("sync_token"))
+        if pending_key in self.sync_pending:
+            return
+        self.sync_pending.add(pending_key)
         def worker():
             try:
                 result = sync_request(snapshot, "GET")["sessions"]
             except Exception:
                 result = "同步失败，请检查地址和令牌"
             def finish():
+                self.sync_pending.discard(pending_key)
                 if any(self.shared_host_key(h) == key and h.get("sync_token") == snapshot.get("sync_token") for h in self.data["hosts"]):
                     self.shared_by_host[key] = result
-                    self.render_shared()
+                    if isinstance(result, list):
+                        for item in result:
+                            if len(self.sessions) < 8 and not any(session["id"] == item["id"] for session in self.sessions):
+                                self.open_terminal(None, snapshot, item, activate=False)
                 return False
             GLib.idle_add(finish)
         self.sync_executor.submit(worker)
+
+    def poll_shared(self):
+        for host in self.data["hosts"]:
+            self.refresh_host_shared(host)
+        return True
 
     def refresh_all_shared(self):
         self.shared_by_host = {}
@@ -708,7 +697,6 @@ class App(Gtk.Window):
             if host.get("sync_url"):
                 self.shared_by_host[self.shared_host_key(host)] = "正在同步…"
                 self.refresh_host_shared(host)
-        self.render_shared()
 
     def sync_async(self, host, method, session_id, item=None):
         if not host.get("sync_url"):
@@ -752,7 +740,7 @@ class App(Gtk.Window):
             GLib.idle_add(show)
         self.sync_executor.submit(worker)
 
-    def open_terminal(self, _button, shared_host=None, shared_item=None):
+    def open_terminal(self, _button, shared_host=None, shared_item=None, activate=True):
         host = shared_host or self.current_host()
         di, ai = self.directories.get_active(), self.agents.get_active()
         if not host or (shared_item is None and (di < 0 or ai < 0)):
@@ -842,7 +830,7 @@ class App(Gtk.Window):
             shutil.rmtree(socket_dir, ignore_errors=True)
         close.connect("clicked", close_tab)
         self.sessions.append({"terminal": terminal, "label": label, "key": key, "id": session_id})
-        self.rebuild_view(selected=terminal)
+        self.rebuild_view(selected=terminal if activate else None)
         def spawned(_terminal, _pid, error, *_):
             if error:
                 self.message("无法启动 SSH", str(error))
