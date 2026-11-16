@@ -796,6 +796,31 @@ class App(Gtk.Window):
         self.scale_layout(label)
         label.pack_start(Gtk.Label(label=directory["name"] + " · " + agent["name"]), True, True, 0)
         kind, quota_executable = quota_agent(agent["command"])
+        if kind == "codex":
+            # Codex handles Page Up/Down, while tmux may capture the wheel and
+            # enter an empty copy-mode history instead of scrolling Codex.
+            smooth_scroll = [0.0]
+            def scroll_codex(widget, event):
+                if event.state & Gtk.accelerator_get_default_mod_mask():
+                    return False
+                if event.direction == Gdk.ScrollDirection.UP:
+                    delta = -1.0
+                elif event.direction == Gdk.ScrollDirection.DOWN:
+                    delta = 1.0
+                elif event.direction == Gdk.ScrollDirection.SMOOTH:
+                    valid, _dx, delta = event.get_scroll_deltas()
+                    if not valid or delta == 0:
+                        return False
+                else:
+                    return False
+                smooth_scroll[0] += delta
+                while abs(smooth_scroll[0]) >= 1:
+                    up = smooth_scroll[0] < 0
+                    widget.feed_child(b"\x1b[5~" if up else b"\x1b[6~")
+                    smooth_scroll[0] += 1 if up else -1
+                return True
+            terminal.add_events(Gdk.EventMask.SCROLL_MASK | Gdk.EventMask.SMOOTH_SCROLL_MASK)
+            terminal.connect("scroll-event", scroll_codex)
         quota = Gtk.Label(label=format_quota([]) if kind else "")
         label.pack_start(quota, False, False, 0)
         image_button = Gtk.Button.new_from_icon_name("image-x-generic-symbolic", Gtk.IconSize.MENU)
