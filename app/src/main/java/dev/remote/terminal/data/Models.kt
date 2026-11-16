@@ -31,6 +31,8 @@ data class HostProfile(
     val password: String = "",
     val icon: String = "⌘",
     val directories: List<ProjectDirectory> = emptyList(),
+    val syncUrl: String = "",
+    val syncToken: String = "",
 )
 
 data class AgentPreset(
@@ -39,6 +41,13 @@ data class AgentPreset(
     val command: String,
     val icon: String,
 )
+
+/** Returns the configured Codex CLI executable, including compatible codex2 builds. */
+fun codexExecutable(command: String): String? {
+    val configuredExecutable = command.trim().split(Regex("\\s+"), limit = 2).firstOrNull() ?: return null
+    val executable = configuredExecutable.removeSurrounding("\"").removeSurrounding("'")
+    return executable.takeIf { it.substringAfterLast('/') == "codex" || it.substringAfterLast('/') == "codex2" }
+}
 
 data class TerminalTask(
     val id: String,
@@ -92,6 +101,8 @@ class LocalStore(context: Context) {
                 port = item.optInt("port", 22), username = item.getString("username"),
                 password = vault.decrypt(preferences.getString("password_${item.getString("id")}", null)),
                 icon = item.optString("icon", "⌘"), directories = directories,
+                syncUrl = item.optString("sync_url", ""),
+                syncToken = vault.decrypt(preferences.getString("sync_token_${item.getString("id")}", null)),
             )
         }
     }.getOrDefault(emptyList())
@@ -103,10 +114,11 @@ class LocalStore(context: Context) {
             val dirs = JSONArray()
             host.directories.forEach { dirs.put(JSONObject().put("id", it.id).put("name", it.name).put("path", it.path).put("icon", it.icon)) }
             root.put(JSONObject().put("id", host.id).put("name", host.name).put("address", host.address)
-                .put("port", host.port).put("username", host.username).put("icon", host.icon).put("directories", dirs))
+                .put("port", host.port).put("username", host.username).put("icon", host.icon).put("directories", dirs).put("sync_url", host.syncUrl))
             preferences.edit().putString("password_${host.id}", vault.encrypt(host.password)).apply()
+            preferences.edit().putString("sync_token_${host.id}", vault.encrypt(host.syncToken)).apply()
         }
-        (oldIds - hosts.map { it.id }.toSet()).forEach { preferences.edit().remove("password_$it").apply() }
+        (oldIds - hosts.map { it.id }.toSet()).forEach { preferences.edit().remove("password_$it").remove("sync_token_$it").apply() }
         preferences.edit().putString("hosts", root.toString()).apply()
     }
 

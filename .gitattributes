@@ -1,0 +1,4 @@
+/ubuntu/*.sh text eol=lf
+/ubuntu/*.py text eol=lf
+/windows/*.sh text eol=lf
+/windows/*.py text eol=lf

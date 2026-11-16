@@ -12,8 +12,8 @@ android {
         applicationId = "dev.remote.terminal"
         minSdk = 26
         targetSdk = 35
-        versionCode = 43
-        versionName = "1.1.32"
+        versionCode = 44
+        versionName = "1.1.33"
     }
 
     compileOptions {
@@ -21,7 +21,7 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
-    buildFeatures { compose = true }
+    buildFeatures { compose = true; buildConfig = true }
 }
 
 dependencies {

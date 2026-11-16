@@ -30,7 +30,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.rememberScrollableState
 import androidx.compose.foundation.gestures.scrollable
@@ -137,9 +137,11 @@ import androidx.compose.ui.viewinterop.AndroidView
 import dev.remote.terminal.data.AgentPreset
 import dev.remote.terminal.data.HostProfile
 import dev.remote.terminal.data.SessionStore
+import dev.remote.terminal.data.SyncClient
 import dev.remote.terminal.data.LocalStore
 import dev.remote.terminal.data.ProjectDirectory
 import dev.remote.terminal.data.TerminalTask
+import dev.remote.terminal.data.codexExecutable
 import dev.remote.terminal.ssh.SshTerminalController
 import dev.remote.terminal.ssh.HostKeyApprovalRequiredException
 import dev.remote.terminal.ssh.RemoteDirectoryBrowser
@@ -175,6 +177,15 @@ private val AutoEnterPromptRegex = Regex("(?:\\[Y/n\\]|\\(Y/n\\)|\\[Yes/no\\]|(?
 private val SelectedApprovalRegex = Regex(
     "(?i)^\\s*[›❯>➜]\\s*(?:\\d+[.)]\\s*)?(?:yes\\b|allow\\b|approve\\b|proceed\\b|continue\\b|允许|批准|同意|继续|确认)"
 )
+
+private fun quotaLabel(minutes: Int, percent: Int): String {
+    val period = when {
+        minutes % 10080 == 0 -> "${minutes / 10080}周"
+        minutes % 60 == 0 -> "${minutes / 60}小时"
+        else -> "${minutes}分"
+    }
+    return "$period $percent%"
+}
 
 private fun detectAutoEnterPromptSignature(text: String): String? {
     val visibleText = text.trimEnd()
@@ -346,6 +357,10 @@ private fun RemoteTerminalApp(store: LocalStore) {
         var deletingDirectory by remember { mutableStateOf<Pair<String, ProjectDirectory>?>(null) }
         var deletingAgent by remember { mutableStateOf<AgentPreset?>(null) }
         var closingSession by remember { mutableStateOf<TerminalSessionState?>(null) }
+        var sharedSessions by remember { mutableStateOf<List<org.json.JSONObject>?>(null) }
+        var sharedHost by remember { mutableStateOf<HostProfile?>(null) }
+        var startupShared by remember { mutableStateOf<List<Pair<HostProfile, org.json.JSONObject>>>(emptyList()) }
+        var syncLoading by remember { mutableStateOf(false) }
         val snackbars = remember { SnackbarHostState() }
         val scope = rememberCoroutineScope()
         val mainHandler = remember { Handler(Looper.getMainLooper()) }
@@ -361,6 +376,11 @@ private fun RemoteTerminalApp(store: LocalStore) {
             val index = sessions.indexOf(session)
             if (index < 0) return
             sessionStore.remove(session.task.id)
+            if (session.task.host.syncUrl.isNotBlank()) scope.launch {
+                runCatching { withContext(SyncClient.dispatcher) { SyncClient.delete(session.task) } }
+                    .onSuccess { startupShared = startupShared.filterNot { it.first.id == session.task.host.id && it.second.optString("id") == session.task.id.replace("-", "") } }
+                    .onFailure { snackbars.showSnackbar("同步关闭失败：${it.message}") }
+            }
             session.cancelAutoEnter()
             TerminalConnectionRegistry.unregister(session.task.id, session.controller)
             session.controller.close()
@@ -383,7 +403,13 @@ private fun RemoteTerminalApp(store: LocalStore) {
             val same = sessions.count { it.task.host.id == host.id && it.task.directory.id == directory.id && it.task.agent.id == agent.id }
             val task = restoredTask ?: TerminalTask(UUID.randomUUID().toString(), host, directory, agent,
                 if (same == 0) agent.name else "${agent.name} ${same + 1}")
-            if (restoredTask == null) sessionStore.save(task)
+            if (restoredTask == null) {
+                sessionStore.save(task)
+                if (host.syncUrl.isNotBlank()) scope.launch {
+                    runCatching { withContext(SyncClient.dispatcher) { SyncClient.save(task) } }
+                        .onFailure { snackbars.showSnackbar("会话同步失败：${it.message}") }
+                }
+            }
             val state = TerminalSessionState(task, mainHandler)
             state.controller = SshTerminalController(
                 task = task, store = store, restoreOnly = restoredTask != null,
@@ -452,12 +478,49 @@ private fun RemoteTerminalApp(store: LocalStore) {
             state.controller.start()
         }
 
+        fun openSharedSession(host: HostProfile, item: org.json.JSONObject) {
+            val id = item.getString("id")
+            val existing = sessions.indexOfFirst { it.task.id.replace("-", "") == id && it.task.host.id == host.id }
+            if (existing >= 0) { activePage = existing; route = AppRoute.TERMINAL; return }
+            val currentHost = hosts.firstOrNull { it.id == host.id } ?: return
+            val path = item.getString("directory_path")
+            val directory = currentHost.directories.firstOrNull { it.path == path }
+                ?: ProjectDirectory(UUID.randomUUID().toString(), item.getString("directory_name"), path)
+            val updatedHost = if (directory in currentHost.directories) currentHost else currentHost.copy(directories = currentHost.directories + directory)
+            if (updatedHost != currentHost) saveHosts(hosts.map { if (it.id == currentHost.id) updatedHost else it })
+            val command = item.getString("agent_command")
+            val agent = agents.firstOrNull { it.command == command }
+                ?: AgentPreset(UUID.randomUUID().toString(), item.getString("agent_name"), command, "✳").also { agents.add(it); store.saveAgents(agents) }
+            val task = TerminalTask(id, updatedHost, directory, agent, item.getString("display_name"))
+            sessionStore.save(task)
+            openTask(updatedHost, directory, agent, task)
+            activePage = sessions.lastIndex; route = AppRoute.TERMINAL
+        }
+
+        fun refreshShared(host: HostProfile) {
+            scope.launch {
+                runCatching { withContext(SyncClient.dispatcher) { SyncClient.list(host) } }
+                    .onSuccess { items ->
+                        startupShared = startupShared.filterNot { it.first.id == host.id } + items.map { host to it }
+                    }
+                    .onFailure { snackbars.showSnackbar("${host.name} 同步失败：${it.message}") }
+            }
+        }
+
         LaunchedEffect(Unit) {
             sessionStore.load(hosts, agents).forEach { task ->
-                openTask(task.host, task.directory, task.agent, task)
+                if (task.host.syncUrl.isBlank()) openTask(task.host, task.directory, task.agent, task)
             }
             activePage = activePage.coerceIn(0, (sessions.size - 1).coerceAtLeast(0))
             sessionsRestored = true
+            val configuredHosts = hosts.filter { it.syncUrl.isNotBlank() }
+            syncLoading = configuredHosts.isNotEmpty()
+            configuredHosts.forEach { host ->
+                runCatching { withContext(SyncClient.dispatcher) { SyncClient.list(host) } }
+                    .onSuccess { items -> startupShared = startupShared.filterNot { it.first.id == host.id } + items.map { host to it } }
+                    .onFailure { scope.launch { snackbars.showSnackbar("${host.name} 启动同步失败：${it.message}") } }
+            }
+            syncLoading = false
         }
 
         BackHandler(enabled = route != AppRoute.HOME) {
@@ -469,10 +532,21 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 AppRoute.HOME -> HomeScreen(
                     hosts = hosts, agents = agents, selectedHost = selectedHost, selectedAgent = selectedAgent,
                     sessions = sessions, onSelectHost = { selectedHostId = it.id }, onSelectAgent = { selectedAgentId = it.id },
+                    shared = startupShared.filter { (host, item) -> sessions.none { it.task.host.id == host.id && it.task.id.replace("-", "") == item.optString("id") } },
+                    syncLoading = syncLoading, onOpenShared = ::openSharedSession,
                     onManage = { route = AppRoute.MANAGE }, onAddHost = { addingHost = true },
                     onAddDirectory = { selectedHost?.let { editingDirectory = it.id to null } },
                     onOpenAgents = { route = AppRoute.AGENTS },
                     onOpenSettings = { showSettings = true },
+                    onSharedSessions = {
+                        selectedHost?.let { host ->
+                            scope.launch {
+                                runCatching { withContext(SyncClient.dispatcher) { SyncClient.list(host) } }
+                                    .onSuccess { sharedHost = host; sharedSessions = it; startupShared = startupShared.filterNot { entry -> entry.first.id == host.id } + it.map { item -> host to item } }
+                                    .onFailure { snackbars.showSnackbar("读取共享会话失败：${it.message}") }
+                            }
+                        }
+                    },
                     onStartTask = { host, dir, agent -> openTask(host, dir, agent) },
                     onResumeSession = { index -> activePage = index; sessions[index].unread = false; route = AppRoute.TERMINAL },
                 )
@@ -498,6 +572,26 @@ private fun RemoteTerminalApp(store: LocalStore) {
             SnackbarHost(snackbars, modifier = Modifier.align(Alignment.BottomCenter).padding(horizontal = 14.dp, vertical = 8.dp))
         }
 
+        sharedSessions?.let { items ->
+            AlertDialog(
+                onDismissRequest = { sharedSessions = null },
+                title = { Text("共享会话") },
+                text = {
+                    Column(Modifier.verticalScroll(rememberScrollState())) {
+                        if (items.isEmpty()) Text("暂无共享会话")
+                        items.forEach { item ->
+                            TextButton(onClick = {
+                                val host = sharedHost ?: return@TextButton
+                                openSharedSession(host, item)
+                                sharedSessions = null
+                            }) { Text("${item.optString("display_name")} · ${item.optString("directory_name")}") }
+                        }
+                    }
+                },
+                confirmButton = { TextButton(onClick = { sharedSessions = null }) { Text("关闭") } },
+            )
+        }
+
         if (addingHost || editingHost != null) HostEditorDialog(
             initial = editingHost,
             onDismiss = { addingHost = false; editingHost = null },
@@ -505,6 +599,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 val wasNew = hosts.none { it.id == host.id }
                 saveHosts(if (wasNew) hosts.toList() + host else hosts.map { if (it.id == host.id) host else it })
                 selectedHostId = host.id
+                if (host.syncUrl.isNotBlank()) refreshShared(host)
                 addingHost = false; editingHost = null
             },
         )
@@ -598,6 +693,9 @@ private fun HomeScreen(
     sessions: List<TerminalSessionState>, onSelectHost: (HostProfile) -> Unit, onSelectAgent: (AgentPreset) -> Unit,
     onManage: () -> Unit, onAddHost: () -> Unit, onAddDirectory: () -> Unit, onOpenAgents: () -> Unit, onOpenSettings: () -> Unit,
     onStartTask: (HostProfile, ProjectDirectory, AgentPreset) -> Unit, onResumeSession: (Int) -> Unit,
+    onSharedSessions: () -> Unit,
+    shared: List<Pair<HostProfile, org.json.JSONObject>>, syncLoading: Boolean,
+    onOpenShared: (HostProfile, org.json.JSONObject) -> Unit,
 ) {
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
         Row(Modifier.fillMaxWidth().padding(top = 24.dp, bottom = 18.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -607,7 +705,7 @@ private fun HomeScreen(
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text("REMOTE DEV", color = White, fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp, fontSize = 17.sp)
-                Text("随时接回你的开发现场", color = Muted, fontSize = 12.sp)
+                Text("随时接回你的开发现场 · v${BuildConfig.VERSION_NAME}", color = Muted, fontSize = 12.sp)
             }
             IconButton(onClick = onManage) {
                 Icon(Icons.Default.Dns, contentDescription = "管理主机和目录", tint = Muted)
@@ -620,24 +718,54 @@ private fun HomeScreen(
             }
         }
 
+        if (selectedHost?.syncUrl?.isNotBlank() == true) {
+            TextButton(onClick = onSharedSessions) { Text("查看共享会话 · ${selectedHost.name}", color = Mint) }
+        }
+        if (syncLoading) Text("正在同步共享会话…", color = Muted, fontSize = 12.sp)
+        if (shared.isNotEmpty()) {
+            Text("共享会话", color = White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            shared.forEach { (host, item) ->
+                TextButton(onClick = { onOpenShared(host, item) }) {
+                    Text("${host.name} · ${item.optString("display_name")} · ${item.optString("directory_name")}", color = Mint)
+                }
+            }
+        }
+
         if (sessions.isNotEmpty()) {
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(bottom = 10.dp)) {
                 Text("进行中的任务", color = White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.width(8.dp)); Text("${sessions.size}", color = Muted, fontSize = 12.sp)
             }
-            LazyRow(horizontalArrangement = Arrangement.spacedBy(9.dp), modifier = Modifier.padding(bottom = 22.dp)) {
-                items(sessions, key = { it.task.id }) { session ->
-                    Surface(onClick = { onResumeSession(sessions.indexOf(session)) }, color = Panel, shape = RoundedCornerShape(14.dp), border = androidx.compose.foundation.BorderStroke(1.dp, if (session.needsAction) Coral.copy(alpha = .6f) else Edge)) {
-                        Row(Modifier.padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Text(session.task.agent.icon, fontSize = 15.sp); Spacer(Modifier.width(8.dp))
-                            Column {
-                                Text(session.task.displayName, color = White, fontSize = 12.sp, fontWeight = FontWeight.Medium)
-                                Text(if (session.needsAction) "需要确认" else "${session.task.host.name} · ${session.task.directory.name}", color = if (session.needsAction) Coral else Muted, fontSize = 10.sp)
+            Column(Modifier.fillMaxWidth().padding(bottom = 18.dp)) {
+                sessions.forEachIndexed { index, session ->
+                    Row(
+                        Modifier.fillMaxWidth().clickable { onResumeSession(index) }.padding(horizontal = 8.dp, vertical = 7.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(session.task.agent.icon, fontSize = 15.sp)
+                        Spacer(Modifier.width(9.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(session.task.displayName, color = White, fontSize = 12.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+                            Text(
+                                if (session.needsAction) "需要确认" else "${session.task.host.name} · ${session.task.directory.name}",
+                                color = if (session.needsAction) Coral else Muted, fontSize = 10.sp, maxLines = 1,
+                            )
+                        }
+                        when {
+                            session.needsAction -> Text("!", color = Coral, fontWeight = FontWeight.Bold)
+                            session.unread -> Box(Modifier.size(7.dp).background(Blue, CircleShape))
+                        }
+                        if (codexExecutable(session.task.agent.command) != null) {
+                            val quota = session.codexQuota
+                            Column(Modifier.padding(start = 10.dp), horizontalAlignment = Alignment.End) {
+                                if (quota == null) Text("额度 --", color = Muted, fontSize = 9.sp, lineHeight = 11.sp)
+                                else quota.take(2).forEach { (minutes, percent) ->
+                                    Text(quotaLabel(minutes, percent), color = if (percent <= 20) Coral else Muted, fontSize = 9.sp, lineHeight = 11.sp, maxLines = 1)
+                                }
                             }
-                            if (session.needsAction) { Spacer(Modifier.width(8.dp)); Text("!", color = Coral, fontWeight = FontWeight.Bold) }
-                            else if (session.unread) { Spacer(Modifier.width(8.dp)); Box(Modifier.size(7.dp).background(Blue, CircleShape)) }
                         }
                     }
+                    if (index < sessions.lastIndex) Divider(color = Edge, thickness = 1.dp)
                 }
             }
         }
@@ -860,10 +988,20 @@ private fun TerminalWorkspace(
 ) {
     if (sessions.isEmpty()) return
     val pager = rememberPagerState(initialPage = initialIndex.coerceIn(0, sessions.lastIndex), pageCount = { sessions.size })
+    val sessionIds = sessions.map { it.task.id }
+    var pagerReady by remember(sessionIds) { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     // Pager may briefly retain a removed page index while it reconciles the new count.
-    val currentSession = sessions.getOrNull(pager.currentPage) ?: sessions.lastOrNull() ?: return
-    LaunchedEffect(pager.currentPage, sessions.size) { if (pager.currentPage in sessions.indices) onPageSelected(pager.currentPage) }
+    val fallbackSession = sessions.getOrNull(initialIndex.coerceIn(0, sessions.lastIndex)) ?: sessions.lastOrNull() ?: return
+    val currentSession = sessions.getOrNull(pager.currentPage) ?: fallbackSession
+    LaunchedEffect(sessionIds) {
+        pagerReady = false
+        pager.scrollToPage(initialIndex.coerceIn(0, sessions.lastIndex))
+        pagerReady = true
+    }
+    LaunchedEffect(pager.currentPage, sessions.size, pagerReady) {
+        if (pagerReady && pager.currentPage in sessions.indices) onPageSelected(pager.currentPage)
+    }
     Column(Modifier.fillMaxSize().background(Ink)) {
         Row(Modifier.fillMaxWidth().padding(start = 5.dp, end = 10.dp, top = 5.dp, bottom = 5.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack, modifier = Modifier.size(42.dp)) { Icon(Icons.Default.ArrowBack, null, tint = White, modifier = Modifier.size(20.dp)) }
@@ -891,7 +1029,7 @@ private fun TerminalWorkspace(
             }
         }
         HorizontalPager(state = pager, modifier = Modifier.weight(1f), userScrollEnabled = false, key = { sessions.getOrNull(it)?.task?.id ?: "removed-$it" }) { page ->
-            sessions.getOrNull(page)?.let { TerminalPage(it, page == pager.currentPage) }
+            TerminalPage(sessions.getOrNull(page) ?: currentSession, page == pager.currentPage)
         }
     }
 }
@@ -915,8 +1053,8 @@ private fun SessionTab(session: TerminalSessionState, selected: Boolean, onClick
         border = androidx.compose.foundation.BorderStroke(1.dp, if (selected) color.copy(alpha = .7f) else Edge)) {
         Row(Modifier.padding(start = 10.dp, end = 5.dp, top = 6.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             Box(Modifier.size(7.dp).alpha(if (session.isStreaming) pulse else 1f).background(color, CircleShape))
-            val supportsQuota = session.task.agent.id == "codex" || session.task.agent.id == "antigravity"
-            Box(Modifier.width(if (supportsQuota) 52.dp else 20.dp), contentAlignment = Alignment.Center) {
+            val supportsQuota = codexExecutable(session.task.agent.command) != null || session.task.agent.id == "antigravity"
+            Box(Modifier.width(if (supportsQuota) 64.dp else 20.dp), contentAlignment = Alignment.Center) {
                 if (remainingSeconds > 0) {
                     Text(remainingSeconds.toString(), color = color, fontWeight = FontWeight.Bold, fontSize = 11.sp)
                 } else if (supportsQuota) {
@@ -924,13 +1062,7 @@ private fun SessionTab(session: TerminalSessionState, selected: Boolean, onClick
                         val quota = session.codexQuota
                         if (quota == null) Text("额度 --", color = Muted, fontSize = 9.sp, lineHeight = 10.sp)
                         else quota.take(2).forEach { (minutes, percent) ->
-                            val period = when {
-                                minutes % 10080 == 0 -> "${minutes / 10080}周"
-                                minutes % 1440 == 0 -> "${minutes / 1440}天"
-                                minutes % 60 == 0 -> "${minutes / 60}时"
-                                else -> "${minutes}分"
-                            }
-                            Text("$period $percent%", color = if (percent <= 20) Coral else Muted, fontSize = 9.sp, lineHeight = 10.sp, maxLines = 1)
+                            Text(quotaLabel(minutes, percent), color = if (percent <= 20) Coral else Muted, fontSize = 9.sp, lineHeight = 10.sp, maxLines = 1)
                         }
                     }
                 }
@@ -976,6 +1108,8 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
     val allRows = remember(scrollback, screen) { scrollback + screen }
     val liveFirstVisibleRow = (allRows.size - gestureVisibleRows).coerceAtLeast(0)
     val latestLiveFirstVisibleRow by rememberUpdatedState(liveFirstVisibleRow)
+    val latestAllRows by rememberUpdatedState(allRows)
+    val latestTerminalViewport by rememberUpdatedState(terminalViewport)
     val latestScrollbackTopRow by rememberUpdatedState(scrollbackTopRow)
     LaunchedEffect(liveFirstVisibleRow) {
         scrollbackTopRow = scrollbackTopRow?.let { if (it >= liveFirstVisibleRow) null else it }
@@ -1087,24 +1221,27 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
                                     selection = null; selectionMenu = false; showKeyboard()
                                 }
                             },
-                            onLongPress = { position ->
-                                if (isCurrent && allRows.isNotEmpty()) {
-                                    val first = (scrollbackTopRow ?: (allRows.size - terminalViewport.height / lineHeightPx).coerceAtLeast(0f))
-                                    val (row, col) = selectionPosition(position, first, allRows)
-                                    selection = TerminalSelection(allRows, first, row, col, row, col)
+                        )
+                    }
+                    .pointerInput(isCurrent, terminalViewport) {
+                        if (isCurrent) detectDragGesturesAfterLongPress(
+                            onDragStart = { position ->
+                                val rows = latestAllRows
+                                if (rows.isNotEmpty()) {
+                                    val first = (latestScrollbackTopRow ?: (rows.size - latestTerminalViewport.height / lineHeightPx).coerceAtLeast(0f))
+                                    val (row, col) = selectionPosition(position, first, rows)
+                                    selection = TerminalSelection(rows, first, row, col, row, col)
                                     selectionMenu = true
                                 }
                             },
+                            onDrag = { change, _ ->
+                                selection?.let { current ->
+                                    val (row, col) = selectionPosition(change.position, current.firstRow, current.rows)
+                                    selection = current.copy(endRow = row, endColumn = col)
+                                    change.consume()
+                                }
+                            },
                         )
-                    }
-                    .pointerInput(selection != null, isCurrent) {
-                        if (selection != null && isCurrent) detectDragGestures { change, _ ->
-                            selection?.let { current ->
-                                val (row, col) = selectionPosition(change.position, current.firstRow, current.rows)
-                                selection = current.copy(endRow = row, endColumn = col)
-                                change.consume()
-                            }
-                        }
                     },
             ) {
                 val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -1237,10 +1374,48 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
                     ctrlArmed = false; altArmed = false; shiftArmed = false
                     session.clearAttention()
                 }
+                fun pasteClipboard(): Boolean {
+                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                    val clip = clipboard.primaryClip
+                    val text = if (clip != null && clip.itemCount > 0) {
+                        clip.getItemAt(0).coerceToText(context)?.toString().orEmpty()
+                    } else ""
+                    if (text.isNotEmpty()) {
+                        scrollbackTopRow = null
+                        resetInput?.invoke()
+                        session.controller.send(session.buffer.pasteSequence(text))
+                        session.clearAttention()
+                    }
+                    return true
+                }
                 editor = object : EditText(viewContext) {
+                    override fun onTextContextMenuItem(id: Int): Boolean {
+                        if (id == android.R.id.paste) return pasteClipboard()
+                        return super.onTextContextMenuItem(id)
+                    }
+
+                    override fun onKeyShortcut(keyCode: Int, event: KeyEvent): Boolean {
+                        if (keyCode == KeyEvent.KEYCODE_V && event.isCtrlPressed) return pasteClipboard()
+                        return super.onKeyShortcut(keyCode, event)
+                    }
+
                     override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection? {
                         val connection = super.onCreateInputConnection(outAttrs) ?: return null
                         return object : InputConnectionWrapper(connection, true) {
+                            override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
+                                val committed = text?.toString().orEmpty()
+                                if (committed.contains('\n') || committed.contains('\r')) {
+                                    resetInput?.invoke()
+                                    if (committed.isNotEmpty()) {
+                                        scrollbackTopRow = null
+                                        session.controller.send(session.buffer.pasteSequence(committed))
+                                        session.clearAttention()
+                                    }
+                                    return true
+                                }
+                                return super.commitText(text, newCursorPosition)
+                            }
+
                             override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean {
                                 if (beforeLength > 0 && selectionStart == 0 && selectionEnd == 0) {
                                     repeat(beforeLength) { sendBackspace() }
@@ -1452,8 +1627,10 @@ private fun HostEditorDialog(initial: HostProfile?, onDismiss: () -> Unit, onSav
     var username by remember(initial?.id) { mutableStateOf(initial?.username.orEmpty()) }
     var password by remember(initial?.id) { mutableStateOf(initial?.password.orEmpty()) }
     var icon by remember(initial?.id) { mutableStateOf(initial?.icon ?: "⌘") }
+    var syncUrl by remember(initial?.id) { mutableStateOf(initial?.syncUrl.orEmpty()) }
+    var syncToken by remember(initial?.id) { mutableStateOf(initial?.syncToken.orEmpty()) }
     EditorDialogFrame(if (initial == null) "添加主机" else "编辑主机", onDismiss, canSave = name.isNotBlank() && address.isNotBlank() && username.isNotBlank(), onConfirm = {
-        onSave(HostProfile(initial?.id ?: UUID.randomUUID().toString(), name.trim(), address.trim(), port.toIntOrNull()?.takeIf { it in 1..65535 } ?: 22, username.trim(), password, icon.ifBlank { "⌘" }, initial?.directories.orEmpty()))
+        onSave(HostProfile(initial?.id ?: UUID.randomUUID().toString(), name.trim(), address.trim(), port.toIntOrNull()?.takeIf { it in 1..65535 } ?: 22, username.trim(), password, icon.ifBlank { "⌘" }, initial?.directories.orEmpty(), syncUrl.trim(), syncToken))
     }) {
         OutlinedTextField(name, { name = it }, label = { Text("主机名称") }, placeholder = { Text("例如：Mac Studio") }, singleLine = true, modifier = Modifier.fillMaxWidth())
         IconPicker(icon, { icon = it }, listOf("⌘", "🖥️", "☁️", "🐧", "⚡", "🧪", "🏠", "💻", "🔧", "🌐"))
@@ -1464,6 +1641,8 @@ private fun HostEditorDialog(initial: HostProfile?, onDismiss: () -> Unit, onSav
         }
         OutlinedTextField(password, { password = it }, label = { Text("SSH 密码") }, placeholder = { Text("密码保存在本机加密区") }, singleLine = true,
             visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(syncUrl, { syncUrl = it }, label = { Text("同步服务地址（可选）") }, placeholder = { Text("https://地址:端口") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(syncToken, { syncToken = it }, label = { Text("同步服务令牌") }, singleLine = true, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
     }
 }
 

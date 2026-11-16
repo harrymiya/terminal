@@ -9,6 +9,7 @@ import com.jcraft.jsch.Session
 import com.jcraft.jsch.UserInfo
 import dev.remote.terminal.data.LocalStore
 import dev.remote.terminal.data.TerminalTask
+import dev.remote.terminal.data.codexExecutable
 import android.os.SystemClock
 import java.io.IOException
 import java.io.InputStreamReader
@@ -174,9 +175,10 @@ class SshTerminalController(
     private fun quotaLoop(connection: ActiveConnection) {
         while (running.get() && activeConnection.get() === connection && connection.session.isConnected) {
             val result = runCatching {
-                when (task.agent.id) {
-                    "codex" -> readCodexQuota(connection.session)
-                    "antigravity" -> readAntigravityQuota(connection.session)
+                val codexCommand = codexExecutable(task.agent.command)
+                when {
+                    codexCommand != null -> readCodexQuota(connection.session, codexCommand)
+                    task.agent.id == "antigravity" -> readAntigravityQuota(connection.session)
                     else -> null
                 }
             }.getOrNull()
@@ -189,10 +191,13 @@ class SshTerminalController(
         }
     }
 
-    private fun readCodexQuota(session: Session): List<Pair<Int, Int>>? {
+    private fun readCodexQuota(session: Session, executable: String): List<Pair<Int, Int>>? {
         val channel = session.openChannel("exec") as ChannelExec
         try {
-            channel.setCommand("bash -lc 'exec codex app-server --listen stdio://'")
+            // Leave simple command names unquoted so the login shell can expand aliases.
+            val invocation = if (executable.matches(Regex("[A-Za-z0-9_]+"))) executable else shellQuote(executable)
+            val quotaCommand = "$invocation app-server --listen stdio://"
+            channel.setCommand("cd -- ${shellQuote(task.directory.path)} && \"${'$'}{SHELL:-/bin/bash}\" -l -i -c ${shellQuote(quotaCommand)}")
             val output = channel.outputStream
             val input = channel.inputStream
             channel.connect(10_000)
@@ -365,7 +370,7 @@ class SshTerminalController(
                 }
                 connectedAt = SystemClock.elapsedRealtime()
                 onStatus("已连接 · ${task.host.username}@${task.host.address}")
-                if ((task.agent.id == "codex" && task.agent.command.trim().matches(Regex("^codex(?:\\s.*)?$"))) ||
+                if (codexExecutable(task.agent.command) != null ||
                     (task.agent.id == "antigravity" && task.agent.command.trim().matches(Regex("^agy(?:\\s.*)?$")))) {
                     Thread({ quotaLoop(connection) }, "codex-quota-${task.id.take(8)}").apply { isDaemon = true; start() }
                 }
