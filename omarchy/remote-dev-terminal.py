@@ -63,6 +63,10 @@ class App(Gtk.Window):
             .tile-header { padding: 5px 8px; background: #1b2735; }
             .tile-focused { box-shadow: inset 0 0 0 2px #86dbb8; }
             .tile-focused .tile-header { background: #2b5146; }
+            paned.tile-paned > separator { background-color: #293748; margin: 0; padding: 0; }
+            paned.tile-paned.horizontal > separator { min-width: 6px; }
+            paned.tile-paned.vertical > separator { min-height: 6px; }
+            paned.tile-paned > separator:hover, paned.tile-paned > separator:active { background-color: #86dbb8; }
             .empty { color: #91a5b8; font-size: 15px; }
             .host-button { background: #1d2a39; border: 1px solid #34485b; padding: 8px; }
             .host-selected { background: #29483f; border-color: #86dbb8; color: #d8fff0; }
@@ -85,7 +89,7 @@ class App(Gtk.Window):
         sidebar_frame.pack_start(sidebar_scroll, True, True, 0)
         sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=16)
         self.sidebar = sidebar
-        sidebar.set_size_request(round(250 * self.scale / 100), -1)
+        sidebar.set_size_request(self.sidebar_target_width(), -1)
         sidebar_scroll.add(sidebar)
         brand = Gtk.Label(label="REMOTE DEV", xalign=0)
         brand.get_style_context().add_class("brand")
@@ -151,11 +155,21 @@ class App(Gtk.Window):
         self.count_label = Gtk.Label(label="0 / 8")
         self.count_label.get_style_context().add_class("subtitle")
         toolbar.pack_start(self.count_label, False, False, 0)
+        self.tile_layout = self.data.get("tile_layout", "grid")
+        if self.tile_layout not in ("grid", "columns", "rows"):
+            self.tile_layout = "grid"
         self.view_button = Gtk.ToggleButton(label="▦  平铺模式")
         self.view_button.get_style_context().add_class("menu-toggle")
         self.view_button.set_tooltip_text("切换标签和平铺视图")
         self.view_button.connect("toggled", self.change_view)
         toolbar.pack_start(self.view_button, False, False, 0)
+        layout_labels = {"grid": "▦  网格", "columns": "⬓  左右", "rows": "⬒  上下"}
+        self.layout_button = Gtk.Button(label=layout_labels.get(self.tile_layout, "▦  网格"))
+        self.layout_button.get_style_context().add_class("menu-toggle")
+        self.layout_button.set_tooltip_text("切换平铺布局（网格 / 左右分栏 / 上下分栏）")
+        self.layout_button.connect("clicked", self.cycle_tile_layout)
+        self.layout_button.set_no_show_all(True)
+        toolbar.pack_start(self.layout_button, False, False, 0)
         zoom = Gtk.SpinButton.new_with_range(50, 200, 1)
         zoom.set_numeric(True)
         zoom.set_value(self.scale)
@@ -168,10 +182,11 @@ class App(Gtk.Window):
         workspace.pack_start(self.views, True, True, 0)
         self.tabs = Gtk.Notebook(scrollable=True)
         self.views.add_named(self.tabs, "tabs")
-        self.grid = Gtk.Grid(column_spacing=1, row_spacing=1, column_homogeneous=True, row_homogeneous=True)
+        self.grid = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.grid.get_style_context().add_class("tile-grid")
         self.grid.set_hexpand(True)
         self.grid.set_vexpand(True)
+        self.grid.connect("size-allocate", self._on_grid_allocate)
         self.views.add_named(self.grid, "grid")
         self.empty = Gtk.Label(label="选择左侧主机和 Agent，然后点击工作区直达终端。")
         self.empty.get_style_context().add_class("empty")
@@ -186,11 +201,69 @@ class App(Gtk.Window):
     def change_view(self, button):
         self.tiled = button.get_active()
         button.set_label("▤  标签模式" if self.tiled else "▦  平铺模式")
+        if self.tiled:
+            self.layout_button.show()
+        else:
+            self.layout_button.hide()
         self.rebuild_view()
 
+    def cycle_tile_layout(self, _button):
+        layouts = ["grid", "columns", "rows"]
+        idx = (layouts.index(self.tile_layout) + 1) % len(layouts)
+        self.tile_layout = layouts[idx]
+        self.data["tile_layout"] = self.tile_layout
+        layout_labels = {"grid": "▦  网格", "columns": "⬓  左右", "rows": "⬒  上下"}
+        self.layout_button.set_label(layout_labels.get(self.tile_layout, "▦  网格"))
+        self.persist()
+        self.rebuild_view()
+
+    def sidebar_target_width(self):
+        if self.scale >= 100:
+            return round(250 * self.scale / 100)
+        # Prevent sidebar buttons and selectors from being squashed or clipped.
+        return max(210, round(250 * self.scale / 100))
+
+    def terminal_font_scale(self):
+        if self.scale >= 100:
+            return self.scale / 100.0
+        # When UI is shrunk (< 100%), protect terminal text legibility:
+        # Monospace terminal characters must stay clear, crisp, and readable.
+        # Damped scaling from 1.0 down to a safe floor (0.88) at 50% scale.
+        factor = self.scale / 100.0
+        return max(0.88, 1.0 - (1.0 - factor) * 0.24)
+
     def apply_scale_css(self):
-        factor = self.scale / 100
-        css = re.sub(r"(\d+)px", lambda match: f"{max(1, round(int(match.group(1)) * factor)) if int(match.group(1)) else 0}px", self.base_css)
+        factor = self.scale / 100.0
+        def replace_decl(match):
+            prop = match.group(1).strip()
+            val_str = match.group(2)
+            if factor >= 1.0:
+                return f"{prop}:{re.sub(r'(\d+)px', lambda m: f'{round(int(m.group(1)) * factor)}px', val_str)}"
+
+            # When scaling down (< 100%): protect text legibility and widget usability.
+            if prop == "font-size":
+                def scale_font(m):
+                    orig = int(m.group(1))
+                    font_factor = 1.0 - (1.0 - factor) * 0.35
+                    floor = 13 if orig >= 15 else (12 if orig >= 13 else 11)
+                    return f"{max(floor, round(orig * font_factor))}px"
+                return f"{prop}:{re.sub(r'(\d+)px', scale_font, val_str)}"
+            elif prop == "min-height":
+                orig = int(re.search(r'\d+', val_str).group(0)) if re.search(r'\d+', val_str) else 24
+                floor = 22 if orig >= 20 else 4
+                return f"{prop}:{re.sub(r'(\d+)px', lambda m: f'{max(floor, round(int(m.group(1)) * factor))}px', val_str)}"
+            elif prop == "min-width":
+                return f"{prop}:{re.sub(r'(\d+)px', lambda m: f'{max(4, round(int(m.group(1)) * factor))}px', val_str)}"
+            elif "padding" in prop:
+                return f"{prop}:{re.sub(r'(\d+)px', lambda m: f'{max(2, round(int(m.group(1)) * factor))}px', val_str)}"
+            elif "margin" in prop:
+                return f"{prop}:{re.sub(r'(\d+)px', lambda m: f'{max(4, round(int(m.group(1)) * factor))}px', val_str)}"
+            elif "border-radius" in prop:
+                return f"{prop}:{re.sub(r'(\d+)px', lambda m: f'{max(3, round(int(m.group(1)) * factor))}px', val_str)}"
+            else:
+                return f"{prop}:{re.sub(r'(\d+)px', lambda m: f'{max(1, round(int(m.group(1)) * factor)) if int(m.group(1)) else 0}px', val_str)}"
+
+        css = re.sub(r"([\w-]+)\s*:\s*([^;]+)(?=[;}])", replace_decl, self.base_css)
         # VTE applies its own font scale, so keep its CSS font size unscaled.
         self.css.load_from_data((css + "\nterminal { font-size: 13px; }").encode("utf-8"))
 
@@ -203,8 +276,13 @@ class App(Gtk.Window):
             properties.extend(("row-spacing", "column-spacing"))
         if not hasattr(widget, "_scale_baseline"):
             widget._scale_baseline = {name: widget.get_property(name) for name in properties}
+        factor = self.scale / 100.0
         for name, value in widget._scale_baseline.items():
-            widget.set_property(name, round(value * self.scale / 100))
+            if factor >= 1.0:
+                widget.set_property(name, round(value * factor))
+            else:
+                min_val = 1 if value > 0 and "spacing" in name else 0
+                widget.set_property(name, max(min_val, round(value * factor)))
         if isinstance(widget, Gtk.Container):
             for child in widget.get_children():
                 self.scale_layout(child)
@@ -213,12 +291,81 @@ class App(Gtk.Window):
         self.scale = spin.get_value_as_int()
         self.data["ui_scale"] = self.scale
         self.apply_scale_css()
-        factor = self.scale / 100
-        self.sidebar.set_size_request(round(250 * factor), -1)
+        self.sidebar.set_size_request(self.sidebar_target_width(), -1)
         self.scale_layout(self)
+        term_scale = self.terminal_font_scale()
         for session in self.sessions:
-            session["terminal"].set_font_scale(factor)
+            session["terminal"].set_font_scale(term_scale)
         self.persist()
+
+    def _on_grid_allocate(self, widget, alloc):
+        if not getattr(widget, "_proportions_applied", False) and alloc.width > 100 and alloc.height > 100:
+            widget._proportions_applied = True
+            children = widget.get_children()
+            if children and isinstance(children[0], Gtk.Paned):
+                self.set_initial_positions(children[0], alloc.width, alloc.height)
+
+    def build_split(self, widgets, orientation):
+        if not widgets:
+            return None
+        if len(widgets) == 1:
+            return widgets[0]
+        mid = len(widgets) // 2
+        left_list = widgets[:mid]
+        right_list = widgets[mid:]
+        paned = Gtk.Paned(orientation=orientation)
+        paned.get_style_context().add_class("tile-paned")
+        paned._split_orientation = orientation
+        paned._left_weight = len(left_list)
+        paned._right_weight = len(right_list)
+        paned._left_child = self.build_split(left_list, orientation)
+        paned._right_child = self.build_split(right_list, orientation)
+        paned.pack1(paned._left_child, resize=True, shrink=True)
+        paned.pack2(paned._right_child, resize=True, shrink=True)
+        return paned
+
+    def set_initial_positions(self, widget, w, h):
+        if not isinstance(widget, Gtk.Paned):
+            return
+        total = w if widget._split_orientation == Gtk.Orientation.HORIZONTAL else h
+        ratio = widget._left_weight / (widget._left_weight + widget._right_weight)
+        pos = max(1, round(total * ratio))
+        widget.set_position(pos)
+        if widget._split_orientation == Gtk.Orientation.HORIZONTAL:
+            self.set_initial_positions(widget._left_child, pos, h)
+            self.set_initial_positions(widget._right_child, total - pos, h)
+        else:
+            self.set_initial_positions(widget._left_child, w, pos)
+            self.set_initial_positions(widget._right_child, w, total - pos)
+
+    def build_tile_layout(self, frames):
+        n = len(frames)
+        if n == 0:
+            return None
+        if n == 1:
+            return frames[0]
+
+        if self.tile_layout == "columns":
+            rows = [frames]
+        elif self.tile_layout == "rows":
+            rows = [[f] for f in frames]
+        else:  # "grid"
+            if n == 2:
+                rows = [frames]
+            elif n in (3, 4):
+                rows = [frames[:2], frames[2:]]
+            elif n in (5, 6):
+                rows = [frames[:3], frames[3:]]
+            else:
+                rows = [frames[:4], frames[4:]]
+
+        row_splits = [self.build_split(r, Gtk.Orientation.HORIZONTAL) for r in rows]
+        root = self.build_split(row_splits, Gtk.Orientation.VERTICAL)
+        alloc = self.grid.get_allocation()
+        total_w = alloc.width if alloc.width > 100 else 1200
+        total_h = alloc.height if alloc.height > 100 else 760
+        self.set_initial_positions(root, total_w, total_h)
+        return root
 
     def rebuild_view(self, selected=None):
         if selected is None and not self.tiled:
@@ -240,8 +387,11 @@ class App(Gtk.Window):
             self.views.set_visible_child_name("empty")
             return
         if self.tiled:
-            columns = len(self.sessions) if len(self.sessions) <= 4 else (len(self.sessions) + 1) // 2
-            for index, session in enumerate(self.sessions):
+            self.layout_button.show()
+            self.layout_button.set_sensitive(len(self.sessions) >= 2)
+            self.grid._proportions_applied = False
+            frames = []
+            for session in self.sessions:
                 frame = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
                 frame.get_style_context().add_class("tile")
                 session["terminal"]._tile_frame = frame
@@ -254,10 +404,14 @@ class App(Gtk.Window):
                 header.pack_start(session["label"], True, True, 0)
                 frame.pack_start(header, False, False, 0)
                 frame.pack_start(session["terminal"], True, True, 0)
-                self.grid.attach(frame, index % columns, index // columns, 1, 1)
+                frames.append(frame)
+            tile_root = self.build_tile_layout(frames)
+            if tile_root:
+                self.grid.pack_start(tile_root, True, True, 0)
             self.grid.show_all()
             self.views.set_visible_child_name("grid")
         else:
+            self.layout_button.hide()
             for session in self.sessions:
                 # Notebook tab labels are not shown by show_all() on the notebook.
                 session["label"].show_all()
@@ -505,7 +659,7 @@ class App(Gtk.Window):
                         listing.remove(child)
                     for name in names:
                         item = Gtk.ListBoxRow()
-                        item.add(Gtk.Label(label=name, xalign=0, margin=round(6 * self.scale / 100)))
+                        item.add(Gtk.Label(label=name, xalign=0, margin=max(3, round(6 * self.scale / 100))))
                         item.directory_name = name
                         listing.add(item)
                     listing.show_all()
@@ -787,7 +941,7 @@ class App(Gtk.Window):
             return False
         terminal.connect("focus-in-event", update_tile_focus, True)
         terminal.connect("focus-out-event", update_tile_focus, False)
-        terminal.set_font_scale(self.scale / 100)
+        terminal.set_font_scale(self.terminal_font_scale())
         terminal.set_size(24, 8)
         terminal.set_hexpand(True)
         terminal.set_vexpand(True)
