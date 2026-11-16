@@ -44,30 +44,136 @@ class App(Gtk.Window):
         self.base_css = '''
             * { font-size: 13px; }
             window { background: #0c1119; color: #e8eef6; }
-            entry { background-color: #16222f; color: #e8eef6; border: 1px solid #2b3e51; border-radius: 6px; padding: 4px 8px; }
+            button, entry, spinbutton, combobox, combobox button, .menu-toggle, .host-button, .project-button, .manage-button {
+                min-height: 24px;
+                padding: 2px 8px;
+            }
+            button {
+                background-image: none;
+                background-color: #16222f;
+                color: #d0e1ed;
+                border: 1px solid #2b3e51;
+                border-radius: 6px;
+                padding: 2px 8px;
+                box-shadow: none;
+                min-height: 24px;
+            }
+            button:hover { background-image: none; background-color: #213548; border-color: #86dbb8; color: #ffffff; box-shadow: none; }
+            button:active { background-image: none; background-color: #203e36; border-color: #86dbb8; color: #d8fff0; box-shadow: none; }
+            entry {
+                background-color: #16222f;
+                color: #e8eef6;
+                border: 1px solid #2b3e51;
+                border-radius: 6px;
+                padding: 2px 8px;
+                min-height: 24px;
+            }
             entry:focus { border-color: #86dbb8; }
-            spinbutton { background-color: #16222f; color: #e8eef6; border: 1px solid #2b3e51; border-radius: 6px; padding: 0; }
-            spinbutton entry { background-color: transparent; border: none; box-shadow: none; color: #e8eef6; }
-            spinbutton button { background-color: #1f2e3e; border: none; color: #a6bacb; border-radius: 4px; padding: 2px 5px; margin: 1px; }
-            spinbutton button:hover { background-color: #2b4055; color: #86dbb8; }
-            combobox { min-height: 24px; }
-            combobox button.combo, combobox button { background-color: #16222f; color: #d6e3ee; border: 1px solid #2b3e51; border-radius: 6px; padding: 4px 8px; }
-            combobox button.combo:hover, combobox button:hover { background-color: #213244; border-color: #86dbb8; color: #ffffff; }
+            spinbutton {
+                background-color: #16222f;
+                color: #e8eef6;
+                border: 1px solid #2b3e51;
+                border-radius: 6px;
+                padding: 0;
+                min-height: 24px;
+            }
+            spinbutton entry {
+                background-color: transparent;
+                border: none;
+                box-shadow: none;
+                color: #e8eef6;
+                min-height: 24px;
+                padding: 2px 6px;
+            }
+            spinbutton button {
+                background-image: none;
+                background-color: #16222f;
+                border: none;
+                color: #a6bacb;
+                border-radius: 4px;
+                padding: 0 4px;
+                margin: 0;
+                box-shadow: none;
+                min-height: 11px;
+            }
+            spinbutton button:hover { background-image: none; background-color: #213548; color: #86dbb8; }
+            combobox { min-height: 24px; padding: 0; }
+            combobox button.combo, combobox button {
+                background-image: none;
+                background-color: #16222f;
+                color: #d6e3ee;
+                border: 1px solid #2b3e51;
+                border-radius: 6px;
+                padding: 2px 8px;
+                box-shadow: none;
+                min-height: 24px;
+            }
+            combobox button.combo:hover, combobox button:hover { background-image: none; background-color: #213548; border-color: #86dbb8; color: #ffffff; }
             combobox menu, combobox window.popup { background-color: #141f2b; color: #e8eef6; border: 1px solid #2b3e51; }
             combobox menu menuitem:hover { background-color: #203e36; color: #bdf5dd; }
-            button { background-color: #182635; color: #d0e1ed; border: 1px solid #2b3e51; border-radius: 6px; padding: 4px 8px; }
-            button:hover { background-color: #22374b; border-color: #86dbb8; color: #ffffff; }
-            button:active { background-color: #203e36; border-color: #86dbb8; color: #d8fff0; }
-            checkbutton check { background-color: #16222f; border: 1px solid #2b3e51; border-radius: 4px; }
-            checkbutton check:checked { background-color: #203e36; border-color: #86dbb8; color: #86dbb8; }
-            notebook tab { padding: 4px 6px; }
+            checkbutton { min-height: 24px; padding: 2px 0; }
+            checkbutton check { background-image: none; background-color: #16222f; border: 1px solid #2b3e51; border-radius: 4px; box-shadow: none; min-width: 16px; min-height: 16px; }
+            checkbutton check:checked { background-image: none; background-color: #203e36; border-color: #86dbb8; color: #86dbb8; }
+            notebook { background-color: #0c1119; border: none; }
+            notebook > header { background-color: #101823; border-bottom: 1px solid #243546; padding: 2px 4px 0 4px; }
+            notebook tab {
+                background-image: none;
+                background-color: #16222f;
+                color: #8fa2b4;
+                border: 1px solid #243546;
+                border-bottom: none;
+                border-radius: 6px 6px 0 0;
+                padding: 4px 12px;
+                margin: 2px 2px 0 2px;
+                box-shadow: none;
+                min-height: 24px;
+            }
+            notebook tab:hover { background-image: none; background-color: #213548; color: #ffffff; }
+            notebook tab:checked {
+                background-image: none;
+                background-color: #203e36;
+                color: #86dbb8;
+                border-color: #86dbb8 #86dbb8 transparent #86dbb8;
+                box-shadow: none;
+            }
+            notebook tab:checked label { font-weight: bold; color: #86dbb8; }
+            notebook tab button {
+                background-image: none;
+                background-color: transparent;
+                border: none;
+                box-shadow: none;
+                padding: 1px 3px;
+                color: #8fa2b4;
+            }
+            notebook tab button:hover { background-image: none; background-color: rgba(255, 255, 255, 0.15); color: #ffffff; }
             .sidebar { background: #131b26; border-right: 1px solid #243546; }
+            .sidebar button {
+                background-image: none;
+                background-color: #16222f;
+                color: #d0e1ed;
+                border: 1px solid #2b3e51;
+                border-radius: 6px;
+                box-shadow: none;
+                min-height: 24px;
+                padding: 2px 8px;
+            }
+            .sidebar button:hover { background-image: none; background-color: #213548; border-color: #86dbb8; color: #ffffff; box-shadow: none; }
+            .sidebar button:active { background-image: none; background-color: #203e36; border-color: #86dbb8; color: #d8fff0; box-shadow: none; }
             .brand { font-size: 19px; font-weight: bold; color: #a2e8cc; }
             .subtitle { color: #8fa2b4; font-size: 11px; }
             .section { color: #9bb0c3; font-weight: bold; margin-top: 12px; }
-            .toolbar { background: #101823; border-bottom: 1px solid #243546; padding: 8px 12px; }
-            .menu-toggle { background-image: none; background-color: #182635; color: #d0e1ed; border: 1px solid #2c4054; border-radius: 7px; padding: 6px 11px; box-shadow: none; }
-            .menu-toggle:hover { background-color: #22374b; border-color: #86dbb8; color: #ffffff; }
+            .toolbar { background: #101823; border-bottom: 1px solid #243546; padding: 6px 12px; }
+            .menu-toggle {
+                background-image: none;
+                background-color: #16222f;
+                color: #d0e1ed;
+                border: 1px solid #2b3e51;
+                border-radius: 6px;
+                padding: 2px 10px;
+                box-shadow: none;
+                min-height: 24px;
+            }
+            .menu-toggle:hover { background-color: #213548; border-color: #86dbb8; color: #ffffff; }
             .menu-toggle:checked { background-color: #203e36; border-color: #86dbb8; color: #d8fff0; }
             .menu-toggle:checked:hover { background-color: #274b42; }
             .menu-toggle:focus { outline-color: #86dbb8; }
@@ -75,21 +181,51 @@ class App(Gtk.Window):
             .primary { background: #86dbb8; color: #101c1a; font-weight: bold; border: 0; }
             .tile-grid { background: #263647; }
             .tile { background: #101823; }
-            .tile-header { padding: 5px 8px; background: #172331; }
+            .tile-header { padding: 4px 8px; background: #16222f; border-bottom: 1px solid #243546; min-height: 24px; }
+            .tile-header button { background-image: none; background-color: transparent; border: none; box-shadow: none; padding: 1px 3px; color: #8fa2b4; }
+            .tile-header button:hover { background-image: none; background-color: rgba(255, 255, 255, 0.15); color: #ffffff; }
             .tile-focused { box-shadow: inset 0 0 0 2px #86dbb8; }
-            .tile-focused .tile-header { background: #24443a; }
-            paned.tile-paned > separator { background-color: #243546; background-clip: content-box; }
-            paned.tile-paned.horizontal > separator { min-width: 8px; padding: 0 3px; margin: 0 -3px; }
-            paned.tile-paned.vertical > separator { min-height: 8px; padding: 3px 0; margin: -3px 0; }
+            .tile-focused .tile-header { background: #203e36; border-bottom: 1px solid #86dbb8; }
+            paned.tile-paned > separator { background-color: #243546; margin: 0; padding: 0; }
+            paned.tile-paned.horizontal > separator { min-width: 2px; }
+            paned.tile-paned.vertical > separator { min-height: 2px; }
             paned.tile-paned > separator:hover, paned.tile-paned > separator:active { background-color: #86dbb8; }
             .empty { color: #8fa2b4; font-size: 15px; }
-            .host-button { background-color: #182433; border: 1px solid #283a4c; border-radius: 6px; padding: 8px 10px; color: #d6e3ee; }
-            .host-button:hover { background-color: #223547; border-color: #86dbb8; color: #ffffff; }
-            .host-selected { background-color: #203c34; border-color: #86dbb8; color: #d8fff0; }
-            .project-button { background-color: #182433; border: 1px solid #283a4c; border-radius: 6px; padding: 9px 12px; color: #e2edf7; }
-            .project-button:hover { background-color: #223547; border-color: #86dbb8; color: #ffffff; }
-            .manage-button { background-color: #1a2736; color: #b3c7d6; border: 1px solid #2b3d4f; border-radius: 5px; padding: 4px 8px; font-weight: bold; }
-            .manage-button:hover { background-color: #253b4e; border-color: #86dbb8; color: #ffffff; }
+            .host-button {
+                background-image: none;
+                background-color: #16222f;
+                border: 1px solid #2b3e51;
+                border-radius: 6px;
+                padding: 2px 8px;
+                color: #d6e3ee;
+                box-shadow: none;
+                min-height: 24px;
+            }
+            .host-button:hover { background-image: none; background-color: #213548; border-color: #86dbb8; color: #ffffff; }
+            .host-selected { background-image: none; background-color: #203c34; border-color: #86dbb8; color: #d8fff0; font-weight: bold; }
+            .project-button {
+                background-image: none;
+                background-color: #16222f;
+                border: 1px solid #2b3e51;
+                border-radius: 6px;
+                padding: 2px 8px;
+                color: #e2edf7;
+                box-shadow: none;
+                min-height: 24px;
+            }
+            .project-button:hover { background-image: none; background-color: #213548; border-color: #86dbb8; color: #ffffff; }
+            .manage-button {
+                background-image: none;
+                background-color: #16222f;
+                color: #b3c7d6;
+                border: 1px solid #2b3e51;
+                border-radius: 5px;
+                padding: 2px 6px;
+                font-weight: bold;
+                box-shadow: none;
+                min-height: 24px;
+            }
+            .manage-button:hover { background-image: none; background-color: #213548; border-color: #86dbb8; color: #ffffff; }
         '''
         self.apply_scale_css()
         Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), self.css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
@@ -180,7 +316,16 @@ class App(Gtk.Window):
         self.tile_layout = self.data.get("tile_layout", "grid")
         if self.tile_layout not in ("grid", "columns", "rows"):
             self.tile_layout = "grid"
-        self.view_button = Gtk.ToggleButton(label="▤  标签模式" if self.tiled else "▦  平铺模式")
+        self.view_button = Gtk.ToggleButton()
+        view_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self.view_icon = Gtk.Image.new_from_icon_name(
+            "view-paged-symbolic" if self.tiled else "view-grid-symbolic",
+            Gtk.IconSize.MENU,
+        )
+        self.view_label = Gtk.Label(label="标签模式" if self.tiled else "平铺模式")
+        view_box.pack_start(self.view_icon, False, False, 0)
+        view_box.pack_start(self.view_label, False, False, 0)
+        self.view_button.add(view_box)
         self.view_button.get_style_context().add_class("menu-toggle")
         self.view_button.set_tooltip_text("切换平铺视图与标签视图")
         self.view_button.set_active(self.tiled)
@@ -228,7 +373,11 @@ class App(Gtk.Window):
     def change_view(self, button):
         self.tiled = button.get_active()
         self.data["tiled"] = self.tiled
-        button.set_label("▤  标签模式" if self.tiled else "▦  平铺模式")
+        self.view_icon.set_from_icon_name(
+            "view-paged-symbolic" if self.tiled else "view-grid-symbolic",
+            Gtk.IconSize.MENU
+        )
+        self.view_label.set_text("标签模式" if self.tiled else "平铺模式")
         if self.tiled:
             self.layout_button.show()
         else:
@@ -279,11 +428,11 @@ class App(Gtk.Window):
                 return f"{prop}:{re.sub(r'(\d+)px', scale_font, val_str)}"
             elif prop == "min-height":
                 orig = int(re.search(r'\d+', val_str).group(0)) if re.search(r'\d+', val_str) else 24
-                floor = 22 if orig >= 20 else 4
+                floor = 22 if orig >= 20 else 2
                 return f"{prop}:{re.sub(r'(\d+)px', lambda m: f'{max(floor, round(int(m.group(1)) * factor))}px', val_str)}"
             elif prop == "min-width":
                 orig = int(re.search(r'\d+', val_str).group(0)) if re.search(r'\d+', val_str) else 24
-                floor = 22 if orig >= 20 else 4
+                floor = 22 if orig >= 20 else 2
                 return f"{prop}:{re.sub(r'(\d+)px', lambda m: f'{max(floor, round(int(m.group(1)) * factor))}px', val_str)}"
             elif "padding" in prop:
                 return f"{prop}:{re.sub(r'(\d+)px', lambda m: f'{max(1, round(int(m.group(1)) * factor)) if int(m.group(1)) else 0}px', val_str)}"

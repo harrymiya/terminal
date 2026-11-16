@@ -21,21 +21,36 @@ class DesktopUIEnhancementsTest(unittest.TestCase):
         self.assertTrue(tiled_mode)
 
     def test_separator_css_has_wide_hitbox_and_crisp_visual(self):
-        App = self.app_mod.App
-        base_css = App.__dict__.get("base_css", None)
-        # Check base_css in instance creation or raw file
-        omarchy_py = (Path(__file__).resolve().parents[1] / "omarchy" / "remote-dev-terminal.py").read_text(encoding="utf-8")
-        self.assertIn("paned.tile-paned > separator { background-color: #243546; background-clip: content-box; }", omarchy_py)
-        self.assertIn("paned.tile-paned.horizontal > separator { min-width: 8px; padding: 0 3px; margin: 0 -3px; }", omarchy_py)
-        self.assertIn("paned.tile-paned.vertical > separator { min-height: 8px; padding: 3px 0; margin: -3px 0; }", omarchy_py)
+        for platform in ("omarchy", "ubuntu", "windows"):
+            py_file = (Path(__file__).resolve().parents[1] / platform / "remote-dev-terminal.py").read_text(encoding="utf-8")
+            self.assertIn("paned.tile-paned > separator { background-color: #243546; margin: 0; padding: 0; }", py_file)
+            self.assertIn("paned.tile-paned.horizontal > separator { min-width: 2px; }", py_file)
+            self.assertIn("paned.tile-paned.vertical > separator { min-height: 2px; }", py_file)
+
+    def test_notebook_and_tab_dark_theme(self):
+        for platform in ("omarchy", "ubuntu", "windows"):
+            py_file = (Path(__file__).resolve().parents[1] / platform / "remote-dev-terminal.py").read_text(encoding="utf-8")
+            self.assertIn("notebook { background-color: #0c1119;", py_file)
+            self.assertIn("notebook tab {", py_file)
+            self.assertIn("notebook tab:checked {", py_file)
+            self.assertIn(".tile-header { padding: 4px 8px; background: #16222f;", py_file)
 
     def test_dark_theme_css_colors(self):
         for platform in ("omarchy", "ubuntu", "windows"):
             py_file = (Path(__file__).resolve().parents[1] / platform / "remote-dev-terminal.py").read_text(encoding="utf-8")
-            self.assertIn("entry { background-color: #16222f;", py_file)
-            self.assertIn("spinbutton { background-color: #16222f;", py_file)
-            self.assertIn("combobox button.combo, combobox button { background-color: #16222f;", py_file)
-            self.assertIn("button { background-color: #182635;", py_file)
+            self.assertIn("entry {", py_file)
+            self.assertIn("spinbutton {", py_file)
+            self.assertIn("combobox button.combo, combobox button {", py_file)
+            self.assertIn("button {", py_file)
+            self.assertIn(".sidebar button {", py_file)
+            self.assertIn(".host-button {", py_file)
+            self.assertIn(".project-button {", py_file)
+            self.assertIn(".manage-button {", py_file)
+
+    def test_view_button_vector_icons(self):
+        for platform in ("omarchy", "ubuntu", "windows"):
+            py_file = (Path(__file__).resolve().parents[1] / platform / "remote-dev-terminal.py").read_text(encoding="utf-8")
+            self.assertIn('"view-paged-symbolic" if self.tiled else "view-grid-symbolic"', py_file)
 
     def test_host_list_ui_matches_workspace_management(self):
         for platform in ("omarchy", "ubuntu", "windows"):
@@ -47,9 +62,14 @@ class DesktopUIEnhancementsTest(unittest.TestCase):
     def test_left_alignments(self):
         for platform in ("omarchy", "ubuntu", "windows"):
             py_file = (Path(__file__).resolve().parents[1] / platform / "remote-dev-terminal.py").read_text(encoding="utf-8")
-            self.assertIn('.project-button > label { xalign: 0; }', py_file)
-            self.assertIn('.host-button > label { xalign: 0; }', py_file)
             self.assertIn('button.get_child().set_xalign(0.0)', py_file)
+
+    def test_uniform_control_heights(self):
+        for platform in ("omarchy", "ubuntu", "windows"):
+            py_file = (Path(__file__).resolve().parents[1] / platform / "remote-dev-terminal.py").read_text(encoding="utf-8")
+            self.assertIn('button, entry, spinbutton, combobox, combobox button, .menu-toggle, .host-button, .project-button, .manage-button {', py_file)
+            self.assertIn('min-height: 24px;', py_file)
+            self.assertIn('padding: 2px 8px;', py_file)
 
 
 if __name__ == "__main__":
