@@ -27,6 +27,6 @@ python3 omarchy/remote-dev-terminal.py
 
 配置保存在 `${XDG_CONFIG_HOME:-~/.config}/remote-dev-terminal/config.json`。认证和主机密钥检查交给系统 OpenSSH；首次连接时确认主机指纹，并根据提示输入密码或密钥口令。推荐使用 `ssh-keygen` 和 `ssh-copy-id` 配置密钥。目录浏览需要远端提供 GNU find；密码和指纹确认会通过 SSH 提示窗口进行。远端需安装 tmux 才能保留断线会话。关闭标签或应用后，当前版本没有恢复旧标签的界面；远端 tmux 会话不会被自动删除。
 
-终端中用鼠标拖选文字后会自动复制到系统剪贴板，也可以按 Ctrl+Shift+C 复制选中的文字。tmux 会话启用鼠标模式以支持滚轮；Codex 会话中滚轮通过 Page Up/Down 翻页。选中文字时按住 Shift 再拖选。按 Ctrl+Shift+V 可粘贴到终端。
+终端中用鼠标拖选文字后会自动复制到系统剪贴板，也可以按 Ctrl+Shift+C 复制选中的文字。tmux 会话启用鼠标模式以支持滚轮；Codex 会话中滚轮通过 Page Up/Down 翻页。选中文字时按住 Shift 再拖选。按 Ctrl+Shift+V 可粘贴到终端；agy 会话中也可按 Ctrl+V 粘贴文字。
 
 自动回车默认关闭，可在侧栏启用并设置 1–30 秒延迟。它会自动确认匹配的肯定选项或回车确认提示，请仅在信任远端命令时启用。桌面版使用独立配置，不能自动导入 Android 密码、密钥或会话。

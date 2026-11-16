@@ -12,8 +12,8 @@ android {
         applicationId = "dev.remote.terminal"
         minSdk = 26
         targetSdk = 35
-        versionCode = 45
-        versionName = "1.1.34"
+        versionCode = 46
+        versionName = "1.1.35"
     }
 
     compileOptions {

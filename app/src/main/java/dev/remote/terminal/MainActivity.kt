@@ -1156,17 +1156,22 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
         }.measureText("M").coerceAtLeast(1f)
         val column = (wheelPosition.x / charWidth).toInt() + 1
         val row = (wheelPosition.y / lineHeightPx).toInt() + 1
+        val codex = codexExecutable(session.task.agent.command) != null
         val wheel = session.buffer.mouseWheelSequence(delta > 0, column, row)
-        if ((wheel != null || session.buffer.isAlternateScreen()) && latestScrollbackTopRow == null) {
+        if ((codex || wheel != null || session.buffer.isAlternateScreen()) && latestScrollbackTopRow == null) {
             wheelRemainder += delta
             // Arrow keys navigate the prompt's input history in agent TUIs. When
             // mouse reporting is unavailable, use page keys to scroll their transcript.
-            val scrollStep = if (wheel != null) lineHeightPx else lineHeightPx * 2
+            val scrollStep = if (!codex && wheel != null) lineHeightPx else lineHeightPx * 2
             while (kotlin.math.abs(wheelRemainder) >= scrollStep) {
                 val up = wheelRemainder > 0
-                val sequence = session.buffer.mouseWheelSequence(up, column, row)
-                    ?: if (up) "\u001b[5~" else "\u001b[6~"
-                session.controller.sendScroll(sequence)
+                val page = if (up) "\u001b[5~" else "\u001b[6~"
+                if (codex) {
+                    // Ordinary input also cancels any stale tmux copy mode.
+                    session.controller.send(page)
+                } else {
+                    session.controller.sendScroll(session.buffer.mouseWheelSequence(up, column, row) ?: page)
+                }
                 wheelRemainder += if (up) -scrollStep else scrollStep
             }
             delta

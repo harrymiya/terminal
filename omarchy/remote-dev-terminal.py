@@ -949,6 +949,10 @@ class App(Gtk.Window):
         terminal.connect("contents-changed", changed)
         def key_pressed(widget, event):
             modifiers = event.state & Gtk.accelerator_get_default_mod_mask()
+            if (kind == "agy" and modifiers == Gdk.ModifierType.CONTROL_MASK
+                    and event.keyval in (Gdk.KEY_v, Gdk.KEY_V)):
+                widget.paste_clipboard()
+                return True
             if modifiers == (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK):
                 if event.keyval in (Gdk.KEY_c, Gdk.KEY_C):
                     copy_selection(widget)
