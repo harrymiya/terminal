@@ -83,13 +83,11 @@ class App(Gtk.Window):
             paned.tile-paned.vertical > separator { min-height: 8px; padding: 3px 0; margin: -3px 0; }
             paned.tile-paned > separator:hover, paned.tile-paned > separator:active { background-color: #86dbb8; }
             .empty { color: #8fa2b4; font-size: 15px; }
-            .host-button { background-color: #182433; border: 1px solid #283a4c; border-radius: 6px; padding: 8px 10px; color: #d6e3ee; text-align: left; }
+            .host-button { background-color: #182433; border: 1px solid #283a4c; border-radius: 6px; padding: 8px 10px; color: #d6e3ee; }
             .host-button:hover { background-color: #223547; border-color: #86dbb8; color: #ffffff; }
-            .host-button > label { xalign: 0; }
             .host-selected { background-color: #203c34; border-color: #86dbb8; color: #d8fff0; }
-            .project-button { background-color: #182433; border: 1px solid #283a4c; border-radius: 6px; padding: 9px 12px; color: #e2edf7; text-align: left; }
+            .project-button { background-color: #182433; border: 1px solid #283a4c; border-radius: 6px; padding: 9px 12px; color: #e2edf7; }
             .project-button:hover { background-color: #223547; border-color: #86dbb8; color: #ffffff; }
-            .project-button > label { xalign: 0; }
             .manage-button { background-color: #1a2736; color: #b3c7d6; border: 1px solid #2b3d4f; border-radius: 5px; padding: 4px 8px; font-weight: bold; }
             .manage-button:hover { background-color: #253b4e; border-color: #86dbb8; color: #ffffff; }
         '''

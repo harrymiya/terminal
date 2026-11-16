@@ -84,11 +84,9 @@ class App(Gtk.Window):
             paned.tile-paned > separator:hover, paned.tile-paned > separator:active { background-color: #86dbb8; }
             .empty { color: #8fa2b4; font-size: 15px; }
             .host-button { background-color: #182635; border: 1px solid #283b4e; padding: 8px; color: #d0e1ed; }
-            .host-button > label { xalign: 0; }
             .host-button:hover { background-color: #213548; border-color: #86dbb8; color: #ffffff; }
             .host-selected { background-color: #203e36; border-color: #86dbb8; color: #d8fff0; font-weight: bold; }
             .project-button { background-color: #162331; border: 1px solid #283b4e; padding: 9px 10px; color: #d0e1ed; }
-            .project-button > label { xalign: 0; }
             .project-button:hover { background-color: #203547; border-color: #86dbb8; color: #ffffff; }
             .manage-button { background-color: #182635; border: 1px solid #283b4e; padding: 4px 8px; color: #a9bece; }
             .manage-button:hover { background-color: #24394c; border-color: #86dbb8; color: #ffffff; }
