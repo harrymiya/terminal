@@ -788,7 +788,9 @@ class App(Gtk.Window):
         def copy_selection(widget):
             if widget.get_has_selection():
                 widget.copy_clipboard_format(Vte.Format.TEXT)
-        terminal.connect("selection-changed", copy_selection)
+            return False
+        # Wait until VTE has finished updating its selection before copying it.
+        terminal.connect("selection-changed", lambda widget: GLib.idle_add(copy_selection, widget))
         def update_tile_focus(widget, _event, focused):
             frame = getattr(widget, "_tile_frame", None)
             if frame:
@@ -932,7 +934,15 @@ class App(Gtk.Window):
                 elif not signature:
                     state["handled"] = None
         terminal.connect("contents-changed", changed)
-        def key_pressed(*_):
+        def key_pressed(widget, event):
+            modifiers = event.state & Gtk.accelerator_get_default_mod_mask()
+            if modifiers == (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK):
+                if event.keyval in (Gdk.KEY_c, Gdk.KEY_C):
+                    copy_selection(widget)
+                    return True
+                if event.keyval in (Gdk.KEY_v, Gdk.KEY_V):
+                    widget.paste_clipboard()
+                    return True
             if state["timer"]:
                 GLib.source_remove(state["timer"])
                 state["timer"] = None
