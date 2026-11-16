@@ -114,7 +114,7 @@ def ssh_argv(host, directory, agent, session_id=None, control_path=None, restore
 
 def auto_enter_signature(text):
     text = text.rstrip()
-    if re.search(r"(?:\[Y/n\]|\(Y/n\)|\[Yes/no\]|(?i:press\s+(?:enter|return)\s+to\s+(?:continue|confirm|approve)))\s*$", text):
+    if re.search(r"(?:\[Y/n\]|\(Y/n\)|\[Yes/no\]|(?i:press\s+(?:enter|return)\s+to\s+(?:continue|confirm|approve)|按\s*(?:回车|enter)\s*(?:继续|确认|批准)))[:\s?]*$", text):
         return "\n".join([line for line in text.splitlines() if line.strip()][-2:])
     lines = text.splitlines()
     for i in range(len(lines) - 1, -1, -1):

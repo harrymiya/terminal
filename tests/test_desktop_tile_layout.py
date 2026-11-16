@@ -43,15 +43,15 @@ class DesktopTileLayoutTest(unittest.TestCase):
         app = self.make_dummy_app("grid")
         app.cycle_tile_layout(None)
         self.assertEqual(app.tile_layout, "columns")
-        self.assertEqual(app.layout_button.get_label(), "⬓  左右")
+        self.assertEqual(app.layout_button.get_label(), "⬓  切换布局 · 左右")
 
         app.cycle_tile_layout(None)
         self.assertEqual(app.tile_layout, "rows")
-        self.assertEqual(app.layout_button.get_label(), "⬒  上下")
+        self.assertEqual(app.layout_button.get_label(), "⬒  切换布局 · 上下")
 
         app.cycle_tile_layout(None)
         self.assertEqual(app.tile_layout, "grid")
-        self.assertEqual(app.layout_button.get_label(), "▦  网格")
+        self.assertEqual(app.layout_button.get_label(), "⊞  切换布局 · 网格")
 
     def test_build_tile_layout_grid_creates_draggable_paneds(self):
         app = self.make_dummy_app("grid")

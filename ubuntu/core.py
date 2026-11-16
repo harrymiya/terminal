@@ -114,14 +114,14 @@ def ssh_argv(host, directory, agent, session_id=None, control_path=None, restore
 
 def auto_enter_signature(text):
     text = text.rstrip()
-    if re.search(r"(?:\[Y/n\]|\(Y/n\)|\[Yes/no\]|(?i:press\s+(?:enter|return)\s+to\s+(?:continue|confirm|approve)))\s*$", text):
+    if re.search(r"(?:\[Y/n\]|\(Y/n\)|\[Yes/no\]|(?i:press\s+(?:enter|return)\s+to\s+(?:continue|confirm|approve)|按\s*(?:回车|enter)\s*(?:继续|确认|批准)))[:\s?]*$", text):
         return "\n".join([line for line in text.splitlines() if line.strip()][-2:])
     lines = text.splitlines()
     for i in range(len(lines) - 1, -1, -1):
         if re.match(r"\s*[›❯>➜]", lines[i]):
             if not re.match(r"(?i)^\s*[›❯>➜]\s*(?:\d+[.)]\s*)?(?:yes\b|allow\b|approve\b|proceed\b|continue\b|允许|批准|同意|继续|确认)", lines[i]):
                 return None
-            request = re.compile(r"(?i)(approve (this|the)? ?(command|action)?|allow (this|the)? ?(command|action)?|would you like to|do you want to|run this command\?|continue\? ?\[|\[(y/n|yes/no)\]|\((y/n|yes/no)\)|press\s+(enter|return)\s+to\s+(continue|confirm|approve)|permission required|needs your approval|批准|是否允许|需要确认|是否继续)")
+            request = re.compile(r"(?i)(approve (this|the)? ?(command|action)?|allow (this|the)? ?(command|action)?|would you like to|do you want to|run this command\?|continue\? ?\[|\[(y/n|yes/no)\]|\((y/n|yes/no)\)|press\s+(enter|return)\s+to\s+(continue|confirm|approve)|按\s*(回车|enter)\s*(继续|确认|批准)|permission required|needs your approval|批准|是否允许|需要确认|是否继续)")
             for line in reversed(lines[max(0, i-20):i]):
                 if request.search(line):
                     return line.strip() + "\n" + lines[i].strip()

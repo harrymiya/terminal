@@ -31,12 +31,12 @@ class App(Gtk.Window):
         self.shared_by_host = {}
         self.sync_pending = set()
         self.sync_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="session-sync")
-        self.tiled = False
         try:
             self.data = load_config()
         except (OSError, ValueError) as exc:
             self.message("无法读取配置", str(exc))
             raise SystemExit(1)
+        self.tiled = self.data.get("tiled", True)
         self.scale = self.data.get("ui_scale", 100)
         if not isinstance(self.scale, int) or isinstance(self.scale, bool) or not 50 <= self.scale <= 200:
             self.scale = 100
@@ -44,35 +44,54 @@ class App(Gtk.Window):
         self.base_css = '''
             * { font-size: 13px; }
             window { background: #0c1119; color: #e8eef6; }
-            button, entry, spinbutton, combobox { min-height: 24px; padding: 4px 6px; }
+            entry { background-color: #16222f; color: #e8eef6; border: 1px solid #2b3e51; border-radius: 6px; padding: 4px 8px; }
+            entry:focus { border-color: #86dbb8; }
+            spinbutton { background-color: #16222f; color: #e8eef6; border: 1px solid #2b3e51; border-radius: 6px; padding: 0; }
+            spinbutton entry { background-color: transparent; border: none; box-shadow: none; color: #e8eef6; }
+            spinbutton button { background-color: #1f2e3e; border: none; color: #a6bacb; border-radius: 4px; padding: 2px 5px; margin: 1px; }
+            spinbutton button:hover { background-color: #2b4055; color: #86dbb8; }
+            combobox { min-height: 24px; }
+            combobox button.combo, combobox button { background-color: #16222f; color: #d6e3ee; border: 1px solid #2b3e51; border-radius: 6px; padding: 4px 8px; }
+            combobox button.combo:hover, combobox button:hover { background-color: #213244; border-color: #86dbb8; color: #ffffff; }
+            combobox menu, combobox window.popup { background-color: #141f2b; color: #e8eef6; border: 1px solid #2b3e51; }
+            combobox menu menuitem:hover { background-color: #203e36; color: #bdf5dd; }
+            button { background-color: #182635; color: #d0e1ed; border: 1px solid #2b3e51; border-radius: 6px; padding: 4px 8px; }
+            button:hover { background-color: #22374b; border-color: #86dbb8; color: #ffffff; }
+            button:active { background-color: #203e36; border-color: #86dbb8; color: #d8fff0; }
+            checkbutton check { background-color: #16222f; border: 1px solid #2b3e51; border-radius: 4px; }
+            checkbutton check:checked { background-color: #203e36; border-color: #86dbb8; color: #86dbb8; }
             notebook tab { padding: 4px 6px; }
-            .sidebar { background: #151e2a; border-right: 1px solid #293748; }
+            .sidebar { background: #131b26; border-right: 1px solid #243546; }
             .brand { font-size: 19px; font-weight: bold; color: #a2e8cc; }
-            .subtitle { color: #9aabbc; font-size: 11px; }
-            .section { color: #a8b9ca; font-weight: bold; margin-top: 12px; }
-            .toolbar { background: #111a25; border-bottom: 1px solid #293748; padding: 8px 12px; }
-            .menu-toggle { background-image: none; background-color: #1b2a37; color: #c9d9e4; border: 1px solid #344b59; border-radius: 8px; padding: 6px 11px; box-shadow: none; }
-            .menu-toggle:hover { background-color: #263e46; border-color: #6dbda3; color: #edfff7; }
-            .menu-toggle:checked { background-color: #25443d; border-color: #70c8a8; color: #c5f6e1; }
-            .menu-toggle:checked:hover { background-color: #30554a; }
+            .subtitle { color: #8fa2b4; font-size: 11px; }
+            .section { color: #9bb0c3; font-weight: bold; margin-top: 12px; }
+            .toolbar { background: #101823; border-bottom: 1px solid #243546; padding: 8px 12px; }
+            .menu-toggle { background-image: none; background-color: #182635; color: #d0e1ed; border: 1px solid #2c4054; border-radius: 7px; padding: 6px 11px; box-shadow: none; }
+            .menu-toggle:hover { background-color: #22374b; border-color: #86dbb8; color: #ffffff; }
+            .menu-toggle:checked { background-color: #203e36; border-color: #86dbb8; color: #d8fff0; }
+            .menu-toggle:checked:hover { background-color: #274b42; }
             .menu-toggle:focus { outline-color: #86dbb8; }
             .workspace-title { font-weight: bold; font-size: 15px; }
             .primary { background: #86dbb8; color: #101c1a; font-weight: bold; border: 0; }
-            .tile-grid { background: #344558; }
-            .tile { background: #111a25; }
-            .tile-header { padding: 5px 8px; background: #1b2735; }
+            .tile-grid { background: #263647; }
+            .tile { background: #101823; }
+            .tile-header { padding: 5px 8px; background: #172331; }
             .tile-focused { box-shadow: inset 0 0 0 2px #86dbb8; }
-            .tile-focused .tile-header { background: #2b5146; }
-            paned.tile-paned > separator { background-color: #293748; margin: 0; padding: 0; }
-            paned.tile-paned.horizontal > separator { min-width: 2px; }
-            paned.tile-paned.vertical > separator { min-height: 2px; }
+            .tile-focused .tile-header { background: #24443a; }
+            paned.tile-paned > separator { background-color: #243546; background-clip: content-box; }
+            paned.tile-paned.horizontal > separator { min-width: 8px; padding: 0 3px; margin: 0 -3px; }
+            paned.tile-paned.vertical > separator { min-height: 8px; padding: 3px 0; margin: -3px 0; }
             paned.tile-paned > separator:hover, paned.tile-paned > separator:active { background-color: #86dbb8; }
-            .empty { color: #91a5b8; font-size: 15px; }
-            .host-button { background: #1d2a39; border: 1px solid #34485b; padding: 8px; }
-            .host-selected { background: #29483f; border-color: #86dbb8; color: #d8fff0; }
-            .project-button { background: #202e3d; border: 1px solid #34485b; padding: 10px; }
-            .project-button:hover { background: #2b483f; border-color: #86dbb8; }
-            .manage-button { padding: 4px 7px; }
+            .empty { color: #8fa2b4; font-size: 15px; }
+            .host-button { background-color: #182433; border: 1px solid #283a4c; border-radius: 6px; padding: 8px 10px; color: #d6e3ee; text-align: left; }
+            .host-button:hover { background-color: #223547; border-color: #86dbb8; color: #ffffff; }
+            .host-button > label { xalign: 0; }
+            .host-selected { background-color: #203c34; border-color: #86dbb8; color: #d8fff0; }
+            .project-button { background-color: #182433; border: 1px solid #283a4c; border-radius: 6px; padding: 9px 12px; color: #e2edf7; text-align: left; }
+            .project-button:hover { background-color: #223547; border-color: #86dbb8; color: #ffffff; }
+            .project-button > label { xalign: 0; }
+            .manage-button { background-color: #1a2736; color: #b3c7d6; border: 1px solid #2b3d4f; border-radius: 5px; padding: 4px 8px; font-weight: bold; }
+            .manage-button:hover { background-color: #253b4e; border-color: #86dbb8; color: #ffffff; }
         '''
         self.apply_scale_css()
         Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), self.css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
@@ -111,7 +130,12 @@ class App(Gtk.Window):
                 setattr(self, attr + "_list", items_box)
                 sidebar.pack_start(items_box, False, False, 0)
             buttons = Gtk.Box(spacing=4)
-            actions = [("添加工作区", "add")] if attr == "directories" else [("添加", "add"), ("编辑", "edit"), ("删除", "delete")]
+            if attr == "hosts":
+                actions = [("添加主机", "add")]
+            elif attr == "directories":
+                actions = [("添加工作区", "add")]
+            else:
+                actions = [("添加", "add"), ("编辑", "edit"), ("删除", "delete")]
             for label, action in actions:
                 button = Gtk.Button(label=label)
                 button.connect("clicked", self.manage, attr, action)
@@ -158,17 +182,22 @@ class App(Gtk.Window):
         self.tile_layout = self.data.get("tile_layout", "grid")
         if self.tile_layout not in ("grid", "columns", "rows"):
             self.tile_layout = "grid"
-        self.view_button = Gtk.ToggleButton(label="▦  平铺模式")
+        self.view_button = Gtk.ToggleButton(label="▤  标签模式" if self.tiled else "▦  平铺模式")
         self.view_button.get_style_context().add_class("menu-toggle")
-        self.view_button.set_tooltip_text("切换标签和平铺视图")
+        self.view_button.set_tooltip_text("切换平铺视图与标签视图")
+        self.view_button.set_active(self.tiled)
         self.view_button.connect("toggled", self.change_view)
         toolbar.pack_start(self.view_button, False, False, 0)
-        layout_labels = {"grid": "▦  网格", "columns": "⬓  左右", "rows": "⬒  上下"}
-        self.layout_button = Gtk.Button(label=layout_labels.get(self.tile_layout, "▦  网格"))
+        layout_labels = {"grid": "⊞  切换布局 · 网格", "columns": "⬓  切换布局 · 左右", "rows": "⬒  切换布局 · 上下"}
+        self.layout_button = Gtk.Button(label=layout_labels.get(self.tile_layout, "⊞  切换布局 · 网格"))
         self.layout_button.get_style_context().add_class("menu-toggle")
-        self.layout_button.set_tooltip_text("切换平铺布局（网格 / 左右分栏 / 上下分栏）")
+        self.layout_button.set_tooltip_text("点击切换平铺分栏布局（网格 / 左右分栏 / 上下分栏）")
         self.layout_button.connect("clicked", self.cycle_tile_layout)
         self.layout_button.set_no_show_all(True)
+        if self.tiled:
+            self.layout_button.show()
+        else:
+            self.layout_button.hide()
         toolbar.pack_start(self.layout_button, False, False, 0)
         zoom = Gtk.SpinButton.new_with_range(50, 200, 1)
         zoom.set_numeric(True)
@@ -200,11 +229,13 @@ class App(Gtk.Window):
 
     def change_view(self, button):
         self.tiled = button.get_active()
+        self.data["tiled"] = self.tiled
         button.set_label("▤  标签模式" if self.tiled else "▦  平铺模式")
         if self.tiled:
             self.layout_button.show()
         else:
             self.layout_button.hide()
+        self.persist()
         self.rebuild_view()
 
     def cycle_tile_layout(self, _button):
@@ -212,8 +243,8 @@ class App(Gtk.Window):
         idx = (layouts.index(self.tile_layout) + 1) % len(layouts)
         self.tile_layout = layouts[idx]
         self.data["tile_layout"] = self.tile_layout
-        layout_labels = {"grid": "▦  网格", "columns": "⬓  左右", "rows": "⬒  上下"}
-        self.layout_button.set_label(layout_labels.get(self.tile_layout, "▦  网格"))
+        layout_labels = {"grid": "⊞  切换布局 · 网格", "columns": "⬓  切换布局 · 左右", "rows": "⬒  切换布局 · 上下"}
+        self.layout_button.set_label(layout_labels.get(self.tile_layout, "⊞  切换布局 · 网格"))
         self.persist()
         self.rebuild_view()
 
@@ -250,14 +281,16 @@ class App(Gtk.Window):
                 return f"{prop}:{re.sub(r'(\d+)px', scale_font, val_str)}"
             elif prop == "min-height":
                 orig = int(re.search(r'\d+', val_str).group(0)) if re.search(r'\d+', val_str) else 24
-                floor = 22 if orig >= 20 else 2
+                floor = 22 if orig >= 20 else 4
                 return f"{prop}:{re.sub(r'(\d+)px', lambda m: f'{max(floor, round(int(m.group(1)) * factor))}px', val_str)}"
             elif prop == "min-width":
-                return f"{prop}:{re.sub(r'(\d+)px', lambda m: f'{max(2, round(int(m.group(1)) * factor))}px', val_str)}"
+                orig = int(re.search(r'\d+', val_str).group(0)) if re.search(r'\d+', val_str) else 24
+                floor = 22 if orig >= 20 else 4
+                return f"{prop}:{re.sub(r'(\d+)px', lambda m: f'{max(floor, round(int(m.group(1)) * factor))}px', val_str)}"
             elif "padding" in prop:
-                return f"{prop}:{re.sub(r'(\d+)px', lambda m: f'{max(2, round(int(m.group(1)) * factor))}px', val_str)}"
+                return f"{prop}:{re.sub(r'(\d+)px', lambda m: f'{max(1, round(int(m.group(1)) * factor)) if int(m.group(1)) else 0}px', val_str)}"
             elif "margin" in prop:
-                return f"{prop}:{re.sub(r'(\d+)px', lambda m: f'{max(4, round(int(m.group(1)) * factor))}px', val_str)}"
+                return f"{prop}:{re.sub(r'(-?\d+)px', lambda m: f'{round(int(m.group(1)) * factor)}px', val_str)}"
             elif "border-radius" in prop:
                 return f"{prop}:{re.sub(r'(\d+)px', lambda m: f'{max(3, round(int(m.group(1)) * factor))}px', val_str)}"
             else:
@@ -267,8 +300,92 @@ class App(Gtk.Window):
         # VTE applies its own font scale, so keep its CSS font size unscaled.
         self.css.load_from_data((css + "\nterminal { font-size: 13px; }").encode("utf-8"))
 
+    @staticmethod
+    def apply_hand_cursor(widget):
+        """Configure clickable widgets to display a pointer (hand) cursor on hover."""
+        if not isinstance(widget, Gtk.Widget):
+            return widget
+
+        def set_cursor_for_window(gdk_win, display):
+            try:
+                cursor = Gdk.Cursor.new_from_name(display, "pointer")
+                if not cursor:
+                    cursor = Gdk.Cursor.new(Gdk.CursorType.HAND2)
+                gdk_win.set_cursor(cursor)
+            except Exception:
+                pass
+
+        def on_realize(w):
+            try:
+                display = w.get_display() or Gdk.Display.get_default()
+                if not display:
+                    return
+
+                # Gtk.Button (including ToggleButton and CheckButton)
+                ew = getattr(w, "get_event_window", lambda: None)()
+                if ew:
+                    set_cursor_for_window(ew, display)
+                    return
+
+                # EventBox or widgets that manage their own GdkWindow
+                if getattr(w, "get_has_window", lambda: False)():
+                    win = w.get_window()
+                    if win:
+                        set_cursor_for_window(win, display)
+                    return
+
+                # Gtk.ComboBox / ComboBoxText
+                if isinstance(w, Gtk.ComboBox):
+                    parent_win = w.get_window()
+                    if parent_win:
+                        alloc = w.get_allocation()
+                        for cw in parent_win.get_children():
+                            geom = cw.get_geometry()
+                            if (abs(geom.x - alloc.x) <= 2 and abs(geom.y - alloc.y) <= 2 and
+                                    abs(geom.width - alloc.width) <= 2 and abs(geom.height - alloc.height) <= 2):
+                                set_cursor_for_window(cw, display)
+                                return
+
+                # Gtk.SpinButton (up and down stepper arrows)
+                if isinstance(w, Gtk.SpinButton):
+                    win = w.get_window()
+                    if win:
+                        alloc = w.get_allocation()
+                        for cw in win.get_children():
+                            geom = cw.get_geometry()
+                            if geom.x > alloc.width // 3:
+                                set_cursor_for_window(cw, display)
+
+                # Gtk.Notebook (tab header area)
+                if isinstance(w, Gtk.Notebook):
+                    win = w.get_window()
+                    if win:
+                        for cw in win.get_children():
+                            set_cursor_for_window(cw, display)
+
+            except Exception:
+                pass
+
+        is_clickable = isinstance(widget, (Gtk.Button, Gtk.ComboBox, Gtk.SpinButton, Gtk.Notebook, Gtk.EventBox))
+        if is_clickable:
+            if getattr(widget, "_hand_cursor_connected", False):
+                if widget.get_realized():
+                    on_realize(widget)
+                return widget
+            widget._hand_cursor_connected = True
+            if widget.get_realized():
+                on_realize(widget)
+            else:
+                widget.connect("realize", on_realize)
+            if isinstance(widget, (Gtk.ComboBox, Gtk.SpinButton, Gtk.Notebook)):
+                widget.connect("map", lambda w: on_realize(w))
+                widget.connect("size-allocate", lambda w, _: on_realize(w) if w.get_realized() else None)
+
+        return widget
+
     def scale_layout(self, widget):
-        """Scale application-defined spacing from its original, unscaled values."""
+        """Scale application-defined spacing and ensure clickable widgets show pointer cursor."""
+        self.apply_hand_cursor(widget)
         properties = ["margin-start", "margin-end", "margin-top", "margin-bottom"]
         if isinstance(widget, Gtk.Box):
             properties.append("spacing")
@@ -464,12 +581,28 @@ class App(Gtk.Window):
         for child in self.hosts_list.get_children():
             self.hosts_list.remove(child)
         for index, item in enumerate(self.data["hosts"]):
+            row = Gtk.Box(spacing=4)
             button = Gtk.Button(label=item["name"] + "  ·  " + item["address"])
+            button.set_tooltip_text(f"{item.get('username', '')}@{item['address']}:{item.get('port', 22)}\n点击切换主机")
             button.get_style_context().add_class("host-button")
+            if button.get_child():
+                button.get_child().set_xalign(0.0)
             if index == selected:
                 button.get_style_context().add_class("host-selected")
             button.connect("clicked", lambda _button, i=index: self.hosts.set_active(i))
-            self.hosts_list.pack_start(button, False, False, 0)
+            row.pack_start(button, True, True, 0)
+            for label, action in [("✎", "edit"), ("×", "delete")]:
+                edit = Gtk.Button(label=label)
+                edit.set_tooltip_text("编辑主机" if action == "edit" else "删除主机")
+                edit.get_style_context().add_class("manage-button")
+                edit.connect("clicked", self.manage_host, index, action)
+                row.pack_start(edit, False, False, 0)
+            self.hosts_list.pack_start(row, False, False, 0)
+            self.scale_layout(row)
+        if not self.data["hosts"]:
+            hint = Gtk.Label(label="请先点击下方添加主机", xalign=0)
+            hint.get_style_context().add_class("subtitle")
+            self.hosts_list.pack_start(hint, False, False, 0)
         self.hosts_list.show_all()
         self.refreshing = True
         self.agents.remove_all()
@@ -480,6 +613,10 @@ class App(Gtk.Window):
             self.agents.set_active(min(max(host.get("selected_agent", 0), 0), len(agents) - 1))
         self.refreshing = False
         self.refresh_directories()
+
+    def manage_host(self, button, index, action):
+        self.hosts.set_active(index)
+        self.manage(button, "hosts", action)
 
     def current_host(self):
         index = self.hosts.get_active()
@@ -495,6 +632,8 @@ class App(Gtk.Window):
             self.directories.append_text(item["name"])
             row = Gtk.Box(spacing=4)
             button = Gtk.Button(label="▸  " + item["name"])
+            if button.get_child():
+                button.get_child().set_xalign(0.0)
             button.set_tooltip_text(item["path"] + "\n点击使用当前 Agent 打开")
             button.get_style_context().add_class("project-button")
             button.connect("clicked", self.open_directory, index)
@@ -659,7 +798,10 @@ class App(Gtk.Window):
                         listing.remove(child)
                     for name in names:
                         item = Gtk.ListBoxRow()
-                        item.add(Gtk.Label(label=name, xalign=0, margin=max(3, round(6 * self.scale / 100))))
+                        eb = Gtk.EventBox()
+                        eb.add(Gtk.Label(label=name, xalign=0, margin=max(3, round(6 * self.scale / 100))))
+                        self.apply_hand_cursor(eb)
+                        item.add(eb)
                         item.directory_name = name
                         listing.add(item)
                     listing.show_all()
@@ -887,6 +1029,7 @@ class App(Gtk.Window):
                         self.open_terminal(None, host, selected_item)
                     button.connect("clicked", selected)
                     box.add(button)
+                self.scale_layout(dialog)
                 dialog.show_all()
                 dialog.run()
                 dialog.destroy()
@@ -947,7 +1090,6 @@ class App(Gtk.Window):
         terminal.set_vexpand(True)
         terminal.set_scrollback_lines(10000)
         label = Gtk.Box(spacing=5)
-        self.scale_layout(label)
         label.pack_start(Gtk.Label(label=directory["name"] + " · " + agent["name"]), True, True, 0)
         kind, quota_executable = quota_agent(agent["command"])
         if kind == "codex":
@@ -984,15 +1126,37 @@ class App(Gtk.Window):
         close = Gtk.Button.new_from_icon_name("window-close-symbolic", Gtk.IconSize.MENU)
         close.set_relief(Gtk.ReliefStyle.NONE)
         label.pack_start(close, False, False, 0)
-        state = {"closed": False, "connected": False, "generation": 0, "retry": 0, "retry_source": None, "timer": None, "signature": None, "handled": None, "quota_busy": False, "connected_at": 0}
+        state = {
+            "closed": False,
+            "connected": False,
+            "generation": 0,
+            "retry": 0,
+            "retry_source": None,
+            "timer": None,
+            "secondary_timer": None,
+            "watchdog_timer": None,
+            "signature": None,
+            "confirm_attempts": 0,
+            "handled_signature": None,
+            "quota_busy": False,
+            "connected_at": 0
+        }
         image_button.connect("clicked", lambda *_: self.send_image_dialog(host, socket_path, terminal, state))
         def close_tab(*_):
             state["closed"] = True
             self.sync_async(host, "DELETE", session_id)
             if state["timer"]:
                 GLib.source_remove(state["timer"])
+                state["timer"] = None
+            if state["secondary_timer"]:
+                GLib.source_remove(state["secondary_timer"])
+                state["secondary_timer"] = None
+            if state["watchdog_timer"]:
+                GLib.source_remove(state["watchdog_timer"])
+                state["watchdog_timer"] = None
             if state["retry_source"]:
                 GLib.source_remove(state["retry_source"])
+                state["retry_source"] = None
             if terminal.get_parent():
                 parent = terminal.get_parent()
                 if parent is self.tabs:
@@ -1017,6 +1181,7 @@ class App(Gtk.Window):
         reconnect.set_no_show_all(True)
         label.pack_start(reconnect, False, False, 0)
         label.reorder_child(close, -1)
+        self.scale_layout(label)
         def read_quota():
             if state["closed"]:
                 return False
@@ -1074,33 +1239,121 @@ class App(Gtk.Window):
             threading.Thread(target=worker, daemon=True).start()
             return True
         GLib.timeout_add_seconds(60, read_quota)
+        def cancel_confirm_timers():
+            if state["timer"]:
+                GLib.source_remove(state["timer"])
+                state["timer"] = None
+            if state["secondary_timer"]:
+                GLib.source_remove(state["secondary_timer"])
+                state["secondary_timer"] = None
+
         def visible_signature():
             try:
                 _, row = terminal.get_cursor_position()
-                text, _ = terminal.get_text_range_format(Vte.Format.TEXT, max(0, row - 99), 0, row, terminal.get_column_count() - 1)
+                end_row = max(row, terminal.get_row_count() - 1)
+                text, _ = terminal.get_text_range_format(
+                    Vte.Format.TEXT, max(0, row - 99), 0, end_row, terminal.get_column_count() - 1
+                )
                 return auto_enter_signature(text or "")
             except (TypeError, ValueError):
                 return None
-        def changed(*_):
-            if not state["connected"] or not self.auto_enter.get_active():
+
+        def schedule_secondary_check(target_sig):
+            if state["closed"] or not state["connected"]:
                 return
-            signature = visible_signature()
-            if signature != state["signature"]:
-                if state["timer"]:
-                    GLib.source_remove(state["timer"])
-                    state["timer"] = None
-                state["signature"] = signature
-                if signature and signature != state["handled"]:
-                    def confirm():
-                        state["timer"] = None
-                        if not state["closed"] and state["connected"] and self.auto_enter.get_active() and visible_signature() == signature:
-                            state["handled"] = signature
-                            terminal.feed_child(b"\r")
-                        return False
-                    state["timer"] = GLib.timeout_add_seconds(self.delay.get_value_as_int(), confirm)
-                elif not signature:
-                    state["handled"] = None
+            if state["secondary_timer"]:
+                GLib.source_remove(state["secondary_timer"])
+                state["secondary_timer"] = None
+
+            def secondary_check():
+                state["secondary_timer"] = None
+                if state["closed"] or not state["connected"] or not self.auto_enter.get_active():
+                    return False
+                latest_sig = visible_signature()
+                if not latest_sig:
+                    # 提示已顺利通过并消失
+                    state["signature"] = None
+                    state["confirm_attempts"] = 0
+                    state["handled_signature"] = None
+                    return False
+
+                if latest_sig != target_sig:
+                    # 提示发生了变化（进入了下一个确认步骤，如多步骤确认）
+                    state["signature"] = None
+                    state["confirm_attempts"] = 0
+                    check_prompt()
+                    return False
+
+                # 提示依然存在：执行二次确认并继续复核，避免卡住
+                if state["confirm_attempts"] < 3:
+                    state["confirm_attempts"] += 1
+                    terminal.feed_child(b"\r")
+                    sec_delay = max(2, min(5, self.delay.get_value_as_int()))
+                    state["secondary_timer"] = GLib.timeout_add_seconds(sec_delay, secondary_check)
+                else:
+                    # 达到最大重试次数（连续确认 3 次仍未清除），标记已处理避免无限死循环
+                    state["handled_signature"] = target_sig
+                return False
+
+            sec_delay = max(2, min(5, self.delay.get_value_as_int()))
+            state["secondary_timer"] = GLib.timeout_add_seconds(sec_delay, secondary_check)
+
+        def do_primary_confirm(sig):
+            state["timer"] = None
+            if state["closed"] or not state["connected"] or not self.auto_enter.get_active():
+                return False
+            current_sig = visible_signature()
+            if current_sig != sig:
+                if current_sig:
+                    check_prompt()
+                return False
+            state["confirm_attempts"] = 1
+            terminal.feed_child(b"\r")
+            # 开启二次检测与复核排期
+            schedule_secondary_check(sig)
+            return False
+
+        def check_prompt():
+            if not state["connected"] or not self.auto_enter.get_active() or state["closed"]:
+                return
+            sig = visible_signature()
+            if not sig:
+                if state["signature"]:
+                    cancel_confirm_timers()
+                    state["signature"] = None
+                    state["confirm_attempts"] = 0
+                    state["handled_signature"] = None
+                return
+
+            if sig == state["handled_signature"]:
+                return
+
+            if sig != state["signature"]:
+                cancel_confirm_timers()
+                state["signature"] = sig
+                state["confirm_attempts"] = 0
+                state["handled_signature"] = None
+                delay_sec = max(1, self.delay.get_value_as_int())
+                state["timer"] = GLib.timeout_add_seconds(delay_sec, lambda s=sig: do_primary_confirm(s))
+            elif state["timer"] is None and state["secondary_timer"] is None and state["confirm_attempts"] == 0:
+                delay_sec = max(1, self.delay.get_value_as_int())
+                state["timer"] = GLib.timeout_add_seconds(delay_sec, lambda s=sig: do_primary_confirm(s))
+
+        def changed(*_):
+            check_prompt()
+
         terminal.connect("contents-changed", changed)
+
+        # 每个会话独享的防卡死轮询检测，确保在输出静止时也能及时响应
+        def session_watchdog():
+            if state["closed"]:
+                return False
+            if state["connected"] and self.auto_enter.get_active():
+                check_prompt()
+            return True
+
+        state["watchdog_timer"] = GLib.timeout_add_seconds(2, session_watchdog)
+
         def key_pressed(widget, event):
             modifiers = event.state & Gtk.accelerator_get_default_mod_mask()
             if (kind == "agy" and modifiers == Gdk.ModifierType.CONTROL_MASK
@@ -1114,10 +1367,8 @@ class App(Gtk.Window):
                 if event.keyval in (Gdk.KEY_v, Gdk.KEY_V):
                     widget.paste_clipboard()
                     return True
-            if state["timer"]:
-                GLib.source_remove(state["timer"])
-                state["timer"] = None
-            state["handled"] = state["signature"]
+            cancel_confirm_timers()
+            state["handled_signature"] = state["signature"]
             return False
         terminal.connect("key-press-event", key_pressed)
         def start(*_):
@@ -1126,6 +1377,10 @@ class App(Gtk.Window):
             if state["retry_source"]:
                 GLib.source_remove(state["retry_source"])
                 state["retry_source"] = None
+            cancel_confirm_timers()
+            state["signature"] = None
+            state["confirm_attempts"] = 0
+            state["handled_signature"] = None
             reconnect.hide()
             state["generation"] += 1
             terminal.spawn_async(Vte.PtyFlags.DEFAULT, None, argv, None, GLib.SpawnFlags.SEARCH_PATH, None, None, -1, None, spawned, None)
@@ -1134,10 +1389,10 @@ class App(Gtk.Window):
         def child_exited(_terminal, status):
             state["connected"] = False
             quota.set_text(format_quota([]) if kind else "")
-            if state["timer"]:
-                GLib.source_remove(state["timer"])
-                state["timer"] = None
+            cancel_confirm_timers()
             state["signature"] = None
+            state["confirm_attempts"] = 0
+            state["handled_signature"] = None
             if state["closed"]:
                 return
             code = os.waitstatus_to_exitcode(status)
