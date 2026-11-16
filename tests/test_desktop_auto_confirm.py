@@ -20,16 +20,22 @@ class DesktopAutoConfirmTest(unittest.TestCase):
         sig = self.core_mod.auto_enter_signature
         # Standard yes/no prompts with colon or question marks
         self.assertIsNotNone(sig("Do you want to proceed? [Y/n]"))
-        self.assertIsNotNone(sig("Do you want to proceed? [Y/n]: "))
-        self.assertIsNotNone(sig("Continue installation? (Y/n)? "))
+        self.assertIsNotNone(sig("Do you want to proceed? [y/N]: "))
+        self.assertIsNotNone(sig("Continue installation? (y/n)? "))
         self.assertIsNotNone(sig("Apply changes? [Yes/no]"))
         self.assertIsNotNone(sig("Press enter to continue"))
         self.assertIsNotNone(sig("按回车继续"))
         self.assertIsNotNone(sig("按 Enter 确认"))
 
-        # Interactive arrow selections
+        # Tmux status bar at bottom should not break prompt detection
+        tmux_screen = "Do you want to proceed? [Y/n]: \n[rdt_7fa83d7d99994cec85] 0:bash* \"remote\" 18:05:30"
+        self.assertIsNotNone(sig(tmux_screen))
+
+        # Interactive arrow/bullet selections
         text_approve = "Would you like to run this command?\n❯ Yes, approve"
         self.assertIsNotNone(sig(text_approve))
+        text_bullet = "Would you like to run this command?\n● 1. Yes (approve)\n○ 2. No"
+        self.assertIsNotNone(sig(text_bullet))
 
         # Rejection or non-prompt
         self.assertIsNone(sig("Just standard output from a build\nDone in 2.5s"))
@@ -53,6 +59,7 @@ class DesktopAutoConfirmTest(unittest.TestCase):
                     "secondary_timer": None,
                     "watchdog_timer": None,
                     "signature": None,
+                    "prompt_detected_at": 0.0,
                     "confirm_attempts": 0,
                     "handled_signature": None,
                 }
@@ -85,17 +92,12 @@ class DesktopAutoConfirmTest(unittest.TestCase):
                         self.state["confirm_attempts"] = 0
                         self.state["handled_signature"] = None
                         return False
-                    if latest_sig != target_sig:
-                        self.state["signature"] = None
-                        self.state["confirm_attempts"] = 0
-                        self.check_prompt()
-                        return False
                     if self.state["confirm_attempts"] < 3:
                         self.state["confirm_attempts"] += 1
                         self.feed_calls.append(b"\r")
                         self.state["secondary_timer"] = GLib.timeout_add(40, secondary_check)
                     else:
-                        self.state["handled_signature"] = target_sig
+                        self.state["handled_signature"] = latest_sig
                     return False
 
                 self.state["secondary_timer"] = GLib.timeout_add(40, secondary_check)
@@ -105,13 +107,15 @@ class DesktopAutoConfirmTest(unittest.TestCase):
                 if self.state["closed"] or not self.state["connected"] or not self.auto_enter_active:
                     return False
                 current_sig = self.visible_signature()
-                if current_sig != sig:
-                    if current_sig:
-                        self.check_prompt()
+                if not current_sig:
+                    self.state["signature"] = None
+                    self.state["confirm_attempts"] = 0
+                    self.state["handled_signature"] = None
                     return False
+                self.state["signature"] = current_sig
                 self.state["confirm_attempts"] = 1
                 self.feed_calls.append(b"\r")
-                self.schedule_secondary_check(sig)
+                self.schedule_secondary_check(current_sig)
                 return False
 
             def check_prompt(self):
@@ -127,14 +131,16 @@ class DesktopAutoConfirmTest(unittest.TestCase):
                     return
                 if sig == self.state["handled_signature"]:
                     return
-                if sig != self.state["signature"]:
-                    self.cancel_confirm_timers()
+                if self.state["signature"] is None:
                     self.state["signature"] = sig
                     self.state["confirm_attempts"] = 0
                     self.state["handled_signature"] = None
                     self.state["timer"] = GLib.timeout_add(30, lambda s=sig: self.do_primary_confirm(s))
-                elif self.state["timer"] is None and self.state["secondary_timer"] is None and self.state["confirm_attempts"] == 0:
-                    self.state["timer"] = GLib.timeout_add(30, lambda s=sig: self.do_primary_confirm(s))
+                else:
+                    if self.state["secondary_timer"] is not None:
+                        return
+                    if self.state["timer"] is None and self.state["confirm_attempts"] == 0:
+                        self.state["timer"] = GLib.timeout_add(30, lambda s=sig: self.do_primary_confirm(s))
 
         session1 = MockSession("s1")
         session2 = MockSession("s2")
@@ -167,6 +173,97 @@ class DesktopAutoConfirmTest(unittest.TestCase):
         self.assertEqual(len(session2.feed_calls), 1, "Session 2 should only confirm once when prompt cleared")
         self.assertEqual(session2.feed_calls[0], b"\r")
         self.assertIsNone(session2.state["signature"])
+
+    def test_watchdog_and_contents_changed_do_not_starve_timer(self):
+        # Verify that frequent contents-changed or watchdog checks (e.g. clock ticking or spinners)
+        # do not indefinitely postpone the confirmation deadline.
+        import time
+
+        class ActiveSession:
+            def __init__(self):
+                self.feed_calls = []
+                self.current_screen_text = "Proceed? [y/N]"
+                self.auto_enter_active = True
+                self.delay_sec = 0.05
+                self.state = {
+                    "closed": False,
+                    "connected": True,
+                    "timer": None,
+                    "secondary_timer": None,
+                    "signature": None,
+                    "prompt_detected_at": 0.0,
+                    "confirm_attempts": 0,
+                    "handled_signature": None,
+                }
+
+            def cancel_confirm_timers(self):
+                if self.state["timer"]:
+                    GLib.source_remove(self.state["timer"])
+                    self.state["timer"] = None
+                if self.state["secondary_timer"]:
+                    GLib.source_remove(self.state["secondary_timer"])
+                    self.state["secondary_timer"] = None
+
+            def do_primary_confirm(self, sig):
+                self.state["timer"] = None
+                if self.state["closed"] or not self.state["connected"] or not self.auto_enter_active:
+                    return False
+                cur = self.current_screen_text
+                if not cur:
+                    return False
+                self.state["confirm_attempts"] = 1
+                self.feed_calls.append(b"\r")
+                return False
+
+            def check_prompt(self):
+                if not self.state["connected"] or not self.auto_enter_active or self.state["closed"]:
+                    return
+                sig = self.current_screen_text
+                if not sig:
+                    return
+                now = time.monotonic()
+                if self.state["signature"] is None:
+                    self.state["signature"] = sig
+                    self.state["prompt_detected_at"] = now
+                    self.state["timer"] = GLib.timeout_add(
+                        int(self.delay_sec * 1000), lambda s=sig: self.do_primary_confirm(s)
+                    )
+                else:
+                    if self.state["timer"] is not None:
+                        if now - self.state.get("prompt_detected_at", now) >= self.delay_sec:
+                            self.cancel_confirm_timers()
+                            self.do_primary_confirm(sig)
+                        return
+                    if self.state["confirm_attempts"] == 0:
+                        elapsed = now - self.state.get("prompt_detected_at", now)
+                        if elapsed >= self.delay_sec:
+                            self.do_primary_confirm(sig)
+                        else:
+                            remain = max(1, int((self.delay_sec - elapsed) * 1000))
+                            self.state["timer"] = GLib.timeout_add(
+                                remain, lambda s=sig: self.do_primary_confirm(s)
+                            )
+
+        session = ActiveSession()
+        session.check_prompt()
+
+        # Simulate frequent watchdog & contents-changed calls every 10ms with slightly changing text
+        def tick(count=[0]):
+            count[0] += 1
+            session.current_screen_text = f"Proceed? [y/N] (elapsed {count[0]}0ms)"
+            session.check_prompt()
+            return count[0] < 8
+
+        GLib.timeout_add(10, tick)
+
+        loop = GLib.MainLoop()
+        GLib.timeout_add(150, loop.quit)
+        loop.run()
+
+        self.assertGreaterEqual(
+            len(session.feed_calls), 1, "Timer should fire despite frequent check_prompt updates"
+        )
+        self.assertEqual(session.feed_calls[0], b"\r")
 
 
 if __name__ == "__main__":

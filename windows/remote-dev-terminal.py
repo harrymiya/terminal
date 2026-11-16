@@ -85,18 +85,45 @@ class App(Gtk.Window):
                 min-height: 24px;
                 padding: 2px 6px;
             }
-            spinbutton button {
+            spinbutton button,
+            spinbutton.horizontal button,
+            spinbutton.horizontal > button,
+            spinbutton button:hover,
+            spinbutton button:active,
+            spinbutton button:focus,
+            spinbutton.horizontal > button:hover,
+            spinbutton.horizontal > button:active {
                 background-image: none;
-                background-color: #16222f;
+                background-color: transparent;
                 border: none;
+                border-width: 0;
+                border-style: none;
+                border-color: transparent;
+                box-shadow: none;
                 color: #a6bacb;
                 border-radius: 4px;
                 padding: 0 4px;
                 margin: 0;
-                box-shadow: none;
                 min-height: 11px;
             }
-            spinbutton button:hover { background-image: none; background-color: #213548; color: #86dbb8; }
+            spinbutton button:hover,
+            spinbutton.horizontal button:hover,
+            spinbutton.horizontal > button:hover {
+                background-color: #213548;
+                color: #86dbb8;
+                border: none;
+                border-width: 0;
+                box-shadow: none;
+            }
+            spinbutton button:active,
+            spinbutton.horizontal button:active,
+            spinbutton.horizontal > button:active {
+                background-color: #203e36;
+                color: #d8fff0;
+                border: none;
+                border-width: 0;
+                box-shadow: none;
+            }
             combobox { min-height: 24px; padding: 0; }
             combobox button.combo, combobox button {
                 background-image: none;
@@ -186,6 +213,31 @@ class App(Gtk.Window):
             .tile-header button:hover { background-image: none; background-color: rgba(255, 255, 255, 0.15); color: #ffffff; }
             .tile-focused { box-shadow: inset 0 0 0 2px #86dbb8; }
             .tile-focused .tile-header { background: #203e36; border-bottom: 1px solid #86dbb8; }
+            progressbar.tile-shimmer {
+                min-height: 2px;
+                padding: 0;
+                margin: 2px -8px -5px -8px;
+                border: none;
+                background-color: transparent;
+            }
+            progressbar.tile-shimmer trough {
+                min-height: 2px;
+                padding: 0;
+                margin: 0;
+                border: none;
+                background-color: transparent;
+            }
+            progressbar.tile-shimmer progress {
+                min-height: 2px;
+                border: none;
+                background-image: none;
+                background-color: #86dbb8;
+                box-shadow: 0 0 8px #86dbb8;
+            }
+            .tile-focused progressbar.tile-shimmer progress {
+                background-color: #5ff5b8;
+                box-shadow: 0 0 10px #5ff5b8;
+            }
             paned.tile-paned > separator { background-color: #243546; margin: 0; padding: 0; }
             paned.tile-paned.horizontal > separator { min-width: 2px; }
             paned.tile-paned.vertical > separator { min-height: 2px; }
@@ -365,6 +417,7 @@ class App(Gtk.Window):
         self.refresh()
         self.refresh_all_shared()
         GLib.timeout_add_seconds(5, self.poll_shared)
+        GLib.timeout_add(50, self._animate_running_headers)
         self.scale_layout(self)
         self.connect("destroy", Gtk.main_quit)
 
@@ -629,6 +682,25 @@ class App(Gtk.Window):
         self.set_initial_positions(root, total_w, total_h)
         return root
 
+    def _animate_running_headers(self):
+        now = time.monotonic()
+        for session in self.sessions:
+            shimmer = getattr(session.get("terminal"), "_shimmer_bar", None)
+            if not shimmer:
+                continue
+            state = session.get("state")
+            is_active = False
+            if state:
+                is_active = (now - state.get("last_output_at", 0.0) < 2.5) or state.get("quota_busy", False)
+            if is_active:
+                if not shimmer.get_visible():
+                    shimmer.show()
+                shimmer.pulse()
+            else:
+                if shimmer.get_visible():
+                    shimmer.hide()
+        return True
+
     def rebuild_view(self, selected=None):
         if selected is None and not self.tiled:
             selected = self.tabs.get_nth_page(self.tabs.get_current_page())
@@ -644,6 +716,7 @@ class App(Gtk.Window):
             self.grid.remove(child)
         for session in self.sessions:
             session["terminal"]._tile_frame = None
+            session["terminal"]._shimmer_bar = None
         self.count_label.set_text(f"{len(self.sessions)} / 8")
         if not self.sessions:
             self.views.set_visible_child_name("empty")
@@ -661,9 +734,18 @@ class App(Gtk.Window):
                     frame.get_style_context().add_class("tile-focused")
                 frame.set_hexpand(True)
                 frame.set_vexpand(True)
-                header = Gtk.Box()
+                header = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
                 header.get_style_context().add_class("tile-header")
-                header.pack_start(session["label"], True, True, 0)
+                header_bar = Gtk.Box()
+                header_bar.pack_start(session["label"], True, True, 0)
+                header.pack_start(header_bar, True, True, 0)
+                shimmer = Gtk.ProgressBar()
+                shimmer.get_style_context().add_class("tile-shimmer")
+                shimmer.set_pulse_step(0.04)
+                shimmer.set_no_show_all(True)
+                shimmer.hide()
+                header.pack_start(shimmer, False, False, 0)
+                session["terminal"]._shimmer_bar = shimmer
                 frame.pack_start(header, False, False, 0)
                 frame.pack_start(session["terminal"], True, True, 0)
                 frames.append(frame)
@@ -1250,10 +1332,12 @@ class App(Gtk.Window):
             "secondary_timer": None,
             "watchdog_timer": None,
             "signature": None,
+            "prompt_detected_at": 0.0,
             "confirm_attempts": 0,
             "handled_signature": None,
             "quota_busy": False,
-            "connected_at": 0
+            "connected_at": 0,
+            "last_output_at": 0.0
         }
         image_button.connect("clicked", lambda *_: self.send_image_dialog(host, socket_path, terminal, state))
         def close_tab(*_):
@@ -1286,7 +1370,7 @@ class App(Gtk.Window):
             subprocess.Popen(["ssh", "-S", socket_path, "-O", "exit", "-p", str(host["port"]), "-l", host["username"], "--", host["address"]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             shutil.rmtree(socket_dir, ignore_errors=True)
         close.connect("clicked", close_tab)
-        self.sessions.append({"terminal": terminal, "label": label, "key": key, "id": session_id})
+        self.sessions.append({"terminal": terminal, "label": label, "key": key, "id": session_id, "state": state})
         self.rebuild_view(selected=terminal if activate else None)
         def spawned(_terminal, _pid, error, *_):
             if error:
@@ -1391,22 +1475,15 @@ class App(Gtk.Window):
                     state["handled_signature"] = None
                     return False
 
-                if latest_sig != target_sig:
-                    # 提示发生了变化（进入了下一个确认步骤，如多步骤确认）
-                    state["signature"] = None
-                    state["confirm_attempts"] = 0
-                    check_prompt()
-                    return False
-
-                # 提示依然存在：执行二次确认并继续复核，避免卡住
+                # 提示依然存在（回车未生效或多步骤连续提示）：继续复核并尝试回车
                 if state["confirm_attempts"] < 3:
                     state["confirm_attempts"] += 1
                     terminal.feed_child(b"\r")
                     sec_delay = max(2, min(5, self.delay.get_value_as_int()))
                     state["secondary_timer"] = GLib.timeout_add_seconds(sec_delay, secondary_check)
                 else:
-                    # 达到最大重试次数（连续确认 3 次仍未清除），标记已处理避免无限死循环
-                    state["handled_signature"] = target_sig
+                    # 达到最大重试次数（连续确认 3 次仍未清除），标记已处理避免死循环
+                    state["handled_signature"] = latest_sig
                 return False
 
             sec_delay = max(2, min(5, self.delay.get_value_as_int()))
@@ -1417,14 +1494,19 @@ class App(Gtk.Window):
             if state["closed"] or not state["connected"] or not self.auto_enter.get_active():
                 return False
             current_sig = visible_signature()
-            if current_sig != sig:
-                if current_sig:
-                    check_prompt()
+            if not current_sig:
+                # 提示确实已消失
+                state["signature"] = None
+                state["confirm_attempts"] = 0
+                state["handled_signature"] = None
                 return False
+
+            # 屏幕上仍存在合法的确认提示，执行主确认回车
+            state["signature"] = current_sig
             state["confirm_attempts"] = 1
             terminal.feed_child(b"\r")
             # 开启二次检测与复核排期
-            schedule_secondary_check(sig)
+            schedule_secondary_check(current_sig)
             return False
 
         def check_prompt():
@@ -1442,18 +1524,38 @@ class App(Gtk.Window):
             if sig == state["handled_signature"]:
                 return
 
-            if sig != state["signature"]:
-                cancel_confirm_timers()
+            now = time.monotonic()
+            delay_sec = max(1, self.delay.get_value_as_int())
+
+            if state["signature"] is None:
+                # 首次发现提示，启动倒计时
                 state["signature"] = sig
                 state["confirm_attempts"] = 0
                 state["handled_signature"] = None
-                delay_sec = max(1, self.delay.get_value_as_int())
+                state["prompt_detected_at"] = now
                 state["timer"] = GLib.timeout_add_seconds(delay_sec, lambda s=sig: do_primary_confirm(s))
-            elif state["timer"] is None and state["secondary_timer"] is None and state["confirm_attempts"] == 0:
-                delay_sec = max(1, self.delay.get_value_as_int())
-                state["timer"] = GLib.timeout_add_seconds(delay_sec, lambda s=sig: do_primary_confirm(s))
+            else:
+                # 已经在等待确认或二次确认中：
+                # 如果正在等待二次确认，不干扰二次确认流程
+                if state["secondary_timer"] is not None:
+                    return
+                # 如果主定时器存在，允许它按原计划触发，不被频繁输出变动或轮询重复打断重置
+                if state["timer"] is not None:
+                    if now - state.get("prompt_detected_at", now) >= delay_sec:
+                        cancel_confirm_timers()
+                        do_primary_confirm(sig)
+                    return
+                # 如果未在重试且没有定时器，根据已过时间决定立即触发还是补足定时器
+                if state["confirm_attempts"] == 0:
+                    elapsed = now - state.get("prompt_detected_at", now)
+                    if elapsed >= delay_sec:
+                        do_primary_confirm(sig)
+                    else:
+                        remain = max(1, round(delay_sec - elapsed))
+                        state["timer"] = GLib.timeout_add_seconds(remain, lambda s=sig: do_primary_confirm(s))
 
         def changed(*_):
+            state["last_output_at"] = time.monotonic()
             check_prompt()
 
         terminal.connect("contents-changed", changed)
@@ -1468,9 +1570,17 @@ class App(Gtk.Window):
 
         state["watchdog_timer"] = GLib.timeout_add_seconds(2, session_watchdog)
 
-        def key_pressed(*_):
-            cancel_confirm_timers()
-            state["handled_signature"] = state["signature"]
+        def key_pressed(widget, event):
+            # 单纯按下修饰键（Shift、Ctrl、Alt等）不取消自动回车
+            if event.keyval not in (
+                Gdk.KEY_Shift_L, Gdk.KEY_Shift_R,
+                Gdk.KEY_Control_L, Gdk.KEY_Control_R,
+                Gdk.KEY_Alt_L, Gdk.KEY_Alt_R,
+                Gdk.KEY_Super_L, Gdk.KEY_Super_R,
+                Gdk.KEY_Caps_Lock,
+            ):
+                cancel_confirm_timers()
+                state["handled_signature"] = state["signature"]
             return False
         terminal.connect("key-press-event", key_pressed)
         def start(*_):
@@ -1483,6 +1593,7 @@ class App(Gtk.Window):
             state["signature"] = None
             state["confirm_attempts"] = 0
             state["handled_signature"] = None
+            state["last_output_at"] = time.monotonic()
             reconnect.hide()
             state["generation"] += 1
             terminal.spawn_async(Vte.PtyFlags.DEFAULT, None, argv, None, GLib.SpawnFlags.SEARCH_PATH, None, None, -1, None, spawned, None)
@@ -1520,6 +1631,7 @@ class App(Gtk.Window):
             if not state["connected"] and os.path.exists(socket_path):
                 state["connected"] = True
                 state["connected_at"] = time.monotonic()
+                state["last_output_at"] = time.monotonic()
                 read_quota()
                 changed()
             return True

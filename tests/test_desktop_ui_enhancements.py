@@ -71,6 +71,68 @@ class DesktopUIEnhancementsTest(unittest.TestCase):
             self.assertIn('min-height: 24px;', py_file)
             self.assertIn('padding: 2px 8px;', py_file)
 
+    def test_spinbutton_buttons_have_no_borders(self):
+        for platform in ("omarchy", "ubuntu", "windows"):
+            py_file = (Path(__file__).resolve().parents[1] / platform / "remote-dev-terminal.py").read_text(encoding="utf-8")
+            self.assertIn('spinbutton button', py_file)
+            self.assertIn('spinbutton.horizontal > button', py_file)
+            self.assertIn('border: none;', py_file)
+            self.assertIn('border-width: 0;', py_file)
+            self.assertIn('box-shadow: none;', py_file)
+
+    def test_format_quota_with_weekly_reset_days(self):
+        omarchy_dir = str(Path(__file__).resolve().parents[1] / "omarchy")
+        if omarchy_dir not in sys.path:
+            sys.path.insert(0, omarchy_dir)
+        core_mod = importlib.import_module("core")
+        format_quota = core_mod.format_quota
+
+        self.assertEqual(format_quota([]), "-- · --")
+        self.assertEqual(format_quota([(300, 80), (10080, 50)]), "80% · 50%")
+        self.assertEqual(format_quota([(300, 80, None), (10080, 50, "5d")]), "80% · 50% 5d")
+        self.assertEqual(format_quota([(10080, 50, "<1d")]), "-- · 50% <1d")
+
+
+    def test_running_card_header_shimmer_light_effect(self):
+        import time
+
+        for platform in ("omarchy", "ubuntu", "windows"):
+            py_file = (Path(__file__).resolve().parents[1] / platform / "remote-dev-terminal.py").read_text(encoding="utf-8")
+            self.assertIn("progressbar.tile-shimmer", py_file)
+            self.assertIn("progressbar.tile-shimmer trough", py_file)
+            self.assertIn("progressbar.tile-shimmer progress", py_file)
+            self.assertIn("_animate_running_headers", py_file)
+
+        app = self.app_mod.App()
+        term = self.app_mod.Vte.Terminal()
+        label = self.app_mod.Gtk.Box()
+        state = {"last_output_at": time.monotonic(), "quota_busy": False}
+        app.sessions = [{"terminal": term, "label": label, "key": "k", "id": "id1", "state": state}]
+        app.tiled = True
+        app.rebuild_view()
+
+        shimmer = getattr(term, "_shimmer_bar", None)
+        self.assertIsNotNone(shimmer)
+        self.assertFalse(shimmer.get_visible())
+
+        # When running (recent output within 2.5s), shimmer becomes visible and pulses
+        app._animate_running_headers()
+        self.assertTrue(shimmer.get_visible())
+
+        # When idle (>2.5s ago), shimmer is hidden
+        state["last_output_at"] = time.monotonic() - 10.0
+        app._animate_running_headers()
+        self.assertFalse(shimmer.get_visible())
+
+        # When quota_busy is True, shimmer pulses even if last output is old
+        state["quota_busy"] = True
+        app._animate_running_headers()
+        self.assertTrue(shimmer.get_visible())
+
+        state["quota_busy"] = False
+        app._animate_running_headers()
+        self.assertFalse(shimmer.get_visible())
+
 
 if __name__ == "__main__":
     unittest.main()

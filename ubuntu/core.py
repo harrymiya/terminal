@@ -4,6 +4,8 @@ import os
 from pathlib import Path
 import shlex
 import tempfile
+import time
+from datetime import datetime, timezone
 import uuid
 import re
 import subprocess
@@ -112,19 +114,55 @@ def ssh_argv(host, directory, agent, session_id=None, control_path=None, restore
     return ["ssh", "-tt", "-o", "ServerAliveInterval=20", "-o", "ServerAliveCountMax=6", *options, "-p", str(host["port"]), "-l", host["username"], "--", host["address"], remote], session_id
 
 
+def _normalize_signature(sig):
+    if not sig:
+        return ""
+    # 去除动态时钟 (HH:MM:SS 或 HH:MM)
+    sig = re.sub(r"\b\d{1,2}:\d{2}(?::\d{2})?\b", "", sig)
+    # 去除耗时指示 (例如 (2.5s) 或 (12s))
+    sig = re.sub(r"\(\d+(?:\.\d+)?s\)", "", sig)
+    # 去除旋转动效字符
+    sig = re.sub(r"[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]", "", sig)
+    return sig.strip()
+
+
 def auto_enter_signature(text):
-    text = text.rstrip()
-    if re.search(r"(?:\[Y/n\]|\(Y/n\)|\[Yes/no\]|(?i:press\s+(?:enter|return)\s+to\s+(?:continue|confirm|approve)|按\s*(?:回车|enter)\s*(?:继续|确认|批准)))[:\s?]*$", text):
-        return "\n".join([line for line in text.splitlines() if line.strip()][-2:])
-    lines = text.splitlines()
+    if not text:
+        return None
+    raw_lines = [line.strip() for line in text.splitlines()]
+    # 过滤掉末尾的空行以及 tmux 状态栏（例如: [rdt_7fa83d7d99994cec85] 0:bash* ...）
+    lines = []
+    for line in raw_lines:
+        if not line:
+            continue
+        if re.match(r"^\[(?:rdt_[0-9a-fA-F]+|\d+)\]\s+\d+:\S+", line):
+            continue
+        lines.append(line)
+    if not lines:
+        return None
+
+    # 1. 检查末尾附近的快捷确认/回车提示（大小写不敏感，如 [y/n], [y/N], (y/n), press enter to continue 等）
+    prompt_re = re.compile(
+        r"(?i)(?:\[(?:y/n|yes/no|y/N|Y/n)\]|\((?:y/n|yes/no|y/N|Y/n)\)|press\s+(?:enter|return)\s+to\s+(?:continue|confirm|approve)|按\s*(?:回车|enter)\s*(?:继续|确认|批准|同意))[:\s?]*$"
+    )
+    for idx in range(len(lines) - 1, max(-1, len(lines) - 6), -1):
+        if prompt_re.search(lines[idx]):
+            context = lines[max(0, idx - 1):idx + 1]
+            return _normalize_signature("\n".join(context))
+
+    # 2. 检查多选项式交互菜单（如 Codex / Agy CLI 的光标或标记选单）
+    option_re = re.compile(
+        r"(?i)^\s*(?:[›❯>➜→*]|●|◉|\[[x*]\]|\([x*]\))\s*(?:\d+[.)]\s*)?(?:yes\b|allow\b|approve\b|proceed\b|continue\b|always\b|允许|批准|同意|继续|确认|总是)"
+    )
+    request_re = re.compile(
+        r"(?i)(approve (this|the)? ?(command|action)?|allow (this|the)? ?(command|action)?|would you like to|do you want to|run this command\?|continue\? ?\[|\[(y/n|yes/no)\]|\((y/n|yes/no)\)|press\s+(enter|return)\s+to\s+(continue|confirm|approve)|按\s*(回车|enter)\s*(继续|确认|批准)|permission required|needs your approval|批准|是否允许|需要确认|是否继续)"
+    )
+
     for i in range(len(lines) - 1, -1, -1):
-        if re.match(r"\s*[›❯>➜]", lines[i]):
-            if not re.match(r"(?i)^\s*[›❯>➜]\s*(?:\d+[.)]\s*)?(?:yes\b|allow\b|approve\b|proceed\b|continue\b|允许|批准|同意|继续|确认)", lines[i]):
-                return None
-            request = re.compile(r"(?i)(approve (this|the)? ?(command|action)?|allow (this|the)? ?(command|action)?|would you like to|do you want to|run this command\?|continue\? ?\[|\[(y/n|yes/no)\]|\((y/n|yes/no)\)|press\s+(enter|return)\s+to\s+(continue|confirm|approve)|按\s*(回车|enter)\s*(继续|确认|批准)|permission required|needs your approval|批准|是否允许|需要确认|是否继续)")
-            for line in reversed(lines[max(0, i-20):i]):
-                if request.search(line):
-                    return line.strip() + "\n" + lines[i].strip()
+        if option_re.match(lines[i]):
+            for line in reversed(lines[max(0, i - 20):i]):
+                if request_re.search(line):
+                    return _normalize_signature(line + "\n" + lines[i])
             return None
     return None
 
@@ -153,13 +191,31 @@ def quota_remote_command(directory, executable, arguments):
 
 def quota_from_codex(message):
     limits = message.get("result", {}).get("rateLimits", {})
-    return [(int(w["windowDurationMins"]), max(0, min(100, 100 - int(w["usedPercent"]))))
-            for name in ("primary", "secondary") if isinstance((w := limits.get(name)), dict)
-            and w.get("windowDurationMins") and w.get("usedPercent") is not None]
+    now = time.time()
+    result = []
+    for name in ("primary", "secondary"):
+        w = limits.get(name)
+        if isinstance(w, dict) and w.get("windowDurationMins") and w.get("usedPercent") is not None:
+            mins = int(w["windowDurationMins"])
+            percent = max(0, min(100, 100 - int(w["usedPercent"])))
+            resets_at = w.get("resetsAt")
+            days_str = None
+            if resets_at is not None:
+                try:
+                    delta = float(resets_at) - now
+                    if delta >= 86400:
+                        days_str = f"{int(delta // 86400)}d"
+                    elif delta > 0:
+                        days_str = "<1d"
+                except (ValueError, TypeError):
+                    pass
+            result.append((mins, percent, days_str))
+    return result
 
 
 def quota_from_agy(message):
     result = {}
+    now = time.time()
     for group in message.get("command", {}).get("data", {}).get("groups", []):
         for bucket in group.get("buckets", []):
             name = bucket.get("id", "").lower()
@@ -168,13 +224,43 @@ def quota_from_agy(message):
             minutes = 10080 if "weekly" in name or "7d" in name else 300 if "5h" in name or "session" in name else None
             value = bucket.get("remaining_fraction")
             if minutes and value is not None:
-                result[minutes] = max(0, min(100, int(float(value) * 100)))
-    return sorted(result.items())
+                percent = max(0, min(100, int(float(value) * 100)))
+                reset_time_str = bucket.get("reset_time")
+                days_str = None
+                if reset_time_str:
+                    try:
+                        clean_ts = reset_time_str.replace("Z", "+00:00")
+                        dt = datetime.fromisoformat(clean_ts)
+                        delta = (dt - datetime.now(timezone.utc)).total_seconds()
+                        if delta >= 86400:
+                            days_str = f"{int(delta // 86400)}d"
+                        elif delta > 0:
+                            days_str = "<1d"
+                    except Exception:
+                        pass
+                result[minutes] = (percent, days_str)
+    return [(mins, p, d) for mins, (p, d) in sorted(result.items())]
 
 
 def format_quota(quota):
-    """Show both requested windows even when only one is available."""
-    values = dict(quota)
+    """Show both requested windows with reset days for weekly quota if available."""
+    values = {}
+    days_map = {}
+    for item in quota:
+        if isinstance(item, (list, tuple)) and len(item) >= 2:
+            mins, percent = item[0], item[1]
+            values[mins] = percent
+            if len(item) >= 3 and item[2] is not None:
+                days_map[mins] = item[2]
+
     def value(minutes):
         return f"{values[minutes]}%" if minutes in values else "--"
-    return f"{value(300)} · {value(10080)}"
+
+    weekly = value(10080)
+    reset_days = days_map.get(10080)
+    if weekly != "--" and reset_days:
+        weekly_part = f"{weekly} {reset_days}"
+    else:
+        weekly_part = weekly
+
+    return f"{value(300)} · {weekly_part}"
