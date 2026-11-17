@@ -114,6 +114,11 @@ class App(Gtk.Window):
             }
             dialog list, dialog row, dialog treeview, dialog viewport { background-color: #101823; color: #e8eef6; }
             dialog row:selected, dialog treeview:selected { background-color: #203e36; color: #d8fff0; }
+            dialog treeview.user-table header button {
+                background-image: none; background-color: #16222f; color: #9bb0c3;
+                border: none; border-bottom: 1px solid #2b3e51; border-radius: 0;
+                padding: 7px 10px; box-shadow: none; font-weight: bold;
+            }
             button, entry, spinbutton, combobox, combobox button, .menu-toggle, .host-button, .project-button, .manage-button {
                 min-height: 24px;
                 padding: 2px 8px;
@@ -221,7 +226,7 @@ class App(Gtk.Window):
             .quota-value { color: #e8eef6; font-size: 12px; font-weight: bold; }
             .quota-value:backdrop { color: #e8eef6; }
             notebook { background-color: #0c1119; border: none; }
-            notebook > header { background-color: #101823; border-bottom: 1px solid #243546; min-height: 32px; padding: 0 4px; }
+            notebook > header { background-color: #101823; border-bottom: 1px solid #243546; min-height: 34px; padding: 0 4px; }
             notebook tab {
                 background-image: none;
                 background-color: #16222f;
@@ -232,7 +237,7 @@ class App(Gtk.Window):
                 padding: 4px 12px;
                 margin: 0 2px;
                 box-shadow: none;
-                min-height: 24px;
+                min-height: 25px;
             }
             notebook tab:hover { background-image: none; background-color: #213548; color: #ffffff; }
             notebook tab:checked {
@@ -287,7 +292,7 @@ class App(Gtk.Window):
             .primary { background: #86dbb8; color: #101c1a; font-weight: bold; border: 0; }
             .tile-grid { background: #263647; }
             .tile { background: #101823; }
-            .tile-header { padding: 4px 8px; background: #16222f; border-bottom: 1px solid #243546; min-height: 24px; }
+            .tile-header { padding: 4px 8px; background: #16222f; border-bottom: 1px solid #243546; min-height: 25px; }
             .tile-header button { background-image: none; background-color: transparent; border: none; box-shadow: none; padding: 1px 3px; color: #8fa2b4; }
             .tile-header button:hover { background-image: none; background-color: rgba(255, 255, 255, 0.15); color: #ffffff; }
             .tile-focused { box-shadow: inset 0 0 0 2px #86dbb8; }
@@ -311,7 +316,7 @@ class App(Gtk.Window):
             }
             .tile-glow-bar {
                 min-height: 2px;
-                margin: 2px -8px -5px -8px;
+                margin: 0 -8px;
                 background-color: #ff9800;
                 box-shadow: 0 0 8px #ff9800, 0 2px 14px rgba(255, 152, 0, 0.6);
                 animation: orange-glow-breath 1.8s infinite ease-in-out;
@@ -330,7 +335,7 @@ class App(Gtk.Window):
             }
             .tab-glow-bar {
                 min-height: 2px;
-                margin: 2px -12px -2px -12px;
+                margin: 0 -12px;
                 background-color: #ff9800;
                 box-shadow: 0 0 8px #ff9800, 0 2px 14px rgba(255, 152, 0, 0.7);
                 animation: orange-glow-breath 1.8s infinite ease-in-out;
@@ -906,16 +911,19 @@ class App(Gtk.Window):
                     frame.get_style_context().add_class("tile-focused")
                 frame.set_hexpand(True)
                 frame.set_vexpand(True)
-                header = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+                header = Gtk.Overlay()
                 header.get_style_context().add_class("tile-header")
                 header_bar = Gtk.Box()
                 header_bar.pack_start(session["label"], True, True, 0)
-                header.pack_start(header_bar, True, True, 0)
+                header.add(header_bar)
                 glow_bar = Gtk.Box()
                 glow_bar.get_style_context().add_class("tile-glow-bar")
                 glow_bar.set_no_show_all(True)
                 glow_bar.hide()
-                header.pack_start(glow_bar, False, False, 0)
+                glow_bar.set_halign(Gtk.Align.FILL)
+                glow_bar.set_valign(Gtk.Align.END)
+                glow_bar.set_size_request(-1, 2)
+                header.add_overlay(glow_bar)
                 session["terminal"]._glow_bar = glow_bar
                 frame.pack_start(header, False, False, 0)
                 frame.pack_start(session["terminal"], True, True, 0)
@@ -928,15 +936,18 @@ class App(Gtk.Window):
         else:
             self.layout_button.hide()
             for session in self.sessions:
-                tab_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+                tab_box = Gtk.Overlay()
                 tab_bar = Gtk.Box()
                 tab_bar.pack_start(session["label"], True, True, 0)
-                tab_box.pack_start(tab_bar, True, True, 0)
+                tab_box.add(tab_bar)
                 tab_glow = Gtk.Box()
                 tab_glow.get_style_context().add_class("tab-glow-bar")
                 tab_glow.set_no_show_all(True)
                 tab_glow.hide()
-                tab_box.pack_start(tab_glow, False, False, 0)
+                tab_glow.set_halign(Gtk.Align.FILL)
+                tab_glow.set_valign(Gtk.Align.END)
+                tab_glow.set_size_request(-1, 2)
+                tab_box.add_overlay(tab_glow)
                 session["terminal"]._tab_glow_bar = tab_glow
                 tab_box.show_all()
                 self.tabs.append_page(session["terminal"], tab_box)
@@ -963,9 +974,25 @@ class App(Gtk.Window):
         else:
             box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin=8)
             box.pack_start(Gtk.Label(label="用户维护", xalign=0), False, False, 0)
-        rows = Gtk.ListBox()
-        rows.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        rows_model = Gtk.ListStore(str, str, str)
+        users_by_id = {}
+        rows = Gtk.TreeView(model=rows_model)
+        rows.set_headers_visible(True)
+        rows.set_grid_lines(Gtk.TreeViewGridLines.HORIZONTAL)
+        rows.set_enable_search(False)
+        rows.get_selection().set_mode(Gtk.SelectionMode.SINGLE)
+        rows.get_style_context().add_class("user-table")
+        for title, column_index, expand in (("账号", 1, True), ("角色", 2, False)):
+            renderer = Gtk.CellRendererText()
+            renderer.set_padding(10, 7)
+            column = Gtk.TreeViewColumn(title, renderer, text=column_index)
+            column.set_expand(expand)
+            column.set_clickable(False)
+            rows.append_column(column)
+        rows.set_hexpand(True)
+        rows.set_vexpand(True)
         scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         scroll.set_min_content_height(190 if parent is not None else 240)
         scroll.add(rows)
         box.pack_start(scroll, True, True, 8)
@@ -975,31 +1002,47 @@ class App(Gtk.Window):
         add_button, edit_button, delete_button = (Gtk.Button(label=s) for s in ("添加用户", "编辑所选", "删除所选"))
         for button in (add_button, edit_button, delete_button): actions.pack_start(button, True, True, 0)
         box.pack_start(actions, False, False, 8)
+        def selected_user():
+            model, iterator = rows.get_selection().get_selected()
+            return users_by_id.get(model.get_value(iterator, 0)) if iterator is not None else None
         def reload_users():
-            for child in rows.get_children(): rows.remove(child)
+            rows_model.clear()
+            users_by_id.clear()
             try:
                 users = sync_data_request(self.data, "GET", "/v1/admin/users").get("users", [])
                 for user in users:
-                    suffix = " · 管理员" if user.get("is_admin") else ""
-                    row = Gtk.ListBoxRow()
-                    row.user = user
-                    row.add(Gtk.Label(label=user["username"] + suffix, xalign=0, margin=8))
-                    rows.add(row)
+                    user_id = str(user["id"])
+                    users_by_id[user_id] = user
+                    rows_model.append((user_id, user["username"], "管理员" if user.get("is_admin") else "普通用户"))
                 rows.show_all()
                 status.set_text("")
             except Exception as exc:
                 status.set_text(str(exc))
         def edit_user(_button, user=None):
-            selected = user or getattr(rows.get_selected_row(), "user", None)
+            selected = None if _button is add_button else user if user is not None else selected_user()
             if user is None and selected is None:
                 status.set_text("请先选择一个用户。")
                 return
             form = Gtk.Dialog(title="添加用户" if selected is None else "编辑用户", transient_for=dialog, modal=True)
             form.add_buttons("取消", Gtk.ResponseType.CANCEL, "保存", Gtk.ResponseType.OK)
+            parent_width, parent_height = self.get_size()
+            form_width = max(320, min(560, parent_width - 64))
+            form_max_height = max(180, min(440, parent_height - 180))
+            form_scroll = Gtk.ScrolledWindow()
+            form_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+            form_scroll.set_min_content_width(form_width - 32)
+            form_scroll.set_max_content_height(form_max_height)
+            form_scroll.set_propagate_natural_height(True)
             grid = Gtk.Grid(column_spacing=10, row_spacing=8, margin=16)
-            form.get_content_area().add(grid)
+            grid.set_hexpand(True)
+            form_scroll.add(grid)
+            form.get_content_area().add(form_scroll)
+            form.set_default_size(form_width, -1)
+            form.set_resizable(True)
             name_entry = Gtk.Entry(text=selected.get("username", "") if selected else "")
+            name_entry.set_hexpand(True)
             pass_entry = Gtk.Entry()
+            pass_entry.set_hexpand(True)
             pass_entry.set_visibility(False)
             pass_entry.set_placeholder_text("留空保留当前密码" if selected else "至少 8 位")
             admin_check = Gtk.CheckButton(label="管理员")
@@ -1031,7 +1074,7 @@ class App(Gtk.Window):
                     status.set_text(str(exc))
             form.destroy()
         def delete_user(_button):
-            selected = getattr(rows.get_selected_row(), "user", None)
+            selected = selected_user()
             if not selected:
                 status.set_text("请先选择一个用户。")
                 return
@@ -1120,6 +1163,7 @@ class App(Gtk.Window):
         for index, item in enumerate(self.data["hosts"]):
             row = Gtk.Box(spacing=4)
             button = Gtk.RadioButton.new_with_label_from_widget(host_radio_group, item["name"] + "  ·  " + item["address"])
+            button.set_mode(False)
             if host_radio_group is None:
                 host_radio_group = button
             button.set_active(index == selected)
@@ -1332,12 +1376,25 @@ class App(Gtk.Window):
         old = items[index] if action == "edit" else {"port": 22}
         dialog = Gtk.Dialog(title="编辑" if action == "edit" else "添加", transient_for=self, modal=True)
         dialog.add_buttons("取消", Gtk.ResponseType.CANCEL, "保存", Gtk.ResponseType.OK)
+        parent_width, parent_height = self.get_size()
+        form_width = max(320, min(560, parent_width - 64))
+        form_max_height = max(180, min(440, parent_height - 180))
+        form_scroll = Gtk.ScrolledWindow()
+        form_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        form_scroll.set_min_content_width(form_width - 32)
+        form_scroll.set_max_content_height(form_max_height)
+        form_scroll.set_propagate_natural_height(True)
         grid = Gtk.Grid(column_spacing=12, row_spacing=8, margin=16)
-        dialog.get_content_area().add(grid)
+        grid.set_hexpand(True)
+        form_scroll.add(grid)
+        dialog.get_content_area().add(form_scroll)
+        dialog.set_default_size(form_width, -1)
+        dialog.set_resizable(True)
         entries = {}
         for row, (key, label) in enumerate(fields):
             grid.attach(Gtk.Label(label=label, xalign=0), 0, row, 1, 1)
             entry = Gtk.Entry(text=str(old.get(key, "")))
+            entry.set_hexpand(True)
             grid.attach(entry, 1, row, 1, 1)
             entries[key] = entry
         password_entry = None
@@ -1346,6 +1403,7 @@ class App(Gtk.Window):
             row = len(fields)
             grid.attach(Gtk.Label(label="SSH 密码", xalign=0), 0, row, 1, 1)
             password_entry = Gtk.Entry()
+            password_entry.set_hexpand(True)
             password_entry.set_visibility(False)
             password_entry.set_placeholder_text("留空保留已保存密码" if old.get("credential_id") else "可留空，使用密钥或连接时输入")
             grid.attach(password_entry, 1, row, 1, 1)
