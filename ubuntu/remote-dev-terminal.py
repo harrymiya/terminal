@@ -18,7 +18,7 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("Vte", "2.91")
 gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Gtk, Vte, GLib, Gdk, GdkPixbuf
-from core import load_config, save_config, ssh_argv, auto_enter_signature, quota_agent, quota_remote_command, quota_from_codex, quota_from_agy, format_quota, upload_image, MAX_IMAGE_BYTES, sync_request
+from core import load_config, save_config, ssh_argv, auto_enter_signature, quota_agent, quota_remote_command, quota_from_codex, quota_from_agy, format_quota, upload_image, MAX_IMAGE_BYTES, sync_request, sync_data_request, sync_host_key, render_battery_pixbuf
 from version import VERSION
 
 
@@ -150,7 +150,7 @@ class App(Gtk.Window):
                 color: #8fa2b4;
                 border: 1px solid #243546;
                 border-bottom: none;
-                border-radius: 6px 6px 0 0;
+                border-radius: 0;
                 padding: 4px 12px;
                 margin: 2px 2px 0 2px;
                 box-shadow: none;
@@ -214,30 +214,48 @@ class App(Gtk.Window):
             .tile-header button:hover { background-image: none; background-color: rgba(255, 255, 255, 0.15); color: #ffffff; }
             .tile-focused { box-shadow: inset 0 0 0 2px #86dbb8; }
             .tile-focused .tile-header { background: #203e36; border-bottom: 1px solid #86dbb8; }
-            progressbar.tile-shimmer {
+            @keyframes orange-glow-breath {
+                0% {
+                    opacity: 0.3;
+                    background-color: rgba(255, 140, 0, 0.4);
+                    box-shadow: 0 0 4px rgba(255, 140, 0, 0.4), 0 2px 10px rgba(255, 140, 0, 0.25);
+                }
+                50% {
+                    opacity: 1.0;
+                    background-color: #ffaa22;
+                    box-shadow: 0 0 10px #ffaa22, 0 3px 20px rgba(255, 160, 0, 0.9);
+                }
+                100% {
+                    opacity: 0.3;
+                    background-color: rgba(255, 140, 0, 0.4);
+                    box-shadow: 0 0 4px rgba(255, 140, 0, 0.4), 0 2px 10px rgba(255, 140, 0, 0.25);
+                }
+            }
+            .tile-glow-bar {
                 min-height: 2px;
-                padding: 0;
                 margin: 2px -8px -5px -8px;
-                border: none;
-                background-color: transparent;
+                background-color: #ff9800;
+                box-shadow: 0 0 8px #ff9800, 0 2px 14px rgba(255, 152, 0, 0.6);
+                animation: orange-glow-breath 1.8s infinite ease-in-out;
             }
-            progressbar.tile-shimmer trough {
+            .tile-focused .tile-glow-bar {
+                background-color: #ffaa22;
+                box-shadow: 0 0 12px #ffaa22, 0 3px 20px rgba(255, 170, 34, 0.9);
+            }
+            .tile-running .tile-header {
+                border-bottom: 1px solid #ff9800;
+                box-shadow: 0 2px 12px rgba(255, 152, 0, 0.3);
+            }
+            .tile-running.tile-focused .tile-header {
+                border-bottom: 1px solid #ffaa22;
+                box-shadow: 0 3px 18px rgba(255, 170, 34, 0.55);
+            }
+            .tab-glow-bar {
                 min-height: 2px;
-                padding: 0;
-                margin: 0;
-                border: none;
-                background-color: transparent;
-            }
-            progressbar.tile-shimmer progress {
-                min-height: 2px;
-                border: none;
-                background-image: none;
-                background-color: #86dbb8;
-                box-shadow: 0 0 8px #86dbb8;
-            }
-            .tile-focused progressbar.tile-shimmer progress {
-                background-color: #5ff5b8;
-                box-shadow: 0 0 10px #5ff5b8;
+                margin: 2px -12px -2px -12px;
+                background-color: #ff9800;
+                box-shadow: 0 0 8px #ff9800, 0 2px 14px rgba(255, 152, 0, 0.7);
+                animation: orange-glow-breath 1.8s infinite ease-in-out;
             }
             paned.tile-paned > separator { background-color: #243546; margin: 0; padding: 0; }
             paned.tile-paned.horizontal > separator { min-width: 2px; }
@@ -297,9 +315,16 @@ class App(Gtk.Window):
         self.sidebar = sidebar
         sidebar.set_size_request(self.sidebar_target_width(), -1)
         sidebar_scroll.add(sidebar)
+        brand_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         brand = Gtk.Label(label="REMOTE DEV", xalign=0)
         brand.get_style_context().add_class("brand")
-        sidebar.pack_start(brand, False, False, 0)
+        brand_row.pack_start(brand, True, True, 0)
+        settings_button = Gtk.Button()
+        settings_button.set_image(Gtk.Image.new_from_icon_name("emblem-system-symbolic", Gtk.IconSize.BUTTON))
+        settings_button.set_tooltip_text("系统设置")
+        settings_button.connect("clicked", self.show_settings)
+        brand_row.pack_start(settings_button, False, False, 0)
+        sidebar.pack_start(brand_row, False, False, 0)
         subtitle = Gtk.Label(label=f"远程开发工作台 · v{VERSION}", xalign=0)
         subtitle.get_style_context().add_class("subtitle")
         sidebar.pack_start(subtitle, False, False, 0)
@@ -345,17 +370,12 @@ class App(Gtk.Window):
                 sidebar.pack_start(sync_buttons, False, False, 0)
         self.hosts.connect("changed", self.host_changed)
         self.agents.connect("changed", self.agent_changed)
-        settings = Gtk.Box(spacing=5)
         self.auto_enter = Gtk.CheckButton(label="自动回车")
         self.auto_enter.set_active(self.data.get("auto_enter", False))
         self.auto_enter.connect("toggled", self.save_settings)
-        settings.pack_start(self.auto_enter, False, False, 0)
         self.delay = Gtk.SpinButton.new_with_range(1, 30, 1)
         self.delay.set_value(self.data.get("auto_enter_delay", 3))
         self.delay.connect("value-changed", self.save_settings)
-        settings.pack_start(self.delay, False, False, 0)
-        settings.pack_start(Gtk.Label(label="秒"), False, False, 0)
-        sidebar.pack_start(settings, False, False, 0)
         hint = Gtk.Label(label="SSH 密码和密钥由系统 SSH 处理。\n关闭标签会断开连接；tmux 会话保留在远端。", xalign=0)
         hint.set_line_wrap(True)
         hint.get_style_context().add_class("subtitle")
@@ -703,20 +723,35 @@ class App(Gtk.Window):
     def _animate_running_headers(self):
         now = time.monotonic()
         for session in self.sessions:
-            shimmer = getattr(session.get("terminal"), "_shimmer_bar", None)
-            if not shimmer:
-                continue
+            glow = getattr(session.get("terminal"), "_glow_bar", None)
+            tab_glow = getattr(session.get("terminal"), "_tab_glow_bar", None)
+            frame = getattr(session.get("terminal"), "_tile_frame", None)
             state = session.get("state")
             is_active = False
             if state:
                 is_active = (now - state.get("last_output_at", 0.0) < 2.5) or state.get("quota_busy", False)
-            if is_active:
-                if not shimmer.get_visible():
-                    shimmer.show()
-                shimmer.pulse()
-            else:
-                if shimmer.get_visible():
-                    shimmer.hide()
+            if glow:
+                if is_active:
+                    if not glow.get_visible():
+                        glow.show()
+                else:
+                    if glow.get_visible():
+                        glow.hide()
+            if tab_glow:
+                if is_active:
+                    if not tab_glow.get_visible():
+                        tab_glow.show()
+                else:
+                    if tab_glow.get_visible():
+                        tab_glow.hide()
+            if frame:
+                ctx = frame.get_style_context()
+                if is_active:
+                    if not ctx.has_class("tile-running"):
+                        ctx.add_class("tile-running")
+                else:
+                    if ctx.has_class("tile-running"):
+                        ctx.remove_class("tile-running")
         return True
 
     def rebuild_view(self, selected=None):
@@ -734,7 +769,8 @@ class App(Gtk.Window):
             self.grid.remove(child)
         for session in self.sessions:
             session["terminal"]._tile_frame = None
-            session["terminal"]._shimmer_bar = None
+            session["terminal"]._glow_bar = None
+            session["terminal"]._tab_glow_bar = None
         self.count_label.set_text(f"{len(self.sessions)} / 8")
         if not self.sessions:
             self.views.set_visible_child_name("empty")
@@ -757,13 +793,12 @@ class App(Gtk.Window):
                 header_bar = Gtk.Box()
                 header_bar.pack_start(session["label"], True, True, 0)
                 header.pack_start(header_bar, True, True, 0)
-                shimmer = Gtk.ProgressBar()
-                shimmer.get_style_context().add_class("tile-shimmer")
-                shimmer.set_pulse_step(0.04)
-                shimmer.set_no_show_all(True)
-                shimmer.hide()
-                header.pack_start(shimmer, False, False, 0)
-                session["terminal"]._shimmer_bar = shimmer
+                glow_bar = Gtk.Box()
+                glow_bar.get_style_context().add_class("tile-glow-bar")
+                glow_bar.set_no_show_all(True)
+                glow_bar.hide()
+                header.pack_start(glow_bar, False, False, 0)
+                session["terminal"]._glow_bar = glow_bar
                 frame.pack_start(header, False, False, 0)
                 frame.pack_start(session["terminal"], True, True, 0)
                 frames.append(frame)
@@ -775,9 +810,18 @@ class App(Gtk.Window):
         else:
             self.layout_button.hide()
             for session in self.sessions:
-                # Notebook tab labels are not shown by show_all() on the notebook.
+                tab_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+                tab_bar = Gtk.Box()
+                tab_bar.pack_start(session["label"], True, True, 0)
+                tab_box.pack_start(tab_bar, True, True, 0)
+                tab_glow = Gtk.Box()
+                tab_glow.get_style_context().add_class("tab-glow-bar")
+                tab_glow.set_no_show_all(True)
+                tab_glow.hide()
+                tab_box.pack_start(tab_glow, False, False, 0)
+                session["terminal"]._tab_glow_bar = tab_glow
                 session["label"].show_all()
-                self.tabs.append_page(session["terminal"], session["label"])
+                self.tabs.append_page(session["terminal"], tab_box)
             self.tabs.show_all()
             self.views.set_visible_child_name("tabs")
             if selected:
@@ -789,6 +833,25 @@ class App(Gtk.Window):
         self.data["auto_enter"] = self.auto_enter.get_active()
         self.data["auto_enter_delay"] = self.delay.get_value_as_int()
         self.persist()
+
+    def show_settings(self, *_):
+        dialog = Gtk.Dialog(title="系统设置", transient_for=self, modal=True)
+        dialog.add_buttons("取消", Gtk.ResponseType.CANCEL, "保存", Gtk.ResponseType.OK)
+        grid = Gtk.Grid(column_spacing=10, row_spacing=8, margin=16)
+        dialog.get_content_area().add(grid)
+        url = Gtk.Entry(text=self.data.get("sync_url", ""))
+        token = Gtk.Entry(text=self.data.get("sync_token", "")); token.set_visibility(False)
+        grid.attach(Gtk.Label(label="同步服务地址", xalign=0), 0, 0, 1, 1); grid.attach(url, 1, 0, 1, 1)
+        grid.attach(Gtk.Label(label="同步服务令牌", xalign=0), 0, 1, 1, 1); grid.attach(token, 1, 1, 1, 1)
+        grid.attach(self.auto_enter, 0, 2, 2, 1)
+        delay_row = Gtk.Box(spacing=6); delay_row.pack_start(Gtk.Label(label="自动回车延迟"), False, False, 0)
+        delay_row.pack_start(self.delay, False, False, 0); delay_row.pack_start(Gtk.Label(label="秒"), False, False, 0)
+        grid.attach(delay_row, 0, 3, 2, 1)
+        self.scale_layout(dialog); dialog.show_all()
+        if dialog.run() == Gtk.ResponseType.OK:
+            self.data["sync_url"], self.data["sync_token"] = url.get_text().strip(), token.get_text().strip()
+            self.save_settings(); self.refresh_all_shared()
+        delay_row.remove(self.delay); grid.remove(self.auto_enter); dialog.destroy()
 
     def message(self, title, detail):
         dialog = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.ERROR, buttons=Gtk.ButtonsType.CLOSE, text=title)
@@ -818,7 +881,7 @@ class App(Gtk.Window):
             self.persist()
 
     def host_agents(self, host):
-        return host.setdefault("agents", [dict(agent) for agent in self.data["agents"]])
+        return self.data["agents"]
 
     def refresh_host_content(self):
         host = self.current_host()
@@ -931,10 +994,12 @@ class App(Gtk.Window):
                     host["selected_agent"] = min(index, max(0, len(items) - 1))
                 self.persist()
                 self.refresh()
+                if kind == "directories": self.push_workspace_list(host)
+                elif kind == "agents": self.push_agent_list()
                 if kind == "hosts":
                     self.refresh_all_shared()
             return
-        fields = {"hosts": [("name", "名称"), ("address", "地址"), ("port", "端口"), ("username", "用户名"), ("sync_url", "同步服务地址（可选）"), ("sync_token", "同步令牌（可选）")], "directories": [("name", "名称"), ("path", "远端绝对路径")], "agents": [("name", "名称"), ("command", "启动命令")]}[kind]
+        fields = {"hosts": [("name", "名称"), ("address", "地址"), ("port", "端口"), ("username", "用户名")], "directories": [("name", "名称"), ("path", "远端绝对路径")], "agents": [("name", "名称"), ("command", "启动命令")]}[kind]
         old = items[index] if action == "edit" else {"port": 22}
         dialog = Gtk.Dialog(title="编辑" if action == "edit" else "添加", transient_for=self, modal=True)
         dialog.add_buttons("取消", Gtk.ResponseType.CANCEL, "保存", Gtk.ResponseType.OK)
@@ -944,8 +1009,6 @@ class App(Gtk.Window):
         for row, (key, label) in enumerate(fields):
             grid.attach(Gtk.Label(label=label, xalign=0), 0, row, 1, 1)
             entry = Gtk.Entry(text=str(old.get(key, "")))
-            if key == "sync_token":
-                entry.set_visibility(False)
             grid.attach(entry, 1, row, 1, 1)
             entries[key] = entry
         if kind == "directories":
@@ -957,7 +1020,7 @@ class App(Gtk.Window):
         while dialog.run() == Gtk.ResponseType.OK:
             values = {key: entry.get_text().strip() for key, entry in entries.items()}
             try:
-                if not all(value for key, value in values.items() if key not in ("sync_url", "sync_token")):
+                if not all(values.values()):
                     raise ValueError("所有字段均为必填项")
                 if kind == "hosts":
                     values["port"] = int(values["port"])
@@ -979,6 +1042,8 @@ class App(Gtk.Window):
                     host["selected_agent"] = len(items) - 1
             self.persist()
             self.refresh()
+            if kind == "directories": self.push_workspace_list(host)
+            elif kind == "agents": self.push_agent_list()
             if kind == "hosts":
                 self.refresh_all_shared()
             if kind == "hosts" and action == "add":
@@ -1200,11 +1265,11 @@ class App(Gtk.Window):
 
     @staticmethod
     def shared_host_key(host):
-        return (host.get("address"), host.get("port"), host.get("username"), host.get("sync_url"))
+        return (host.get("address"), host.get("port"), host.get("username"))
 
     def update_sync_status(self):
         host = self.current_host()
-        if not host or not host.get("sync_url"):
+        if not host or not self.data.get("sync_url"):
             text = "同步：未配置服务地址"
         else:
             result = self.shared_by_host.get(self.shared_host_key(host), "正在同步…")
@@ -1213,39 +1278,70 @@ class App(Gtk.Window):
 
     def refresh_selected_shared(self, _button):
         host = self.current_host()
-        if not host or not host.get("sync_url"):
-            self.message("共享会话", "请先在主机设置中填写同步服务地址和令牌。")
+        if not host or not self.data.get("sync_url"):
+            self.message("共享会话", "请先在系统设置中填写同步服务地址和令牌。")
             return
         self.shared_by_host[self.shared_host_key(host)] = "正在同步…"
         self.update_sync_status()
         self.refresh_host_shared(host)
 
     def refresh_host_shared(self, host):
-        if not host.get("sync_url"):
+        if not self.data.get("sync_url"):
             return
         key = self.shared_host_key(host)
         snapshot = dict(host)
-        pending_key = (key, snapshot.get("sync_token"))
+        pending_key = (key, self.data.get("sync_token"))
         if pending_key in self.sync_pending:
             return
         self.sync_pending.add(pending_key)
         def worker():
             try:
-                result = sync_request(snapshot, "GET")["sessions"]
+                result = sync_request(self.data, "GET")["sessions"]
+                workspaces = sync_data_request(self.data, "GET", "/v1/workspaces/" + sync_host_key(snapshot))
+                agents = sync_data_request(self.data, "GET", "/v1/agents/global")
+                result = (result, workspaces, agents)
             except Exception:
                 result = "同步失败，请检查地址和令牌"
             def finish():
                 self.sync_pending.discard(pending_key)
-                if any(self.shared_host_key(h) == key and h.get("sync_token") == snapshot.get("sync_token") for h in self.data["hosts"]):
-                    self.shared_by_host[key] = result
-                    if isinstance(result, list):
-                        for item in result:
+                if any(self.shared_host_key(h) == key for h in self.data["hosts"]):
+                    if isinstance(result, tuple):
+                        sessions, workspaces, agents = result
+                        changed = False
+                        local_host = next((h for h in self.data["hosts"] if self.shared_host_key(h) == key), None)
+                        if local_host is not None:
+                            if workspaces.get("configured") and local_host.get("directories", []) != workspaces["workspaces"]:
+                                local_host["directories"] = workspaces["workspaces"]; changed = True
+                            elif not workspaces.get("configured") and local_host.get("directories"):
+                                self.push_workspace_list(local_host)
+                        if agents.get("configured") and self.data.get("agents", []) != agents["agents"]:
+                            self.data["agents"] = agents["agents"]; changed = True
+                        elif not agents.get("configured") and self.data.get("agents"):
+                            self.push_agent_list()
+                        if changed:
+                            self.persist(); self.refresh()
+                        self.shared_by_host[key] = sessions
+                    else:
+                        sessions = []
+                        self.shared_by_host[key] = result
+                    if isinstance(sessions, list):
+                        for item in sessions:
                             if len(self.sessions) < 8 and not any(session["id"] == item["id"] for session in self.sessions):
                                 self.open_terminal(None, snapshot, item, activate=False)
                     self.update_sync_status()
                 return False
             GLib.idle_add(finish)
         self.sync_executor.submit(worker)
+
+    def push_workspace_list(self, host):
+        if not self.data.get("sync_url"): return
+        items = [{"id": d.get("id") or __import__("hashlib").sha256(d["path"].encode()).hexdigest()[:32], "name": d["name"], "path": d["path"], "icon": d.get("icon", "📁")} for d in host.get("directories", [])]
+        self.sync_executor.submit(lambda: sync_data_request(self.data, "PUT", "/v1/workspaces/" + sync_host_key(host), {"workspaces": items}))
+
+    def push_agent_list(self):
+        if not self.data.get("sync_url"): return
+        items = [{"id": a.get("id") or __import__("hashlib").sha256(a["command"].encode()).hexdigest()[:32], "name": a["name"], "command": a["command"], "icon": a.get("icon", "✳")} for a in self.data.get("agents", [])]
+        self.sync_executor.submit(lambda: sync_data_request(self.data, "PUT", "/v1/agents/global", {"agents": items}))
 
     def poll_shared(self):
         for host in self.data["hosts"]:
@@ -1255,17 +1351,17 @@ class App(Gtk.Window):
     def refresh_all_shared(self):
         self.shared_by_host = {}
         for host in self.data["hosts"]:
-            if host.get("sync_url"):
+            if self.data.get("sync_url"):
                 self.shared_by_host[self.shared_host_key(host)] = "正在同步…"
                 self.refresh_host_shared(host)
         self.update_sync_status()
 
     def sync_async(self, host, method, session_id, item=None):
-        if not host.get("sync_url"):
+        if not self.data.get("sync_url"):
             return
         def worker():
             try:
-                sync_request(host, method, session_id, item)
+                sync_request(self.data, method, session_id, item)
                 GLib.idle_add(self.refresh_host_shared, host)
             except Exception as exc:
                 GLib.idle_add(self.message, "会话同步失败", str(exc))
@@ -1273,12 +1369,12 @@ class App(Gtk.Window):
 
     def show_shared_sessions(self, _button):
         host = self.current_host()
-        if not host or not host.get("sync_url"):
-            self.message("共享会话", "请先在主机设置中填写同步服务地址和令牌。")
+        if not host or not self.data.get("sync_url"):
+            self.message("共享会话", "请先在系统设置中填写同步服务地址和令牌。")
             return
         def worker():
             try:
-                items = sync_request(host, "GET")["sessions"]
+                items = sync_request(self.data, "GET")["sessions"]
             except Exception as exc:
                 GLib.idle_add(self.message, "读取共享会话失败", str(exc))
                 return
@@ -1383,8 +1479,49 @@ class App(Gtk.Window):
                 return True
             terminal.add_events(Gdk.EventMask.SCROLL_MASK | Gdk.EventMask.SMOOTH_SCROLL_MASK)
             terminal.connect("scroll-event", scroll_codex)
-        quota = Gtk.Label(label=format_quota([]) if kind else "")
-        label.pack_start(quota, False, False, 0)
+        quota_box = Gtk.Box(spacing=3)
+        quota_box.set_no_show_all(True)
+        hourly_img = Gtk.Image.new_from_pixbuf(render_battery_pixbuf(None))
+        sep = Gtk.Label(label="·")
+        sep.get_style_context().add_class("subtitle")
+        weekly_img = Gtk.Image.new_from_pixbuf(render_battery_pixbuf(None))
+        days_label = Gtk.Label(label="")
+        days_label.get_style_context().add_class("subtitle")
+        quota_box.pack_start(hourly_img, False, False, 0)
+        quota_box.pack_start(sep, False, False, 0)
+        quota_box.pack_start(weekly_img, False, False, 0)
+        quota_box.pack_start(days_label, False, False, 0)
+        if kind:
+            quota_box.show_all()
+            days_label.hide()
+        label.pack_start(quota_box, False, False, 0)
+
+        def update_quota_display(result):
+            if not kind:
+                return
+            hourly_pct = None
+            weekly_pct = None
+            days_val = None
+            for item in result:
+                if isinstance(item, (list, tuple)) and len(item) >= 2:
+                    limit, pct = item[0], item[1]
+                    if limit == 300:
+                        hourly_pct = pct
+                    elif limit == 10080:
+                        weekly_pct = pct
+                        if len(item) > 2 and item[2]:
+                            days_val = item[2]
+            hourly_img.set_from_pixbuf(render_battery_pixbuf(hourly_pct))
+            hourly_img.set_tooltip_text(f"小时余量: {hourly_pct}%" if hourly_pct is not None else "小时余量: --")
+            weekly_img.set_from_pixbuf(render_battery_pixbuf(weekly_pct))
+            weekly_img.set_tooltip_text(f"周余量: {weekly_pct}%" if weekly_pct is not None else "周余量: --")
+            if days_val:
+                days_label.set_text(days_val)
+                days_label.show()
+            else:
+                days_label.set_text("")
+                days_label.hide()
+            quota_box.show()
         image_button = Gtk.Button.new_from_icon_name("image-x-generic-symbolic", Gtk.IconSize.MENU)
         image_button.set_relief(Gtk.ReliefStyle.NONE)
         image_button.set_tooltip_text("发送图片给此终端的 Agent")
@@ -1501,7 +1638,7 @@ class App(Gtk.Window):
                 def finish():
                     state["quota_busy"] = False
                     if not state["closed"] and state["connected"]:
-                        quota.set_text(format_quota(result))
+                        update_quota_display(result)
                     return False
                 GLib.idle_add(finish)
             threading.Thread(target=worker, daemon=True).start()
@@ -1683,7 +1820,7 @@ class App(Gtk.Window):
         reconnect.connect("clicked", start)
         def child_exited(_terminal, status):
             state["connected"] = False
-            quota.set_text(format_quota([]) if kind else "")
+            update_quota_display([])
             cancel_confirm_timers()
             state["signature"] = None
             state["confirm_attempts"] = 0

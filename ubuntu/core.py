@@ -1,5 +1,6 @@
 """Persistent configuration and remote session command construction."""
 import json
+import hashlib
 import os
 from pathlib import Path
 import shlex
@@ -57,11 +58,17 @@ def config_path():
 def load_config(path=None):
     path = path or config_path()
     if not path.exists():
-        return {"hosts": [], "agents": [dict(a) for a in DEFAULT_AGENTS]}
+        return {"hosts": [], "agents": [dict(a) for a in DEFAULT_AGENTS], "sync_url": "", "sync_token": ""}
     with path.open(encoding="utf-8") as f:
         data = json.load(f)
     if not isinstance(data, dict) or not isinstance(data.get("hosts"), list) or not isinstance(data.get("agents"), list):
         raise ValueError("配置文件格式无效")
+    data.setdefault("sync_url", "")
+    data.setdefault("sync_token", "")
+    for host in data["hosts"]:
+        data["sync_url"] = data.get("sync_url") or host.get("sync_url", "")
+        data["sync_token"] = data.get("sync_token") or host.get("sync_token", "")
+        host.pop("sync_url", None); host.pop("sync_token", None)
     return data
 
 
@@ -79,19 +86,28 @@ def save_config(data, path=None):
 
 
 
-def sync_request(host, method, session_id=None, item=None):
-    url = host.get("sync_url", "").rstrip("/")
+def sync_request(config, method, session_id=None, item=None):
+    return sync_data_request(config, method, "/v1/sessions" + ("/" + session_id if session_id else ""), item)
+
+
+def sync_data_request(config, method, path, item=None):
+    url = config.get("sync_url", "").rstrip("/")
     if not url.startswith(("http://", "https://")):
         raise ValueError("请先配置同步服务地址")
-    url += "/v1/sessions" + ("/" + session_id if session_id else "")
+    url += path
     body = json.dumps(item, ensure_ascii=False).encode() if item is not None else None
     req = urllib.request.Request(url, data=body, method=method, headers={
-        "Authorization": "Bearer " + host.get("sync_token", ""), "Content-Type": "application/json"})
+        "Authorization": "Bearer " + config.get("sync_token", ""), "Content-Type": "application/json"})
     class NoRedirect(urllib.request.HTTPRedirectHandler):
         def redirect_request(self, req, fp, code, msg, headers, newurl):
             return None
     with urllib.request.build_opener(NoRedirect).open(req, timeout=5) as response:
         return json.load(response)
+
+
+def sync_host_key(host):
+    value = f"{host.get('username', '')}@{host.get('address', '').lower()}:{host.get('port', 22)}"
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def ssh_argv(host, directory, agent, session_id=None, control_path=None, restore_only=False):
@@ -264,3 +280,118 @@ def format_quota(quota):
         weekly_part = weekly
 
     return f"{value(300)} · {weekly_part}"
+
+
+def render_battery_pixbuf(pct, width=34, height=13):
+    """Render a mobile-style battery icon pixbuf with inverted text over fill."""
+    import cairo
+    import gi
+    gi.require_version("GdkPixbuf", "2.0")
+    from gi.repository import GdkPixbuf
+
+    surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, width, height)
+    cr = cairo.Context(surface)
+    cr.set_operator(cairo.OPERATOR_CLEAR)
+    cr.paint()
+    cr.set_operator(cairo.OPERATOR_OVER)
+
+    body_x = 0.5
+    body_y = 0.5
+    body_w = width - 4.5
+    body_h = height - 1.0
+    rad = 2.0
+
+    def round_rect(x, y, rw, rh, r):
+        cr.new_sub_path()
+        cr.arc(x + rw - r, y + r, r, -1.5707963, 0)
+        cr.arc(x + rw - r, y + rh - r, r, 0, 1.5707963)
+        cr.arc(x + r, y + rh - r, r, 1.5707963, 3.1415926)
+        cr.arc(x + r, y + r, r, 3.1415926, 4.7123889)
+        cr.close_path()
+
+    if pct is None:
+        border_color = (0.35, 0.45, 0.55, 0.8)
+        fill_color = None
+    elif pct < 5:
+        border_color = (1.0, 0.30, 0.30, 0.9)
+        fill_color = (1.0, 0.30, 0.30)  # <5% Red
+    elif pct < 20:
+        border_color = (1.0, 0.60, 0.05, 0.9)
+        fill_color = (1.0, 0.60, 0.05)  # <20% Orange
+    else:
+        border_color = (0.525, 0.859, 0.722, 0.9)
+        fill_color = (0.525, 0.859, 0.722)  # >=20% Green/Teal
+
+    # Battery outline
+    cr.set_source_rgba(*border_color)
+    cr.set_line_width(1.0)
+    round_rect(body_x, body_y, body_w, body_h, rad)
+    cr.stroke()
+
+    # Battery cap
+    cap_x = body_w + 1.0
+    cap_y = body_y + body_h * 0.3
+    cap_w = 2.0
+    cap_h = body_h * 0.4
+    round_rect(cap_x, cap_y, cap_w, cap_h, 0.8)
+    cr.fill()
+
+    # Inner cavity
+    inner_x = body_x + 1.5
+    inner_y = body_y + 1.5
+    inner_w = body_w - 3.0
+    inner_h = body_h - 3.0
+
+    cr.set_source_rgba(0.08, 0.12, 0.17, 0.85)
+    round_rect(inner_x, inner_y, inner_w, inner_h, 1.2)
+    cr.fill()
+
+    fill_w = 0.0
+    if fill_color is not None and pct > 0:
+        fill_w = max(1.5, min(inner_w, inner_w * (pct / 100.0)))
+        cr.set_source_rgb(*fill_color)
+        round_rect(inner_x, inner_y, fill_w, inner_h, 1.2)
+        cr.fill()
+
+    text = "--" if pct is None else str(round(pct))
+    cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+    font_size = 8.5 if len(text) <= 2 else 7.0
+    cr.set_font_size(font_size)
+    extents = cr.text_extents(text)
+    tx = inner_x + (inner_w - extents.width) / 2.0 - extents.x_bearing
+    ty = inner_y + (inner_h - extents.height) / 2.0 - extents.y_bearing
+
+    text_dark = (0.05, 0.10, 0.12)
+    text_light = (0.90, 0.94, 0.98)
+
+    # Inverted color rendering:
+    # 1. Clip over filled part (dark text)
+    if fill_w > 0:
+        cr.save()
+        cr.rectangle(inner_x, inner_y, fill_w, inner_h)
+        cr.clip()
+        cr.set_source_rgb(*text_dark)
+        cr.move_to(tx, ty)
+        cr.show_text(text)
+        cr.restore()
+
+    # 2. Clip over unfilled part (light text)
+    if fill_w < inner_w:
+        cr.save()
+        cr.rectangle(inner_x + fill_w, inner_y, inner_w - fill_w, inner_h)
+        cr.clip()
+        cr.set_source_rgb(*text_light)
+        cr.move_to(tx, ty)
+        cr.show_text(text)
+        cr.restore()
+
+    data = surface.get_data()
+    return GdkPixbuf.Pixbuf.new_from_data(
+        bytes(data),
+        GdkPixbuf.Colorspace.RGB,
+        True,
+        8,
+        width,
+        height,
+        surface.get_stride()
+    )

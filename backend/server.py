@@ -11,6 +11,8 @@ from urllib.parse import urlsplit
 
 MAX_BODY = 65536
 FIELDS = ("id", "directory_path", "directory_name", "agent_name", "agent_command", "display_name")
+WORKSPACE_FIELDS = ("id", "name", "path", "icon")
+AGENT_FIELDS = ("id", "name", "command", "icon")
 
 
 def create_server(address, database, token):
@@ -19,6 +21,8 @@ def create_server(address, database, token):
     database = str(database)
     with sqlite3.connect(database) as db:
         db.execute("CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
+        db.execute("CREATE TABLE IF NOT EXISTS workspaces (host_id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
+        db.execute("CREATE TABLE IF NOT EXISTS agents (host_id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, format, *args):
@@ -43,7 +47,22 @@ def create_server(address, database, token):
         def do_GET(self):
             if not self.authorized():
                 return
-            if urlsplit(self.path).path != "/v1/sessions":
+            path = urlsplit(self.path).path
+            if path.startswith("/v1/agents/"):
+                host_id = path.removeprefix("/v1/agents/")
+                if not host_id or len(host_id) > 256:
+                    return self.reply(404, {"error": "invalid host id"})
+                with sqlite3.connect(database) as db:
+                    row = db.execute("SELECT payload FROM agents WHERE host_id = ?", (host_id,)).fetchone()
+                return self.reply(200, {"agents": json.loads(row[0]) if row else [], "configured": row is not None})
+            if path.startswith("/v1/workspaces/"):
+                host_id = path.removeprefix("/v1/workspaces/")
+                if not host_id or len(host_id) > 256:
+                    return self.reply(404, {"error": "invalid host id"})
+                with sqlite3.connect(database) as db:
+                    row = db.execute("SELECT payload FROM workspaces WHERE host_id = ?", (host_id,)).fetchone()
+                return self.reply(200, {"workspaces": json.loads(row[0]) if row else [], "configured": row is not None})
+            if path != "/v1/sessions":
                 return self.reply(404, {"error": "not found"})
             with sqlite3.connect(database) as db:
                 sessions = [json.loads(row[0]) for row in db.execute("SELECT payload FROM sessions ORDER BY rowid")]
@@ -53,6 +72,56 @@ def create_server(address, database, token):
             if not self.authorized():
                 return
             path = urlsplit(self.path).path
+            if path.startswith("/v1/agents/"):
+                host_id = path.removeprefix("/v1/agents/")
+                if not host_id or len(host_id) > 256:
+                    return self.reply(404, {"error": "invalid host id"})
+                try:
+                    length = int(self.headers.get("Content-Length", "-1"))
+                    if length < 0 or length > MAX_BODY:
+                        raise ValueError()
+                    items = json.loads(self.rfile.read(length)).get("agents")
+                    if not isinstance(items, list) or len(items) > 1000:
+                        raise ValueError()
+                    seen = set()
+                    for item in items:
+                        if not isinstance(item, dict) or set(item) != set(AGENT_FIELDS):
+                            raise ValueError()
+                        if any(not isinstance(item[field], str) or not item[field] or len(item[field]) > 4096 for field in AGENT_FIELDS):
+                            raise ValueError()
+                        if item["id"] in seen:
+                            raise ValueError()
+                        seen.add(item["id"])
+                except (ValueError, AttributeError, UnicodeDecodeError, json.JSONDecodeError):
+                    return self.reply(400, {"error": "invalid agents"})
+                with sqlite3.connect(database) as db:
+                    db.execute("INSERT INTO agents VALUES (?, ?) ON CONFLICT(host_id) DO UPDATE SET payload=excluded.payload", (host_id, json.dumps(items, ensure_ascii=False)))
+                return self.reply(200, {"agents": items, "configured": True})
+            if path.startswith("/v1/workspaces/"):
+                host_id = path.removeprefix("/v1/workspaces/")
+                if not host_id or len(host_id) > 256:
+                    return self.reply(404, {"error": "invalid host id"})
+                try:
+                    length = int(self.headers.get("Content-Length", "-1"))
+                    if length < 0 or length > MAX_BODY:
+                        raise ValueError()
+                    items = json.loads(self.rfile.read(length)).get("workspaces")
+                    if not isinstance(items, list) or len(items) > 1000:
+                        raise ValueError()
+                    seen = set()
+                    for item in items:
+                        if not isinstance(item, dict) or set(item) != set(WORKSPACE_FIELDS):
+                            raise ValueError()
+                        if any(not isinstance(item[field], str) or not item[field] or len(item[field]) > 4096 for field in WORKSPACE_FIELDS):
+                            raise ValueError()
+                        if item["id"] in seen:
+                            raise ValueError()
+                        seen.add(item["id"])
+                except (ValueError, AttributeError, UnicodeDecodeError, json.JSONDecodeError):
+                    return self.reply(400, {"error": "invalid workspaces"})
+                with sqlite3.connect(database) as db:
+                    db.execute("INSERT INTO workspaces VALUES (?, ?) ON CONFLICT(host_id) DO UPDATE SET payload=excluded.payload", (host_id, json.dumps(items, ensure_ascii=False)))
+                return self.reply(200, {"workspaces": items, "configured": True})
             session_id = path.removeprefix("/v1/sessions/")
             if not path.startswith("/v1/sessions/") or len(session_id) != 32 or any(c not in "0123456789abcdef" for c in session_id):
                 return self.reply(404, {"error": "invalid session id"})

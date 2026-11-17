@@ -31,6 +31,10 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.rememberScrollableState
 import androidx.compose.foundation.gestures.scrollable
@@ -74,6 +78,7 @@ import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.Wifi
@@ -101,6 +106,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -347,6 +353,8 @@ private fun RemoteTerminalApp(store: LocalStore) {
         }
         var autoEnterEnabled by remember { mutableStateOf(store.loadAutoEnterEnabled()) }
         var autoEnterDelaySeconds by remember { mutableIntStateOf(store.loadAutoEnterDelaySeconds()) }
+        var syncUrl by remember { mutableStateOf(store.loadSyncUrl()) }
+        var syncToken by remember { mutableStateOf(store.loadSyncToken()) }
         var showSettings by rememberSaveable { mutableStateOf(false) }
         var editingHost by remember { mutableStateOf<HostProfile?>(null) }
         var addingHost by remember { mutableStateOf(false) }
@@ -366,17 +374,34 @@ private fun RemoteTerminalApp(store: LocalStore) {
         val mainHandler = remember { Handler(Looper.getMainLooper()) }
         val selectedHost = hosts.firstOrNull { it.id == selectedHostId } ?: hosts.firstOrNull()
         val selectedAgent = agents.firstOrNull { it.id == selectedAgentId } ?: agents.firstOrNull()
+        SideEffect { SyncClient.configure(syncUrl, syncToken) }
 
         fun saveHosts(updated: List<HostProfile>) {
             hosts.clear(); hosts.addAll(updated); store.saveHosts(updated)
             if (selectedHostId !in updated.map { it.id }) selectedHostId = updated.firstOrNull()?.id.orEmpty()
         }
 
+        fun syncWorkspaceList(host: HostProfile, directories: List<ProjectDirectory>) {
+            if (syncUrl.isBlank()) return
+            scope.launch {
+                runCatching { withContext(SyncClient.dispatcher) { SyncClient.saveWorkspaces(host, directories) } }
+                    .onFailure { snackbars.showSnackbar("工作区同步失败：${it.message}") }
+            }
+        }
+
+        fun syncAgentList(host: HostProfile, items: List<AgentPreset>) {
+            if (syncUrl.isBlank()) return
+            scope.launch {
+                runCatching { withContext(SyncClient.dispatcher) { SyncClient.saveAgents(host, items) } }
+                    .onFailure { snackbars.showSnackbar("Agent 同步失败：${it.message}") }
+            }
+        }
+
         fun closeSession(session: TerminalSessionState) {
             val index = sessions.indexOf(session)
             if (index < 0) return
             sessionStore.remove(session.task.id)
-            if (session.task.host.syncUrl.isNotBlank()) scope.launch {
+            if (syncUrl.isNotBlank()) scope.launch {
                 runCatching { withContext(SyncClient.dispatcher) { SyncClient.delete(session.task) } }
                     .onSuccess { startupShared = startupShared.filterNot { it.first.id == session.task.host.id && it.second.optString("id") == session.task.id.replace("-", "") } }
                     .onFailure { snackbars.showSnackbar("同步关闭失败：${it.message}") }
@@ -405,7 +430,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 if (same == 0) agent.name else "${agent.name} ${same + 1}")
             if (restoredTask == null) {
                 sessionStore.save(task)
-                if (host.syncUrl.isNotBlank()) scope.launch {
+                if (syncUrl.isNotBlank()) scope.launch {
                     runCatching { withContext(SyncClient.dispatcher) { SyncClient.save(task) } }
                         .onFailure { snackbars.showSnackbar("会话同步失败：${it.message}") }
                 }
@@ -509,18 +534,37 @@ private fun RemoteTerminalApp(store: LocalStore) {
 
         LaunchedEffect(Unit) {
             sessionStore.load(hosts, agents).forEach { task ->
-                if (task.host.syncUrl.isBlank()) openTask(task.host, task.directory, task.agent, task)
+                if (syncUrl.isBlank()) openTask(task.host, task.directory, task.agent, task)
             }
             activePage = activePage.coerceIn(0, (sessions.size - 1).coerceAtLeast(0))
             sessionsRestored = true
         }
 
-        val syncHosts = hosts.filter { it.syncUrl.isNotBlank() }
-        LaunchedEffect(syncHosts) {
+        val syncHosts = if (syncUrl.isNotBlank()) hosts else emptyList()
+        LaunchedEffect(syncHosts, syncUrl, syncToken) {
             startupShared = startupShared.filter { entry -> syncHosts.any { it.id == entry.first.id } }
             syncLoading = syncHosts.isNotEmpty()
             while (true) {
                 syncHosts.forEach { host ->
+                    runCatching {
+                        withContext(SyncClient.dispatcher) {
+                        val configuredWorkspaces = SyncClient.hasWorkspaces(host)
+                        val configuredAgents = SyncClient.hasAgents(host)
+                            val remoteWorkspaces = SyncClient.listWorkspaces(host)
+                            val remoteAgents = SyncClient.listAgents(host)
+                        Triple(configuredWorkspaces to remoteWorkspaces, configuredAgents to remoteAgents, Unit)
+                        }
+                    }.onSuccess { (workspaceState, agentState, _) ->
+                        val (configuredWorkspaces, remoteWorkspaces) = workspaceState
+                        val (configuredAgents, remoteAgents) = agentState
+                        val localHost = hosts.firstOrNull { it.id == host.id } ?: host
+                        if (!configuredWorkspaces && localHost.directories.isNotEmpty()) syncWorkspaceList(localHost, localHost.directories)
+                        else if (localHost.directories != remoteWorkspaces) saveHosts(hosts.map { if (it.id == host.id) it.copy(directories = remoteWorkspaces) else it })
+                        if (!configuredAgents && agents.isNotEmpty()) syncAgentList(localHost, agents.toList())
+                        else if (agents.toList() != remoteAgents) {
+                            agents.clear(); agents.addAll(remoteAgents); store.saveAgents(remoteAgents)
+                        }
+                    }
                     runCatching { withContext(SyncClient.dispatcher) { SyncClient.list(host) } }
                         .onSuccess { items ->
                             startupShared = startupShared.filterNot { it.first.id == host.id } + items.map { host to it }
@@ -547,6 +591,10 @@ private fun RemoteTerminalApp(store: LocalStore) {
                     syncLoading = syncLoading,
                     onManage = { route = AppRoute.MANAGE }, onAddHost = { addingHost = true },
                     onAddDirectory = { selectedHost?.let { editingDirectory = it.id to null } },
+                    onReorderDirectories = { host, ordered ->
+                        saveHosts(hosts.map { if (it.id == host.id) it.copy(directories = ordered) else it })
+                        syncWorkspaceList(host, ordered)
+                    },
                     onOpenAgents = { route = AppRoute.AGENTS },
                     onOpenSettings = { showSettings = true },
                     onStartTask = { host, dir, agent -> openTask(host, dir, agent) },
@@ -601,14 +649,16 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 val wasNew = hosts.none { it.id == host.id }
                 saveHosts(if (wasNew) hosts.toList() + host else hosts.map { if (it.id == host.id) host else it })
                 selectedHostId = host.id
-                if (host.syncUrl.isNotBlank()) refreshShared(host)
+                if (syncUrl.isNotBlank()) refreshShared(host)
                 addingHost = false; editingHost = null
             },
         )
         editingDirectory?.let { (hostId, initial) ->
             val owner = hosts.firstOrNull { it.id == hostId }
             if (owner != null) DirectoryEditorDialog(owner, store, initial, onDismiss = { editingDirectory = null }) { dir ->
-                saveHosts(hosts.map { host -> if (host.id == hostId) host.copy(directories = if (initial == null) host.directories + dir else host.directories.map { if (it.id == dir.id) dir else it }) else host })
+                val updatedDirectories = if (initial == null) owner.directories + dir else owner.directories.map { if (it.id == dir.id) dir else it }
+                saveHosts(hosts.map { host -> if (host.id == hostId) host.copy(directories = updatedDirectories) else host })
+                syncWorkspaceList(owner, updatedDirectories)
                 editingDirectory = null
             }
         }
@@ -618,6 +668,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 if (agents.any { it.id == agent.id }) agents.indices.forEach { i -> if (agents[i].id == agent.id) agents[i] = agent }
                 else agents.add(agent)
                 store.saveAgents(agents.toList())
+                selectedHost?.let { syncAgentList(it, agents.toList()) }
                 if (selectedAgentId.isBlank()) selectedAgentId = agent.id
                 addingAgent = false; editingAgent = null
             },
@@ -630,7 +681,10 @@ private fun RemoteTerminalApp(store: LocalStore) {
         deletingDirectory?.let { (hostId, dir) -> ConfirmDeleteDialog(
             title = "移除开发目录？", detail = dir.path,
             onConfirm = {
-                saveHosts(hosts.map { if (it.id == hostId) it.copy(directories = it.directories.filterNot { d -> d.id == dir.id }) else it })
+                val owner = hosts.firstOrNull { it.id == hostId }
+                val updatedDirectories = owner?.directories?.filterNot { it.id == dir.id }.orEmpty()
+                saveHosts(hosts.map { if (it.id == hostId) it.copy(directories = updatedDirectories) else it })
+                owner?.let { syncWorkspaceList(it, updatedDirectories) }
                 deletingDirectory = null
             },
             onDismiss = { deletingDirectory = null },
@@ -639,6 +693,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
             title = "删除 Agent？", detail = "${agent.name} 的自定义配置将被移除。",
             onConfirm = {
                 agents.removeAll { it.id == agent.id }; store.saveAgents(agents.toList())
+                selectedHost?.let { syncAgentList(it, agents.toList()) }
                 selectedAgentId = agents.firstOrNull()?.id.orEmpty(); deletingAgent = null
             },
             onDismiss = { deletingAgent = null },
@@ -652,6 +707,13 @@ private fun RemoteTerminalApp(store: LocalStore) {
 
         if (showSettings) AutoEnterSettingsDialog(
             store = store,
+            syncUrl = syncUrl,
+            syncToken = syncToken,
+            onSyncSettingsChange = { url, token ->
+                syncUrl = url
+                syncToken = token
+                store.saveSyncSettings(url, token)
+            },
             enabled = autoEnterEnabled,
             delaySeconds = autoEnterDelaySeconds,
             onEnabledChange = { enabled ->
@@ -696,7 +758,10 @@ private fun HomeScreen(
     onManage: () -> Unit, onAddHost: () -> Unit, onAddDirectory: () -> Unit, onOpenAgents: () -> Unit, onOpenSettings: () -> Unit,
     onStartTask: (HostProfile, ProjectDirectory, AgentPreset) -> Unit, onResumeSession: (Int) -> Unit,
     syncLoading: Boolean,
+    onReorderDirectories: (HostProfile, List<ProjectDirectory>) -> Unit,
 ) {
+    var draggingDirectoryId by remember(selectedHost?.id) { mutableStateOf<String?>(null) }
+    var dragOffsetY by remember(selectedHost?.id) { mutableStateOf(0f) }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
         Row(Modifier.fillMaxWidth().padding(top = 24.dp, bottom = 18.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.size(42.dp).clip(RoundedCornerShape(14.dp)).background(PanelRaised), contentAlignment = Alignment.Center) {
@@ -810,11 +875,38 @@ private fun HomeScreen(
                     EmptyRow("保存你的第一个项目目录", "例如 /workspace/my-app", onAddDirectory, "添加目录")
                 } else {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(bottom = 20.dp)) {
-                        host.directories.forEach { dir ->
+                        host.directories.forEachIndexed { index, dir ->
+                            val isDragging = draggingDirectoryId == dir.id
+                            val rowHeightPx = with(LocalDensity.current) { 90.dp.toPx() }
                             ProjectRow(
                                 directory = dir, selectedAgent = selectedAgent,
                                 enabled = selectedAgent != null,
                                 onClick = { if (selectedAgent != null) onStartTask(host, dir, selectedAgent) },
+                                modifier = Modifier
+                                    .graphicsLayer {
+                                        translationY = if (isDragging) dragOffsetY else 0f
+                                        scaleX = if (isDragging) 1.025f else 1f
+                                        scaleY = if (isDragging) 1.025f else 1f
+                                        shadowElevation = if (isDragging) 14.dp.toPx() else 0f
+                                    }
+                                    .pointerInput(host.id, host.directories, dir.id) {
+                                        detectDragGesturesAfterLongPress(
+                                            onDragStart = { draggingDirectoryId = dir.id; dragOffsetY = 0f },
+                                            onDrag = { change, amount ->
+                                                change.consume()
+                                                dragOffsetY += amount.y
+                                                val delta = (dragOffsetY / rowHeightPx).toInt()
+                                                val target = (index + delta).coerceIn(0, host.directories.lastIndex)
+                                                if (target != index) {
+                                                    val reordered = host.directories.toMutableList().apply { add(target, removeAt(index)) }
+                                                    onReorderDirectories(host, reordered)
+                                                    dragOffsetY -= (target - index) * rowHeightPx
+                                                }
+                                            },
+                                            onDragEnd = { draggingDirectoryId = null; dragOffsetY = 0f },
+                                            onDragCancel = { draggingDirectoryId = null; dragOffsetY = 0f },
+                                        )
+                                    },
                             )
                         }
                     }
@@ -919,8 +1011,8 @@ private fun SectionTitle(title: String, trailing: String) {
 }
 
 @Composable
-private fun ProjectRow(directory: ProjectDirectory, selectedAgent: AgentPreset?, enabled: Boolean, onClick: () -> Unit) {
-    Surface(onClick = onClick, enabled = enabled, color = Panel, shape = RoundedCornerShape(15.dp), border = androidx.compose.foundation.BorderStroke(1.dp, Edge)) {
+private fun ProjectRow(directory: ProjectDirectory, selectedAgent: AgentPreset?, enabled: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
+    Surface(onClick = onClick, enabled = enabled, modifier = modifier, color = Panel, shape = RoundedCornerShape(15.dp), border = androidx.compose.foundation.BorderStroke(1.dp, Edge)) {
         Row(Modifier.fillMaxWidth().padding(start = 13.dp, end = 12.dp, top = 12.dp, bottom = 12.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.size(40.dp).clip(RoundedCornerShape(12.dp)).background(PanelRaised), contentAlignment = Alignment.Center) { Text(directory.icon, fontSize = 20.sp) }
             Spacer(Modifier.width(11.dp))
@@ -1550,6 +1642,9 @@ private fun statusTint(status: String): Color = when {
 @Composable
 private fun AutoEnterSettingsDialog(
     store: LocalStore,
+    syncUrl: String,
+    syncToken: String,
+    onSyncSettingsChange: (String, String) -> Unit,
     enabled: Boolean,
     delaySeconds: Int,
     onEnabledChange: (Boolean) -> Unit,
@@ -1561,6 +1656,8 @@ private fun AutoEnterSettingsDialog(
     var publicKey by remember { mutableStateOf(store.sshPublicKey()) }
     var generating by remember { mutableStateOf(false) }
     var keyMessage by remember { mutableStateOf("") }
+    var draftSyncUrl by remember(syncUrl) { mutableStateOf(syncUrl) }
+    var draftSyncToken by remember(syncToken) { mutableStateOf(syncToken) }
     var draftDelay by remember(delaySeconds) { mutableStateOf(delaySeconds.toFloat()) }
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -1590,6 +1687,9 @@ private fun AutoEnterSettingsDialog(
                 }
                 if (keyMessage.isNotEmpty()) Text(keyMessage, color = Mint, fontSize = 12.sp)
                 Divider()
+                Text("系统同步", color = White, fontWeight = FontWeight.SemiBold)
+                OutlinedTextField(draftSyncUrl, { draftSyncUrl = it }, label = { Text("同步服务地址") }, placeholder = { Text("https://地址:端口") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(draftSyncToken, { draftSyncToken = it }, label = { Text("同步服务令牌") }, singleLine = true, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
                 Text("自动回车", color = White, fontWeight = FontWeight.SemiBold)
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     Column(Modifier.weight(1f)) {
@@ -1609,7 +1709,7 @@ private fun AutoEnterSettingsDialog(
                 Text("倒计时期间手动输入或操作会取消自动回车。", color = Muted, fontSize = 11.sp)
             }
         },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("完成", color = Mint) } },
+        confirmButton = { TextButton(onClick = { onSyncSettingsChange(draftSyncUrl.trim(), draftSyncToken); onDismiss() }) { Text("完成", color = Mint) } },
     )
 }
 
@@ -1621,10 +1721,8 @@ private fun HostEditorDialog(initial: HostProfile?, onDismiss: () -> Unit, onSav
     var username by remember(initial?.id) { mutableStateOf(initial?.username.orEmpty()) }
     var password by remember(initial?.id) { mutableStateOf(initial?.password.orEmpty()) }
     var icon by remember(initial?.id) { mutableStateOf(initial?.icon ?: "⌘") }
-    var syncUrl by remember(initial?.id) { mutableStateOf(initial?.syncUrl.orEmpty()) }
-    var syncToken by remember(initial?.id) { mutableStateOf(initial?.syncToken.orEmpty()) }
     EditorDialogFrame(if (initial == null) "添加主机" else "编辑主机", onDismiss, canSave = name.isNotBlank() && address.isNotBlank() && username.isNotBlank(), onConfirm = {
-        onSave(HostProfile(initial?.id ?: UUID.randomUUID().toString(), name.trim(), address.trim(), port.toIntOrNull()?.takeIf { it in 1..65535 } ?: 22, username.trim(), password, icon.ifBlank { "⌘" }, initial?.directories.orEmpty(), syncUrl.trim(), syncToken))
+        onSave(HostProfile(initial?.id ?: UUID.randomUUID().toString(), name.trim(), address.trim(), port.toIntOrNull()?.takeIf { it in 1..65535 } ?: 22, username.trim(), password, icon.ifBlank { "⌘" }, initial?.directories.orEmpty()))
     }) {
         OutlinedTextField(name, { name = it }, label = { Text("主机名称") }, placeholder = { Text("例如：Mac Studio") }, singleLine = true, modifier = Modifier.fillMaxWidth())
         IconPicker(icon, { icon = it }, listOf("⌘", "🖥️", "☁️", "🐧", "⚡", "🧪", "🏠", "💻", "🔧", "🌐"))
@@ -1635,8 +1733,6 @@ private fun HostEditorDialog(initial: HostProfile?, onDismiss: () -> Unit, onSav
         }
         OutlinedTextField(password, { password = it }, label = { Text("SSH 密码") }, placeholder = { Text("密码保存在本机加密区") }, singleLine = true,
             visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(syncUrl, { syncUrl = it }, label = { Text("同步服务地址（可选）") }, placeholder = { Text("https://地址:端口") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(syncToken, { syncToken = it }, label = { Text("同步服务令牌") }, singleLine = true, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
     }
 }
 
@@ -1688,11 +1784,17 @@ private fun RemoteDirectoryPickerDialog(
     var loading by remember(host.id) { mutableStateOf(false) }
     var errorMessage by remember(host.id) { mutableStateOf<String?>(null) }
     var pendingFingerprint by remember(host.id) { mutableStateOf<String?>(null) }
+    var directoryQuery by remember(host.id) { mutableStateOf("") }
+    val filteredDirectories = remember(directories, directoryQuery) {
+        if (directoryQuery.isBlank()) directories
+        else directories.filter { it.name.contains(directoryQuery.trim(), ignoreCase = true) }
+    }
     val scope = rememberCoroutineScope()
 
     fun loadDirectory(path: String) {
         currentPath = path
         directories = emptyList()
+        directoryQuery = ""
         scope.launch {
             loading = true
             errorMessage = null
@@ -1723,13 +1825,23 @@ private fun RemoteDirectoryPickerDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(currentPath.ifBlank { "正在读取路径…" }, color = Mint, fontFamily = FontFamily.Monospace, fontSize = 11.sp, maxLines = 2)
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     TextButton(onClick = { loadDirectory(remoteParentPath(currentPath)) }, enabled = !loading && currentPath != "/") {
                         Text("上一级", color = if (loading || currentPath == "/") Muted else Mint)
                     }
                     TextButton(onClick = { loadDirectory("/") }, enabled = !loading && currentPath != "/") {
                         Text("根目录", color = if (loading || currentPath == "/") Muted else Mint)
                     }
+                    OutlinedTextField(
+                        value = directoryQuery,
+                        onValueChange = { directoryQuery = it },
+                        modifier = Modifier.weight(1f),
+                        placeholder = { Text("搜索文件夹", fontSize = 11.sp, maxLines = 1) },
+                        leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(17.dp)) },
+                        singleLine = true,
+                        textStyle = TextStyle(fontSize = 12.sp),
+                        shape = RoundedCornerShape(10.dp),
+                    )
                 }
                 if (loading) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
@@ -1741,8 +1853,11 @@ private fun RemoteDirectoryPickerDialog(
                 if (!loading && errorMessage == null && directories.isEmpty()) {
                     Text("此目录下没有子目录。可以直接选择当前目录。", color = Muted, fontSize = 11.sp)
                 }
+                if (!loading && errorMessage == null && directories.isNotEmpty() && filteredDirectories.isEmpty()) {
+                    Text("当前路径下没有匹配的文件夹。", color = Muted, fontSize = 11.sp)
+                }
                 LazyColumn(Modifier.heightIn(max = 310.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                    items(directories, key = { it.path }) { directory ->
+                    items(filteredDirectories, key = { it.path }) { directory ->
                         Surface(
                             onClick = { loadDirectory(directory.path) },
                             enabled = !loading,

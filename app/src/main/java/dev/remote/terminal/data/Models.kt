@@ -31,8 +31,6 @@ data class HostProfile(
     val password: String = "",
     val icon: String = "⌘",
     val directories: List<ProjectDirectory> = emptyList(),
-    val syncUrl: String = "",
-    val syncToken: String = "",
 )
 
 data class AgentPreset(
@@ -62,6 +60,25 @@ class LocalStore(context: Context) {
     private val vault = PasswordVault()
 
     fun sshPublicKey(): String? = preferences.getString("ssh_public_key", null)
+
+    fun loadSyncUrl(): String {
+        preferences.getString("sync_url", null)?.let { return it }
+        val legacy = runCatching { JSONArray(preferences.getString("hosts", "[]")) }.getOrNull()
+        val value = (0 until (legacy?.length() ?: 0)).asSequence().mapNotNull { legacy?.optJSONObject(it)?.optString("sync_url") }.firstOrNull { it.isNotBlank() }.orEmpty()
+        preferences.edit().putString("sync_url", value).apply()
+        return value
+    }
+    fun loadSyncToken(): String {
+        preferences.getString("sync_token", null)?.let { return vault.decrypt(it) }
+        val ids = runCatching { JSONArray(preferences.getString("hosts", "[]")) }.getOrNull()
+        val legacy = (0 until (ids?.length() ?: 0)).asSequence().mapNotNull { ids?.optJSONObject(it)?.optString("id") }
+            .map { vault.decrypt(preferences.getString("sync_token_$it", null)) }.firstOrNull { it.isNotBlank() }.orEmpty()
+        if (legacy.isNotBlank()) preferences.edit().putString("sync_token", vault.encrypt(legacy)).apply()
+        return legacy
+    }
+    fun saveSyncSettings(url: String, token: String) {
+        preferences.edit().putString("sync_url", url.trim()).putString("sync_token", vault.encrypt(token)).apply()
+    }
 
     @Synchronized
     fun generateSshKey(): String {
@@ -101,8 +118,6 @@ class LocalStore(context: Context) {
                 port = item.optInt("port", 22), username = item.getString("username"),
                 password = vault.decrypt(preferences.getString("password_${item.getString("id")}", null)),
                 icon = item.optString("icon", "⌘"), directories = directories,
-                syncUrl = item.optString("sync_url", ""),
-                syncToken = vault.decrypt(preferences.getString("sync_token_${item.getString("id")}", null)),
             )
         }
     }.getOrDefault(emptyList())
@@ -114,11 +129,10 @@ class LocalStore(context: Context) {
             val dirs = JSONArray()
             host.directories.forEach { dirs.put(JSONObject().put("id", it.id).put("name", it.name).put("path", it.path).put("icon", it.icon)) }
             root.put(JSONObject().put("id", host.id).put("name", host.name).put("address", host.address)
-                .put("port", host.port).put("username", host.username).put("icon", host.icon).put("directories", dirs).put("sync_url", host.syncUrl))
+                .put("port", host.port).put("username", host.username).put("icon", host.icon).put("directories", dirs))
             preferences.edit().putString("password_${host.id}", vault.encrypt(host.password)).apply()
-            preferences.edit().putString("sync_token_${host.id}", vault.encrypt(host.syncToken)).apply()
         }
-        (oldIds - hosts.map { it.id }.toSet()).forEach { preferences.edit().remove("password_$it").remove("sync_token_$it").apply() }
+        (oldIds - hosts.map { it.id }.toSet()).forEach { preferences.edit().remove("password_$it").apply() }
         preferences.edit().putString("hosts", root.toString()).apply()
     }
 

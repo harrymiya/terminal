@@ -93,14 +93,21 @@ class DesktopUIEnhancementsTest(unittest.TestCase):
         self.assertEqual(format_quota([(10080, 50, "<1d")]), "-- · 50% <1d")
 
 
-    def test_running_card_header_shimmer_light_effect(self):
+    def test_tab_corners_are_square_not_rounded(self):
+        for platform in ("omarchy", "ubuntu", "windows"):
+            py_file = (Path(__file__).resolve().parents[1] / platform / "remote-dev-terminal.py").read_text(encoding="utf-8")
+            self.assertIn("notebook tab {", py_file)
+            self.assertIn("border-radius: 0;", py_file)
+
+    def test_running_card_header_and_tab_breathing_halo_glow(self):
         import time
 
         for platform in ("omarchy", "ubuntu", "windows"):
             py_file = (Path(__file__).resolve().parents[1] / platform / "remote-dev-terminal.py").read_text(encoding="utf-8")
-            self.assertIn("progressbar.tile-shimmer", py_file)
-            self.assertIn("progressbar.tile-shimmer trough", py_file)
-            self.assertIn("progressbar.tile-shimmer progress", py_file)
+            self.assertIn("@keyframes orange-glow-breath", py_file)
+            self.assertIn(".tile-glow-bar", py_file)
+            self.assertIn(".tab-glow-bar", py_file)
+            self.assertIn(".tile-running .tile-header", py_file)
             self.assertIn("_animate_running_headers", py_file)
 
         app = self.app_mod.App()
@@ -108,30 +115,70 @@ class DesktopUIEnhancementsTest(unittest.TestCase):
         label = self.app_mod.Gtk.Box()
         state = {"last_output_at": time.monotonic(), "quota_busy": False}
         app.sessions = [{"terminal": term, "label": label, "key": "k", "id": "id1", "state": state}]
+
+        # 1. Tiled mode test
         app.tiled = True
         app.rebuild_view()
 
-        shimmer = getattr(term, "_shimmer_bar", None)
-        self.assertIsNotNone(shimmer)
-        self.assertFalse(shimmer.get_visible())
+        glow = getattr(term, "_glow_bar", None)
+        frame = getattr(term, "_tile_frame", None)
+        self.assertIsNotNone(glow)
+        self.assertIsNotNone(frame)
+        self.assertFalse(glow.get_visible())
+        self.assertFalse(frame.get_style_context().has_class("tile-running"))
 
-        # When running (recent output within 2.5s), shimmer becomes visible and pulses
+        # When running (recent output within 2.5s), glow bar is visible and frame has tile-running
         app._animate_running_headers()
-        self.assertTrue(shimmer.get_visible())
+        self.assertTrue(glow.get_visible())
+        self.assertTrue(frame.get_style_context().has_class("tile-running"))
 
-        # When idle (>2.5s ago), shimmer is hidden
+        # When idle (>2.5s ago), glow bar is hidden and tile-running is removed
         state["last_output_at"] = time.monotonic() - 10.0
         app._animate_running_headers()
-        self.assertFalse(shimmer.get_visible())
+        self.assertFalse(glow.get_visible())
+        self.assertFalse(frame.get_style_context().has_class("tile-running"))
 
-        # When quota_busy is True, shimmer pulses even if last output is old
-        state["quota_busy"] = True
-        app._animate_running_headers()
-        self.assertTrue(shimmer.get_visible())
+        # 2. Tab mode test
+        state["last_output_at"] = time.monotonic()
+        app.tiled = False
+        app.rebuild_view()
 
-        state["quota_busy"] = False
+        tab_glow = getattr(term, "_tab_glow_bar", None)
+        self.assertIsNotNone(tab_glow)
+        self.assertFalse(tab_glow.get_visible())
+
+        # When running, tab_glow becomes visible
         app._animate_running_headers()
-        self.assertFalse(shimmer.get_visible())
+        self.assertTrue(tab_glow.get_visible())
+
+        # When idle, tab_glow is hidden
+        state["last_output_at"] = time.monotonic() - 10.0
+        app._animate_running_headers()
+        self.assertFalse(tab_glow.get_visible())
+
+    def test_battery_quota_style_and_threshold_colors(self):
+        omarchy_dir = str(Path(__file__).resolve().parents[1] / "omarchy")
+        if omarchy_dir not in sys.path:
+            sys.path.insert(0, omarchy_dir)
+        core_mod = importlib.import_module("core")
+        render_battery_pixbuf = core_mod.render_battery_pixbuf
+
+        # Test pixbuf rendering at various thresholds
+        pb_none = render_battery_pixbuf(None)
+        self.assertEqual(pb_none.get_width(), 34)
+        self.assertEqual(pb_none.get_height(), 13)
+
+        pb_red = render_battery_pixbuf(3)       # <5% Red
+        self.assertEqual(pb_red.get_width(), 34)
+
+        pb_orange = render_battery_pixbuf(15)   # <20% Orange
+        self.assertEqual(pb_orange.get_width(), 34)
+
+        pb_green = render_battery_pixbuf(85)    # >=20% Green
+        self.assertEqual(pb_green.get_width(), 34)
+
+        pb_full = render_battery_pixbuf(100)
+        self.assertEqual(pb_full.get_width(), 34)
 
 
 if __name__ == "__main__":
