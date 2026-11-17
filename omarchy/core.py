@@ -147,6 +147,8 @@ def sync_request(config, method, session_id=None, item=None, host=None):
 
 
 def sync_host_key(host):
+    sync_id = str(host.get("sync_id", "")).strip()
+    if sync_id: return hashlib.sha256(("manual:" + sync_id).encode("utf-8")).hexdigest()
     fingerprint = host.get("_sync_fingerprint", "")
     if fingerprint: return hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()
     return hashlib.sha256(host.get("address", "").lower().encode("utf-8")).hexdigest()
@@ -270,13 +272,16 @@ def auto_enter_signature(text):
             continue
         if not affirmative.match(match.group(1)):
             return None
-        for question in reversed(lines[max(0, index - 24):index]):
+        for question_index in range(index - 1, max(-1, index - 25), -1):
+            question = lines[question_index]
             if request.search(question):
-                return _normalize_signature(question + "\n" + lines[index])
+                start = max(0, question_index - 4)
+                return _normalize_signature("\n".join(lines[start:index + 1]))
         return None
-    for line in reversed(lines[-5:]):
-        if yes_default.search(line) or enter_prompt.search(line):
-            return _normalize_signature(line)
+    for index in range(len(lines) - 1, max(-1, len(lines) - 6), -1):
+        if yes_default.search(lines[index]) or enter_prompt.search(lines[index]):
+            start = max(0, index - 4)
+            return _normalize_signature("\n".join(lines[start:index + 1]))
 
     return None
 

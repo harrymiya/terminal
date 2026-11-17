@@ -74,7 +74,8 @@ object SyncClient {
     private fun sessionPath(host: HostProfile): String = "/v1/hosts/${workspaceKey(host)}/users/${URLEncoder.encode(host.username, "UTF-8").replace("+", "%20")}/sessions"
 
     private fun workspaceKey(host: HostProfile): String {
-        val source = host.syncFingerprint.ifBlank { host.address.lowercase() }
+        val manualId = host.syncId.trim()
+        val source = if (manualId.isNotBlank()) "manual:$manualId" else host.syncFingerprint.ifBlank { host.address.lowercase() }
         return MessageDigest.getInstance("SHA-256").digest(source.toByteArray()).joinToString("") { "%02x".format(it.toInt() and 0xff) }
     }
     fun hostIdentity(host: HostProfile): String = workspaceKey(host)

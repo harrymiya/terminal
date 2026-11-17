@@ -1175,7 +1175,8 @@ class App(Gtk.Window):
             self.hosts_list.remove(child)
         host_radio_group = None
         for index, item in enumerate(self.data["hosts"]):
-            row = Gtk.Box(spacing=4)
+            row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+            row.set_hexpand(True)
             button = Gtk.RadioButton.new_with_label_from_widget(host_radio_group, item["name"] + "  ·  " + item["address"])
             button.set_mode(False)
             if host_radio_group is None:
@@ -1183,19 +1184,22 @@ class App(Gtk.Window):
             button.set_active(index == selected)
             button.set_tooltip_text(f"{item.get('username', '')}@{item['address']}:{item.get('port', 22)}\n点击切换主机")
             button.get_style_context().add_class("host-button")
-            if button.get_child():
-                button.get_child().set_xalign(0.0)
+            self.fit_sidebar_label(button)
+            button.set_hexpand(True)
             if index == selected:
                 button.get_style_context().add_class("host-selected")
             button.connect("toggled", lambda radio, i=index: self.hosts.set_active(i) if radio.get_active() else None)
-            row.pack_start(button, True, True, 0)
+            row.pack_start(button, False, True, 0)
             if self.edit_mode:
+                actions = Gtk.Box(spacing=4)
+                actions.set_halign(Gtk.Align.END)
                 for label, action in [("✎", "edit"), ("×", "delete")]:
                     edit = Gtk.Button(label=label)
                     edit.set_tooltip_text("编辑主机" if action == "edit" else "删除主机")
                     edit.get_style_context().add_class("manage-button")
                     edit.connect("clicked", self.manage_host, index, action)
-                    row.pack_start(edit, False, False, 0)
+                    actions.pack_start(edit, False, False, 0)
+                row.pack_start(actions, False, False, 0)
             self.hosts_list.pack_start(row, False, False, 0)
             self.scale_layout(row)
         if not self.data["hosts"]:
@@ -1220,23 +1224,27 @@ class App(Gtk.Window):
         host = self.current_host()
         agents = self.host_agents(host) if host else []
         for index, item in enumerate(agents):
-            row = Gtk.Box(spacing=4)
+            row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+            row.set_hexpand(True)
             button = Gtk.Button(label=item["name"])
             button.set_tooltip_text(item.get("command", "") + "\n点击选择 Agent")
             button.get_style_context().add_class("host-button")
-            if button.get_child():
-                button.get_child().set_xalign(0.0)
+            self.fit_sidebar_label(button)
+            button.set_hexpand(True)
             if index == self.agents.get_active():
                 button.get_style_context().add_class("agent-selected")
             button.connect("clicked", lambda _button, i=index: self.agents.set_active(i))
-            row.pack_start(button, True, True, 0)
+            row.pack_start(button, False, True, 0)
             if self.edit_mode:
+                actions = Gtk.Box(spacing=4)
+                actions.set_halign(Gtk.Align.END)
                 for label, action in [("✎", "edit"), ("×", "delete")]:
                     edit = Gtk.Button(label=label)
                     edit.set_tooltip_text("编辑 Agent" if action == "edit" else "删除 Agent")
                     edit.get_style_context().add_class("manage-button")
                     edit.connect("clicked", self.manage_agent, index, action)
-                    row.pack_start(edit, False, False, 0)
+                    actions.pack_start(edit, False, False, 0)
+                row.pack_start(actions, False, False, 0)
             self.agents_list.pack_start(row, False, False, 0)
             self.scale_layout(row)
         if not agents:
@@ -1248,6 +1256,15 @@ class App(Gtk.Window):
     def manage_agent(self, button, index, action):
         self.agents.set_active(index)
         self.manage(button, "agents", action)
+
+    @staticmethod
+    def fit_sidebar_label(button):
+        label = button.get_child()
+        if isinstance(label, Gtk.Label):
+            label.set_xalign(0.0)
+            label.set_single_line_mode(True)
+            label.set_ellipsize(Pango.EllipsizeMode.END)
+            label.set_max_width_chars(28)
 
     def toggle_sidebar_edit(self, button):
         restore_width = None
@@ -1300,28 +1317,32 @@ class App(Gtk.Window):
         directories = host.get("directories", []) if host else []
         for index, item in enumerate(directories):
             self.directories.append_text(item["name"])
-            row = Gtk.Box(spacing=4)
+            row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+            row.set_hexpand(True)
             button = Gtk.Button(label="▸  " + item["name"])
-            if button.get_child():
-                button.get_child().set_xalign(0.0)
+            self.fit_sidebar_label(button)
+            button.set_hexpand(True)
             button.set_tooltip_text(item["path"] + "\n点击使用当前 Agent 打开")
             button.get_style_context().add_class("project-button")
             button.connect("clicked", self.open_directory, index)
-            row.pack_start(button, True, True, 0)
+            row.pack_start(button, False, True, 0)
             if self.edit_mode:
+                actions = Gtk.Box(spacing=4)
+                actions.set_halign(Gtk.Align.END)
                 for symbol, offset, tooltip in (("↑", -1, "上移工作区"), ("↓", 1, "下移工作区")):
                     move = Gtk.Button(label=symbol)
                     move.set_tooltip_text(tooltip)
                     move.set_sensitive(0 <= index + offset < len(directories))
                     move.get_style_context().add_class("manage-button")
                     move.connect("clicked", self.move_directory, index, offset)
-                    row.pack_start(move, False, False, 0)
+                    actions.pack_start(move, False, False, 0)
                 for label, action in [("✎", "edit"), ("×", "delete")]:
                     edit = Gtk.Button(label=label)
                     edit.set_tooltip_text("编辑工作区" if action == "edit" else "删除工作区")
                     edit.get_style_context().add_class("manage-button")
                     edit.connect("clicked", self.manage_directory, index, action)
-                    row.pack_start(edit, False, False, 0)
+                    actions.pack_start(edit, False, False, 0)
+                row.pack_start(actions, False, False, 0)
             self.directories_list.pack_start(row, False, False, 0)
             self.scale_layout(row)
         if not directories:
@@ -1388,7 +1409,7 @@ class App(Gtk.Window):
                 if kind == "hosts":
                     self.refresh_all_shared()
             return
-        fields = {"hosts": [("name", "名称"), ("address", "地址"), ("port", "端口"), ("username", "用户名")], "directories": [("name", "名称"), ("path", "远端绝对路径")], "agents": [("name", "名称"), ("command", "启动命令")]}[kind]
+        fields = {"hosts": [("name", "名称"), ("address", "地址"), ("port", "端口"), ("username", "用户名"), ("sync_id", "多端同步标识（可选）")], "directories": [("name", "名称"), ("path", "远端绝对路径")], "agents": [("name", "名称"), ("command", "启动命令")]}[kind]
         old = items[index] if action == "edit" else {"port": 22}
         dialog = Gtk.Dialog(title="编辑" if action == "edit" else "添加", transient_for=self, modal=True)
         dialog.add_buttons("取消", Gtk.ResponseType.CANCEL, "保存", Gtk.ResponseType.OK)
@@ -1416,7 +1437,10 @@ class App(Gtk.Window):
         password_entry = None
         clear_password = None
         if kind == "hosts":
-            row = len(fields)
+            identity_row = next(i for i, (key, _) in enumerate(fields) if key == "sync_id")
+            hint = Gtk.Label(label="同一主机在各设备填写相同值；留空时按 SSH 指纹或地址同步。修改标识会切换同步记录分组。", xalign=0, wrap=True)
+            grid.attach(hint, 1, identity_row + 1, 1, 1)
+            row = len(fields) + 1
             grid.attach(Gtk.Label(label="SSH 密码", xalign=0), 0, row, 1, 1)
             password_entry = Gtk.Entry()
             password_entry.set_hexpand(True)
@@ -1435,15 +1459,21 @@ class App(Gtk.Window):
         while dialog.run() == Gtk.ResponseType.OK:
             values = {key: entry.get_text().strip() for key, entry in entries.items()}
             try:
-                if not all(values.values()):
-                    raise ValueError("所有字段均为必填项")
+                required_fields = {"hosts": ("name", "address", "port", "username"), "directories": ("name", "path"), "agents": ("name", "command")}[kind]
+                if any(not values.get(key) for key in required_fields):
+                    raise ValueError("请填写所有必填字段")
                 if kind == "hosts":
+                    sync_id = values.get("sync_id", "")
+                    if sync_id and any((action != "edit" or i != index) and str(candidate.get("sync_id", "")).strip() == sync_id for i, candidate in enumerate(items)):
+                        raise ValueError("多端同步标识已被另一台主机使用")
                     values["port"] = int(values["port"])
                     if not 1 <= values["port"] <= 65535 or values["address"].startswith("-"):
                         raise ValueError("主机地址或端口无效")
                     values["directories"] = old.get("directories", [])
                     values["agents"] = old.get("agents", [dict(agent) for agent in self.data["agents"]])
                     values["selected_agent"] = old.get("selected_agent", 0)
+                    if old.get("_sync_fingerprint"):
+                        values["_sync_fingerprint"] = old["_sync_fingerprint"]
                     credential_id = old.get("credential_id")
                     password = password_entry.get_text()
                     if clear_password and clear_password.get_active():
@@ -1694,6 +1724,9 @@ class App(Gtk.Window):
 
     @staticmethod
     def shared_host_key(host):
+        sync_id = str(host.get("sync_id", "")).strip()
+        if sync_id:
+            return ("manual", sync_id)
         return (host.get("address"), host.get("port"), host.get("username"))
 
     def update_sync_status(self):

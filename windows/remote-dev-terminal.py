@@ -1336,7 +1336,7 @@ class App(Gtk.Window):
                 if kind == "hosts":
                     self.refresh_all_shared()
             return
-        fields = {"hosts": [("name", "名称"), ("address", "地址"), ("port", "端口"), ("username", "用户名")], "directories": [("name", "名称"), ("path", "远端绝对路径")], "agents": [("name", "名称"), ("command", "启动命令")]}[kind]
+        fields = {"hosts": [("name", "名称"), ("address", "地址"), ("port", "端口"), ("username", "用户名"), ("sync_id", "多端同步标识（可选）")], "directories": [("name", "名称"), ("path", "远端绝对路径")], "agents": [("name", "名称"), ("command", "启动命令")]}[kind]
         old = items[index] if action == "edit" else {"port": 22}
         dialog = Gtk.Dialog(title="编辑" if action == "edit" else "添加", transient_for=self, modal=True)
         dialog.add_buttons("取消", Gtk.ResponseType.CANCEL, "保存", Gtk.ResponseType.OK)
@@ -1364,7 +1364,10 @@ class App(Gtk.Window):
         password_entry = None
         clear_password = None
         if kind == "hosts":
-            row = len(fields)
+            identity_row = next(i for i, (key, _) in enumerate(fields) if key == "sync_id")
+            hint = Gtk.Label(label="同一主机在各设备填写相同值；留空时按 SSH 指纹或地址同步。修改标识会切换同步记录分组。", xalign=0, wrap=True)
+            grid.attach(hint, 1, identity_row + 1, 1, 1)
+            row = len(fields) + 1
             grid.attach(Gtk.Label(label="SSH 密码", xalign=0), 0, row, 1, 1)
             password_entry = Gtk.Entry()
             password_entry.set_hexpand(True)
@@ -1383,15 +1386,21 @@ class App(Gtk.Window):
         while dialog.run() == Gtk.ResponseType.OK:
             values = {key: entry.get_text().strip() for key, entry in entries.items()}
             try:
-                if not all(values.values()):
-                    raise ValueError("所有字段均为必填项")
+                required_fields = {"hosts": ("name", "address", "port", "username"), "directories": ("name", "path"), "agents": ("name", "command")}[kind]
+                if any(not values.get(key) for key in required_fields):
+                    raise ValueError("请填写所有必填字段")
                 if kind == "hosts":
+                    sync_id = values.get("sync_id", "")
+                    if sync_id and any((action != "edit" or i != index) and str(candidate.get("sync_id", "")).strip() == sync_id for i, candidate in enumerate(items)):
+                        raise ValueError("多端同步标识已被另一台主机使用")
                     values["port"] = int(values["port"])
                     if not 1 <= values["port"] <= 65535 or values["address"].startswith("-"):
                         raise ValueError("主机地址或端口无效")
                     values["directories"] = old.get("directories", [])
                     values["agents"] = old.get("agents", [dict(agent) for agent in self.data["agents"]])
                     values["selected_agent"] = old.get("selected_agent", 0)
+                    if old.get("_sync_fingerprint"):
+                        values["_sync_fingerprint"] = old["_sync_fingerprint"]
                     credential_id = old.get("credential_id")
                     password = password_entry.get_text()
                     if clear_password and clear_password.get_active():
@@ -1640,6 +1649,9 @@ class App(Gtk.Window):
 
     @staticmethod
     def shared_host_key(host):
+        sync_id = str(host.get("sync_id", "")).strip()
+        if sync_id:
+            return ("manual", sync_id)
         return (host.get("address"), host.get("port"), host.get("username"))
 
     def refresh_host_shared(self, host):

@@ -32,6 +32,7 @@ data class HostProfile(
     val icon: String = "⌘",
     val directories: List<ProjectDirectory> = emptyList(),
     val syncFingerprint: String = "",
+    val syncId: String = "",
 )
 
 data class AgentPreset(
@@ -144,6 +145,7 @@ class LocalStore(context: Context) {
                 password = vault.decrypt(preferences.getString("password_${item.getString("id")}", null)),
                 icon = item.optString("icon", "⌘"), directories = directories,
                 syncFingerprint = item.optString("sync_fingerprint", ""),
+                syncId = item.optString("sync_id", ""),
             )
         }
     }.getOrDefault(emptyList())
@@ -156,7 +158,7 @@ class LocalStore(context: Context) {
             host.directories.forEach { dirs.put(JSONObject().put("id", it.id).put("name", it.name).put("path", it.path).put("icon", it.icon)) }
             root.put(JSONObject().put("id", host.id).put("name", host.name).put("address", host.address)
                 .put("port", host.port).put("username", host.username).put("icon", host.icon).put("directories", dirs)
-                .put("sync_fingerprint", host.syncFingerprint))
+                .put("sync_fingerprint", host.syncFingerprint).put("sync_id", host.syncId.trim()))
             preferences.edit().putString("password_${host.id}", vault.encrypt(host.password)).apply()
         }
         (oldIds - hosts.map { it.id }.toSet()).forEach { preferences.edit().remove("password_$it").apply() }

@@ -198,17 +198,18 @@ private fun quotaLabel(minutes: Int, percent: Int): String {
 
 private fun detectAutoEnterPromptSignature(text: String): String? {
     val visibleText = text.trimEnd()
-    if (AutoEnterPromptRegex.containsMatchIn(visibleText)) {
-        return visibleText.lineSequence().filter { it.isNotBlank() }.toList().takeLast(2).joinToString("\n")
+    val lines = visibleText.lineSequence().filter { it.isNotBlank() }.toList()
+    val promptIndex = lines.indexOfLast { AutoEnterPromptRegex.containsMatchIn(it) }
+    if (promptIndex >= 0) {
+        return lines.subList(maxOf(0, promptIndex - 4), promptIndex + 1).joinToString("\n")
     }
     // Interactive CLIs draw a menu and often put a keyboard hint below it.
     // Only accept an explicitly selected affirmative option in an approval prompt.
-    val lines = visibleText.lines()
     val selectedIndex = lines.indexOfLast { it.trimStart().firstOrNull() in listOf('›', '❯', '>', '➜') }
     if (selectedIndex < 0 || !SelectedApprovalRegex.containsMatchIn(lines[selectedIndex])) return null
-    val request = lines.take(selectedIndex).takeLast(20).lastOrNull { ActionRequestRegex.containsMatchIn(it) }
-        ?: return null
-    return request.trim() + "\n" + lines[selectedIndex].trim()
+    val requestIndex = (selectedIndex - 1 downTo maxOf(0, selectedIndex - 20))
+        .firstOrNull { ActionRequestRegex.containsMatchIn(lines[it]) } ?: return null
+    return lines.subList(maxOf(0, requestIndex - 4), selectedIndex + 1).joinToString("\n")
 }
 
 private fun alertConfirmation(context: Context) {
@@ -810,14 +811,21 @@ private fun RemoteTerminalApp(store: LocalStore) {
             initial = editingHost,
             onDismiss = { addingHost = false; editingHost = null },
             onSave = { host ->
-                val wasNew = hosts.none { it.id == host.id }
-                saveHosts(if (wasNew) hosts.toList() + host else hosts.map { if (it.id == host.id) host else it })
-                selectedHostId = host.id
-                agents.firstOrNull { it.id == selectedAgentId }?.let { agent ->
-                    scope.launch { runCatching { withContext(SyncClient.dispatcher) { SyncClient.updateHostProfile(host, agent.command) } } }
+                val duplicateSyncId = host.syncId.trim().isNotBlank() && hosts.any {
+                    it.id != host.id && it.syncId.trim() == host.syncId.trim()
                 }
-                if (syncUrl.isNotBlank()) refreshShared(host)
-                addingHost = false; editingHost = null
+                if (duplicateSyncId) {
+                    scope.launch { snackbars.showSnackbar("多端同步标识已被另一台主机使用") }
+                } else {
+                    val wasNew = hosts.none { it.id == host.id }
+                    saveHosts(if (wasNew) hosts.toList() + host else hosts.map { if (it.id == host.id) host else it })
+                    selectedHostId = host.id
+                    agents.firstOrNull { it.id == selectedAgentId }?.let { agent ->
+                        scope.launch { runCatching { withContext(SyncClient.dispatcher) { SyncClient.updateHostProfile(host, agent.command) } } }
+                    }
+                    if (syncUrl.isNotBlank()) refreshShared(host)
+                    addingHost = false; editingHost = null
+                }
             },
         )
         editingDirectory?.let { (hostId, initial) ->
@@ -1920,8 +1928,9 @@ private fun HostEditorDialog(initial: HostProfile?, onDismiss: () -> Unit, onSav
     var username by remember(initial?.id) { mutableStateOf(initial?.username.orEmpty()) }
     var password by remember(initial?.id) { mutableStateOf(initial?.password.orEmpty()) }
     var icon by remember(initial?.id) { mutableStateOf(initial?.icon ?: "⌘") }
+    var syncId by remember(initial?.id) { mutableStateOf(initial?.syncId.orEmpty()) }
     EditorDialogFrame(if (initial == null) "添加主机" else "编辑主机", onDismiss, canSave = name.isNotBlank() && address.isNotBlank() && username.isNotBlank(), onConfirm = {
-        onSave(HostProfile(initial?.id ?: UUID.randomUUID().toString(), name.trim(), address.trim(), port.toIntOrNull()?.takeIf { it in 1..65535 } ?: 22, username.trim(), password, icon.ifBlank { "⌘" }, initial?.directories.orEmpty(), initial?.syncFingerprint.orEmpty()))
+        onSave(HostProfile(initial?.id ?: UUID.randomUUID().toString(), name.trim(), address.trim(), port.toIntOrNull()?.takeIf { it in 1..65535 } ?: 22, username.trim(), password, icon.ifBlank { "⌘" }, initial?.directories.orEmpty(), initial?.syncFingerprint.orEmpty(), syncId.trim()))
     }) {
         OutlinedTextField(name, { name = it }, label = { Text("主机名称") }, placeholder = { Text("例如：Mac Studio") }, singleLine = true, modifier = Modifier.fillMaxWidth())
         IconPicker(icon, { icon = it }, listOf("⌘", "🖥️", "☁️", "🐧", "⚡", "🧪", "🏠", "💻", "🔧", "🌐"))
@@ -1930,6 +1939,8 @@ private fun HostEditorDialog(initial: HostProfile?, onDismiss: () -> Unit, onSav
             OutlinedTextField(port, { port = it.filter(Char::isDigit).take(5) }, label = { Text("SSH 端口") }, singleLine = true, modifier = Modifier.weight(0.65f))
             OutlinedTextField(username, { username = it }, label = { Text("用户名") }, singleLine = true, modifier = Modifier.weight(1f))
         }
+        OutlinedTextField(syncId, { syncId = it }, label = { Text("多端同步标识") }, placeholder = { Text("各设备为同一主机填写相同值") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        Text("各设备需填写相同值；留空时按 SSH 指纹或地址识别。修改后会切换同步记录分组。", color = Muted, fontSize = 11.sp)
         OutlinedTextField(password, { password = it }, label = { Text("SSH 密码") }, placeholder = { Text("密码保存在本机加密区") }, singleLine = true,
             visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
     }
