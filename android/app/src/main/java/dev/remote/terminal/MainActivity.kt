@@ -383,6 +383,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
         val snackbars = remember { SnackbarHostState() }
         val scope = rememberCoroutineScope()
         val dirtyWorkspaces = remember { store.loadDirtyWorkspaces().toMutableSet() }
+        val dirtyHostProfiles = remember { store.loadDirtyHostProfiles().toMutableSet() }
         val workspaceVersions = remember { mutableMapOf<String, Int>() }
         val agentVersions = remember { mutableMapOf<String, Int>() }
         val mainHandler = remember { Handler(Looper.getMainLooper()) }
@@ -393,6 +394,27 @@ private fun RemoteTerminalApp(store: LocalStore) {
         fun saveHosts(updated: List<HostProfile>) {
             hosts.clear(); hosts.addAll(updated); store.saveHosts(updated)
             if (selectedHostId !in updated.map { it.id }) selectedHostId = updated.firstOrNull()?.id.orEmpty()
+        }
+
+        fun syncHostProfile(host: HostProfile) {
+            dirtyHostProfiles.add(host.id)
+            store.saveDirtyHostProfiles(dirtyHostProfiles)
+            if (syncUrl.isBlank() || syncToken.isBlank()) return
+            val agentCommand = agents.firstOrNull { it.id == selectedAgentId }?.command
+                ?: agents.firstOrNull()?.command.orEmpty()
+            scope.launch {
+                runCatching {
+                    withContext(SyncClient.dispatcher) {
+                        SyncClient.saveHostProfile(host, agentCommand)
+                        SyncClient.updateHostProfile(host, agentCommand)
+                    }
+                }.onSuccess {
+                    dirtyHostProfiles.remove(host.id)
+                    store.saveDirtyHostProfiles(dirtyHostProfiles)
+                }.onFailure { error ->
+                    snackbars.showSnackbar("主机配置同步失败，将自动重试：${error.message}")
+                }
+            }
         }
 
         fun syncWorkspaceList(host: HostProfile, directories: List<ProjectDirectory>) {
@@ -460,14 +482,28 @@ private fun RemoteTerminalApp(store: LocalStore) {
             val deleted = allRemote.filter { it.optBoolean("deleted") }
             val matched = mutableSetOf<String>()
             val idRemaps = mutableMapOf<String, String>()
+            val agentCommand = agents.firstOrNull { it.id == selectedAgentId }?.command
+                ?: agents.firstOrNull()?.command.orEmpty()
             val result = hosts.toList().mapNotNull { local ->
                 if (deleted.any { it.optString("id") == local.id || SyncClient.matchesLegacyHost(local, it) }) return@mapNotNull null
                 val candidates = active.filter { it.optString("id") == local.id || SyncClient.matchesLegacyHost(local, it) }
                 val profile = candidates.firstOrNull() ?: active.filter {
                     it.optString("name").equals(local.name, true) && it.optString("username").equals(local.username, true)
                 }.singleOrNull()
-                if (profile == null) {
-                    SyncClient.saveHostProfile(local, agents.firstOrNull()?.command.orEmpty())
+                if (local.id in dirtyHostProfiles) {
+                    runCatching {
+                        SyncClient.saveHostProfile(local, agentCommand)
+                        SyncClient.updateHostProfile(local, agentCommand)
+                        dirtyHostProfiles.remove(local.id)
+                        store.saveDirtyHostProfiles(dirtyHostProfiles)
+                    }
+                    if (profile != null) {
+                        matched.add(profile.optString("id"))
+                        idRemaps[local.id] = profile.optString("id", local.id)
+                    }
+                    local
+                } else if (profile == null) {
+                    SyncClient.saveHostProfile(local, agentCommand)
                     local
                 } else {
                     matched.add(profile.optString("id"))
@@ -878,13 +914,8 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 val wasNew = hosts.none { it.id == host.id }
                 saveHosts(if (wasNew) hosts.toList() + host else hosts.map { if (it.id == host.id) host else it })
                 selectedHostId = host.id
-                agents.firstOrNull { it.id == selectedAgentId }?.let { agent ->
-                    if (syncUrl.isNotBlank()) scope.launch { runCatching { withContext(SyncClient.dispatcher) {
-                        SyncClient.saveHostProfile(host, agent.command)
-                        SyncClient.updateHostProfile(host, agent.command)
-                    } } }
-                }
-                if (syncUrl.isNotBlank()) refreshShared(host)
+                syncHostProfile(host)
+                if (syncUrl.isNotBlank() && syncToken.isNotBlank()) refreshShared(host)
                 addingHost = false; editingHost = null
             },
         )
@@ -911,6 +942,8 @@ private fun RemoteTerminalApp(store: LocalStore) {
         deletingHost?.let { host -> ConfirmDeleteDialog(
             title = "删除主机？", detail = "${host.name} 及其目录配置将从本机移除。",
             onConfirm = {
+                dirtyHostProfiles.remove(host.id)
+                store.saveDirtyHostProfiles(dirtyHostProfiles)
                 if (syncUrl.isNotBlank() && syncToken.isNotBlank()) scope.launch { runCatching { withContext(SyncClient.dispatcher) { SyncClient.deleteHostProfile(host.id) } } }
                 saveHosts(hosts.filterNot { it.id == host.id }); deletingHost = null
             },
