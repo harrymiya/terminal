@@ -63,6 +63,52 @@ class UbuntuWindowAndTabsTest(unittest.TestCase):
                 self.assertTrue(name.get_mapped(), 'tab name must actually be displayed')
                 self.assertTrue(quota.get_mapped(), 'tab quota must actually be displayed')
 
+    def test_workspace_move_buttons_save_order_and_respect_bounds(self):
+        host = {'name': 'host', 'address': 'host', 'port': 22, 'username': 'user',
+                'directories': [{'name': 'A', 'path': '/a'}, {'name': 'B', 'path': '/b'}, {'name': 'C', 'path': '/c'}]}
+        self.app.data['hosts'] = [host]
+        with patch.object(self.app, 'persist') as persist, patch.object(self.app, 'push_workspace_list') as push:
+            self.app.refresh()
+            rows = self.app.directories_list.get_children()
+            self.assertFalse(rows[0].get_children()[1].get_sensitive())
+            self.assertFalse(rows[-1].get_children()[2].get_sensitive())
+            rows[1].get_children()[1].clicked()
+            self.assertEqual([d['name'] for d in host['directories']], ['B', 'A', 'C'])
+            self.assertEqual(self.app.directories.get_active(), 0)
+            persist.assert_called_once()
+            push.assert_called_once_with(host)
+            self.app.move_directory(None, 0, -1)
+            self.assertEqual([d['name'] for d in host['directories']], ['B', 'A', 'C'])
+
+    def test_stale_workspace_fetch_cannot_overwrite_local_reorder(self):
+        from unittest.mock import Mock
+        host = {'name': 'host', 'address': 'host', 'port': 22, 'username': 'user',
+                'directories': [{'name': 'A', 'path': '/a'}, {'name': 'B', 'path': '/b'}]}
+        self.app.data.update(hosts=[host], sync_url='http://example', sync_token='token')
+        self.app.sync_executor.shutdown(wait=True)
+        jobs, callbacks = [], []
+        self.app.sync_executor = Mock()
+        self.app.sync_executor.submit.side_effect = jobs.append
+        self.app.refresh()
+        def sync_data(_config, method, path, payload=None):
+            if path.startswith('/v1/workspaces/'):
+                return {'configured': True, 'workspaces': [dict(d) for d in host['directories']]}
+            return {'configured': False, 'agents': []}
+        with patch.object(app_module, 'sync_request', return_value={'sessions': []}), \
+             patch.object(app_module, 'sync_data_request', side_effect=sync_data), \
+             patch.object(app_module.GLib, 'idle_add', side_effect=lambda fn, *args: callbacks.append((fn, args))), \
+             patch.object(self.app, 'persist'):
+            self.app.refresh_host_shared(host)
+            jobs.pop(0)()  # GET completes, but its GUI callback is pending.
+            self.app.move_directory(None, 1, -1)
+            fn, args = callbacks.pop(0)
+            fn(*args)
+            self.assertEqual([d['name'] for d in host['directories']], ['B', 'A'])
+            jobs.pop(0)()  # PUT the reordered snapshot.
+            fn, args = callbacks.pop(0)
+            fn(*args)
+            self.assertFalse(self.app.workspace_dirty)
+
     def test_battery_indicator_shows_readable_text_and_levels(self):
         Gtk = app_module.Gtk
         indicator, update = app_module.make_quota_indicator()

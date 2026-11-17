@@ -62,6 +62,9 @@ class App(Gtk.Window):
         self.sessions = []
         self.shared_by_host = {}
         self.sync_pending = set()
+        self.workspace_versions = {}
+        self.workspace_dirty = set()
+        self.workspace_sync_errors = set()
         self.sync_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="session-sync")
         try:
             self.data = load_config()
@@ -1015,6 +1018,13 @@ class App(Gtk.Window):
             button.get_style_context().add_class("project-button")
             button.connect("clicked", self.open_directory, index)
             row.pack_start(button, True, True, 0)
+            for symbol, offset, tooltip in (("↑", -1, "上移工作区"), ("↓", 1, "下移工作区")):
+                move = Gtk.Button(label=symbol)
+                move.set_tooltip_text(tooltip)
+                move.set_sensitive(0 <= index + offset < len(directories))
+                move.get_style_context().add_class("manage-button")
+                move.connect("clicked", self.move_directory, index, offset)
+                row.pack_start(move, False, False, 0)
             for label, action in [("✎", "edit"), ("×", "delete")]:
                 edit = Gtk.Button(label=label)
                 edit.set_tooltip_text("编辑工作区" if action == "edit" else "删除工作区")
@@ -1028,6 +1038,18 @@ class App(Gtk.Window):
             hint.get_style_context().add_class("subtitle")
             self.directories_list.pack_start(hint, False, False, 0)
         self.directories_list.show_all()
+
+    def move_directory(self, _button, index, offset):
+        host = self.current_host()
+        directories = host.get("directories", []) if host else []
+        target = index + offset
+        if not (0 <= index < len(directories) and 0 <= target < len(directories)):
+            return
+        directories[index], directories[target] = directories[target], directories[index]
+        self.persist()
+        self.refresh_directories()
+        self.directories.set_active(target)
+        self.push_workspace_list(host)
 
     def open_directory(self, _button, index):
         self.directories.set_active(index)
@@ -1376,6 +1398,9 @@ class App(Gtk.Window):
         pending_key = (key, self.data.get("sync_token"))
         if pending_key in self.sync_pending:
             return
+        if key in self.workspace_dirty:
+            self.push_workspace_list(host)
+        workspace_version = self.workspace_versions.get(key, 0)
         self.sync_pending.add(pending_key)
         def worker():
             try:
@@ -1392,7 +1417,8 @@ class App(Gtk.Window):
                         sessions, remote_workspaces, remote_agents = result
                         local_host = next((h for h in self.data["hosts"] if self.shared_host_key(h) == key), None)
                         config_changed = False
-                        if local_host is not None:
+                        if (local_host is not None and key not in self.workspace_dirty
+                                and workspace_version == self.workspace_versions.get(key, 0)):
                             if remote_workspaces.get("configured"):
                                 updated = remote_workspaces["workspaces"]
                                 if local_host.get("directories", []) != updated:
@@ -1423,15 +1449,36 @@ class App(Gtk.Window):
         self.sync_executor.submit(worker)
 
     def push_workspace_list(self, host):
-        if not self.data.get("sync_url"):
-            return
+        if not self.data.get("sync_url"): return
+        key = self.shared_host_key(host)
+        version = self.workspace_versions.get(key, 0) + 1
+        self.workspace_versions[key] = version
+        self.workspace_dirty.add(key)
         items = []
         for directory in host.get("directories", []):
             path = directory.get("path", "")
             if path:
                 items.append({"id": directory.get("id") or __import__("hashlib").sha256(path.encode("utf-8")).hexdigest()[:32],
                               "name": directory.get("name", path.rsplit("/", 1)[-1]), "path": path, "icon": directory.get("icon", "📁")})
-        self.sync_executor.submit(lambda: sync_data_request(self.data, "PUT", "/v1/workspaces/" + sync_host_key(host), {"workspaces": items}))
+        path = "/v1/workspaces/" + sync_host_key(host)
+        def worker():
+            try:
+                sync_data_request(self.data, "PUT", path, {"workspaces": items})
+                error = False
+            except Exception:
+                error = True
+            def finish():
+                if self.workspace_versions.get(key) == version:
+                    if error:
+                        if key not in self.workspace_sync_errors:
+                            self.workspace_sync_errors.add(key)
+                            self.message("工作区同步失败", "本地顺序已保存，将自动重试同步。")
+                    else:
+                        self.workspace_dirty.discard(key)
+                        self.workspace_sync_errors.discard(key)
+                return False
+            GLib.idle_add(finish)
+        self.sync_executor.submit(worker)
 
     def push_agent_list(self):
         if not self.data.get("sync_url"):
