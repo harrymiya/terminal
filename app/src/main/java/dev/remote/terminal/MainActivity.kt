@@ -325,7 +325,7 @@ private class TerminalSessionState(val task: TerminalTask, private val mainHandl
     }
 }
 
-private enum class AppRoute { HOME, MANAGE, TERMINAL, AGENTS }
+private enum class AppRoute { HOME, MANAGE, TERMINAL, AGENTS, SETTINGS }
 
 @Composable
 private fun RemoteTerminalApp(store: LocalStore) {
@@ -355,7 +355,6 @@ private fun RemoteTerminalApp(store: LocalStore) {
         var autoEnterDelaySeconds by remember { mutableIntStateOf(store.loadAutoEnterDelaySeconds()) }
         var syncUrl by remember { mutableStateOf(store.loadSyncUrl()) }
         var syncToken by remember { mutableStateOf(store.loadSyncToken()) }
-        var showSettings by rememberSaveable { mutableStateOf(false) }
         var editingHost by remember { mutableStateOf<HostProfile?>(null) }
         var addingHost by remember { mutableStateOf(false) }
         var editingDirectory by remember { mutableStateOf<Pair<String, ProjectDirectory?>?>(null) }
@@ -570,7 +569,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
                             startupShared = startupShared.filterNot { it.first.id == host.id } + items.map { host to it }
                             val hadSessions = sessions.isNotEmpty()
                             items.forEach { item -> openSharedSession(host, item, activate = false) }
-                            if (!hadSessions && sessions.isNotEmpty()) { activePage = 0; route = AppRoute.TERMINAL }
+                            if (!hadSessions && sessions.isNotEmpty() && route == AppRoute.HOME) { activePage = 0; route = AppRoute.TERMINAL }
                             if (sharedHost?.id == host.id && sharedSessions != null) sharedSessions = items
                         }
                 }
@@ -596,7 +595,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
                         syncWorkspaceList(host, ordered)
                     },
                     onOpenAgents = { route = AppRoute.AGENTS },
-                    onOpenSettings = { showSettings = true },
+                    onOpenSettings = { route = AppRoute.SETTINGS },
                     onStartTask = { host, dir, agent -> openTask(host, dir, agent) },
                     onResumeSession = { index -> activePage = index; sessions[index].unread = false; route = AppRoute.TERMINAL },
                 )
@@ -611,6 +610,32 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 AppRoute.AGENTS -> AgentsScreen(
                     agents = agents, onBack = { route = AppRoute.HOME }, onAdd = { addingAgent = true },
                     onEdit = { editingAgent = it }, onDelete = { deletingAgent = it },
+                )
+                AppRoute.SETTINGS -> SettingsScreen(
+                    store = store,
+                    syncUrl = syncUrl,
+                    syncToken = syncToken,
+                    onSyncSettingsChange = { url, token ->
+                        syncUrl = url
+                        syncToken = token
+                        store.saveSyncSettings(url, token)
+                    },
+                    enabled = autoEnterEnabled,
+                    delaySeconds = autoEnterDelaySeconds,
+                    onEnabledChange = { enabled ->
+                        autoEnterEnabled = enabled
+                        store.saveAutoEnterEnabled(enabled)
+                        sessions.forEach { session ->
+                            if (enabled) session.resumeAutoEnter(autoEnterDelaySeconds, enabled)
+                            else session.cancelAutoEnter()
+                        }
+                    },
+                    onDelaySecondsChange = { seconds ->
+                        autoEnterDelaySeconds = seconds
+                        store.saveAutoEnterDelaySeconds(seconds)
+                        if (autoEnterEnabled) sessions.forEach { it.resumeAutoEnter(seconds, autoEnterEnabled) }
+                    },
+                    onBack = { route = AppRoute.HOME },
                 )
                 AppRoute.TERMINAL -> TerminalWorkspace(
                     sessions = sessions, initialIndex = activePage,
@@ -704,33 +729,6 @@ private fun RemoteTerminalApp(store: LocalStore) {
             onConfirm = { closeSession(session); closingSession = null },
             onDismiss = { closingSession = null },
         ) }
-
-        if (showSettings) AutoEnterSettingsDialog(
-            store = store,
-            syncUrl = syncUrl,
-            syncToken = syncToken,
-            onSyncSettingsChange = { url, token ->
-                syncUrl = url
-                syncToken = token
-                store.saveSyncSettings(url, token)
-            },
-            enabled = autoEnterEnabled,
-            delaySeconds = autoEnterDelaySeconds,
-            onEnabledChange = { enabled ->
-                autoEnterEnabled = enabled
-                store.saveAutoEnterEnabled(enabled)
-                sessions.forEach { session ->
-                    if (enabled) session.resumeAutoEnter(autoEnterDelaySeconds, enabled)
-                    else session.cancelAutoEnter()
-                }
-            },
-            onDelaySecondsChange = { seconds ->
-                autoEnterDelaySeconds = seconds
-                store.saveAutoEnterDelaySeconds(seconds)
-                if (autoEnterEnabled) sessions.forEach { it.resumeAutoEnter(seconds, autoEnterEnabled) }
-            },
-            onDismiss = { showSettings = false },
-        )
 
         sessions.forEach { session ->
             session.hostFingerprint?.let { fingerprint ->
@@ -1640,7 +1638,7 @@ private fun statusTint(status: String): Color = when {
 }
 
 @Composable
-private fun AutoEnterSettingsDialog(
+private fun SettingsScreen(
     store: LocalStore,
     syncUrl: String,
     syncToken: String,
@@ -1649,68 +1647,75 @@ private fun AutoEnterSettingsDialog(
     delaySeconds: Int,
     onEnabledChange: (Boolean) -> Unit,
     onDelaySecondsChange: (Int) -> Unit,
-    onDismiss: () -> Unit,
+    onBack: () -> Unit,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var publicKey by remember { mutableStateOf(store.sshPublicKey()) }
     var generating by remember { mutableStateOf(false) }
     var keyMessage by remember { mutableStateOf("") }
-    var draftSyncUrl by remember(syncUrl) { mutableStateOf(syncUrl) }
+    var draftSyncUrl by rememberSaveable(syncUrl) { mutableStateOf(syncUrl) }
     var draftSyncToken by remember(syncToken) { mutableStateOf(syncToken) }
     var draftDelay by remember(delaySeconds) { mutableStateOf(delaySeconds.toFloat()) }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        containerColor = Panel,
-        title = { Text("设置", color = White, fontWeight = FontWeight.SemiBold) },
-        text = {
-            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("SSH 密钥", color = White, fontWeight = FontWeight.SemiBold)
-                Text("生成本机密钥后，将公钥添加到服务器用户的 ~/.ssh/authorized_keys。连接时会优先尝试密钥认证。", color = Muted, fontSize = 12.sp)
-                if (publicKey == null) {
-                    FilledTonalButton(enabled = !generating, onClick = {
-                        generating = true
-                        scope.launch {
-                            val result = withContext(Dispatchers.IO) { runCatching { store.generateSshKey() } }
-                            result.onSuccess { publicKey = it; keyMessage = "密钥已生成" }
-                                .onFailure { keyMessage = "生成失败：${it.localizedMessage ?: "未知错误"}" }
-                            generating = false
-                        }
-                    }) { Text(if (generating) "正在生成…" else "生成本机密钥") }
-                } else {
-                    Text(publicKey.orEmpty(), color = Muted, fontSize = 11.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
-                    FilledTonalButton(onClick = {
-                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                        clipboard.setPrimaryClip(ClipData.newPlainText("SSH 公钥", publicKey.orEmpty()))
-                        keyMessage = "公钥已复制"
-                    }) { Text("复制公钥") }
-                }
-                if (keyMessage.isNotEmpty()) Text(keyMessage, color = Mint, fontSize = 12.sp)
-                Divider()
-                Text("系统同步", color = White, fontWeight = FontWeight.SemiBold)
-                OutlinedTextField(draftSyncUrl, { draftSyncUrl = it }, label = { Text("同步服务地址") }, placeholder = { Text("https://地址:端口") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(draftSyncToken, { draftSyncToken = it }, label = { Text("同步服务令牌") }, singleLine = true, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
-                Text("自动回车", color = White, fontWeight = FontWeight.SemiBold)
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Column(Modifier.weight(1f)) {
-                        Text("对默认“是”或选中允许的确认提示自动回车", color = White, fontSize = 13.sp)
-                        Text("断线时暂停倒计时，恢复连接后重新等待；[y/N] 等默认否的提示需要手动确认", color = Muted, fontSize = 11.sp)
-                    }
-                    Switch(checked = enabled, onCheckedChange = onEnabledChange)
-                }
-                Text("延迟 ${draftDelay.roundToInt()} 秒", color = White, fontSize = 13.sp)
-                Slider(
-                    value = draftDelay,
-                    onValueChange = { draftDelay = it },
-                    onValueChangeFinished = { onDelaySecondsChange(draftDelay.roundToInt().coerceIn(1, 30)) },
-                    valueRange = 1f..30f,
-                    steps = 28,
-                )
-                Text("倒计时期间手动输入或操作会取消自动回车。", color = Muted, fontSize = 11.sp)
+    fun finish() {
+        onSyncSettingsChange(draftSyncUrl.trim(), draftSyncToken)
+        onBack()
+    }
+    BackHandler { finish() }
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
+        Row(Modifier.fillMaxWidth().padding(top = 15.dp, bottom = 20.dp), verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = { finish() }) { Icon(Icons.Default.ArrowBack, contentDescription = "返回", tint = White) }
+            Column(Modifier.weight(1f)) {
+                Text("设置", color = White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                Text("管理密钥、同步与自动回车", color = Muted, fontSize = 12.sp)
             }
-        },
-        confirmButton = { TextButton(onClick = { onSyncSettingsChange(draftSyncUrl.trim(), draftSyncToken); onDismiss() }) { Text("完成", color = Mint) } },
-    )
+            TextButton(onClick = { finish() }) { Text("完成", color = Mint) }
+        }
+        Column(Modifier.fillMaxWidth().padding(bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text("SSH 密钥", color = White, fontWeight = FontWeight.SemiBold)
+            Text("生成本机密钥后，将公钥添加到服务器用户的 ~/.ssh/authorized_keys。连接时会优先尝试密钥认证。", color = Muted, fontSize = 12.sp)
+            if (publicKey == null) {
+                FilledTonalButton(enabled = !generating, onClick = {
+                    generating = true
+                    scope.launch {
+                        val result = withContext(Dispatchers.IO) { runCatching { store.generateSshKey() } }
+                        result.onSuccess { publicKey = it; keyMessage = "密钥已生成" }
+                            .onFailure { keyMessage = "生成失败：${it.localizedMessage ?: "未知错误"}" }
+                        generating = false
+                    }
+                }) { Text(if (generating) "正在生成…" else "生成本机密钥") }
+            } else {
+                Text(publicKey.orEmpty(), color = Muted, fontSize = 11.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                FilledTonalButton(onClick = {
+                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                    clipboard.setPrimaryClip(ClipData.newPlainText("SSH 公钥", publicKey.orEmpty()))
+                    keyMessage = "公钥已复制"
+                }) { Text("复制公钥") }
+            }
+            if (keyMessage.isNotEmpty()) Text(keyMessage, color = Mint, fontSize = 12.sp)
+            Divider()
+            Text("系统同步", color = White, fontWeight = FontWeight.SemiBold)
+            OutlinedTextField(draftSyncUrl, { draftSyncUrl = it }, label = { Text("同步服务地址") }, placeholder = { Text("https://地址:端口") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(draftSyncToken, { draftSyncToken = it }, label = { Text("同步服务令牌") }, singleLine = true, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
+            Text("自动回车", color = White, fontWeight = FontWeight.SemiBold)
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Column(Modifier.weight(1f)) {
+                    Text("对默认“是”或选中允许的确认提示自动回车", color = White, fontSize = 13.sp)
+                    Text("断线时暂停倒计时，恢复连接后重新等待；[y/N] 等默认否的提示需要手动确认", color = Muted, fontSize = 11.sp)
+                }
+                Switch(checked = enabled, onCheckedChange = onEnabledChange)
+            }
+            Text("延迟 ${draftDelay.roundToInt()} 秒", color = White, fontSize = 13.sp)
+            Slider(
+                value = draftDelay,
+                onValueChange = { draftDelay = it },
+                onValueChangeFinished = { onDelaySecondsChange(draftDelay.roundToInt().coerceIn(1, 30)) },
+                valueRange = 1f..30f,
+                steps = 28,
+            )
+            Text("倒计时期间手动输入或操作会取消自动回车。", color = Muted, fontSize = 11.sp)
+        }
+    }
 }
 
 @Composable
