@@ -912,9 +912,11 @@ private fun RemoteTerminalApp(store: LocalStore) {
             onDismiss = { addingHost = false; editingHost = null },
             onSave = { host ->
                 val wasNew = hosts.none { it.id == host.id }
+                HostRouteResolver.invalidate(host.id)
                 saveHosts(if (wasNew) hosts.toList() + host else hosts.map { if (it.id == host.id) host else it })
                 selectedHostId = host.id
                 syncHostProfile(host)
+                scope.launch(Dispatchers.IO) { HostRouteResolver.resolveHostRoute(host, force = true) }
                 if (syncUrl.isNotBlank() && syncToken.isNotBlank()) refreshShared(host)
                 addingHost = false; editingHost = null
             },

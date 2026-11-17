@@ -25,7 +25,12 @@ object RemoteDirectoryBrowser {
         var currentPort = host.port
         val hostKeys = BrowserHostKeyRepository(store) { currentAddress to currentPort }
         val jsch = JSch().apply { hostKeyRepository = hostKeys; store.addSshIdentity(this) }
-        val endpoints = host.endpoints()
+        val resolved = HostRouteResolver.getRoute(host.id)
+        val allEndpoints = host.endpoints()
+        val endpoints = if (resolved != null) {
+            val matched = allEndpoints.firstOrNull { it.address == resolved.address && it.port == resolved.port }
+            if (matched != null) listOf(matched) + allEndpoints.filterNot { it == matched } else allEndpoints
+        } else allEndpoints
         var openedSession: Session? = null
         var connectFailure: Exception? = null
 

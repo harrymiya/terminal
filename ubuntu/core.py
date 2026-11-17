@@ -236,7 +236,9 @@ def legacy_sync_keys(host):
     return list(dict.fromkeys(values))
 
 
-def ssh_address(host):
+def ssh_address(host, force=False):
+    if not force and host.get("_resolved") and host.get("_active_address") is not None:
+        return host.get("_active_address", "")
     candidates = [(host.get("lan_address", ""), host.get("lan_port", host.get("port", 22))),
                   (host.get("external_address", ""), host.get("external_port", host.get("port", 22)))]
     if not any(address for address, _port in candidates) and host.get("address"):
@@ -246,13 +248,16 @@ def ssh_address(host):
         try:
             with socket.create_connection((address, port), timeout=1.2):
                 host["_active_address"], host["_active_port"] = address, port
+                host["_resolved"] = True
                 return address
         except (OSError, ValueError):
             continue
     if candidates:
         host["_active_address"], host["_active_port"] = candidates[0]
+        host["_resolved"] = True
         return candidates[0][0]
     host["_active_address"], host["_active_port"] = "", int(host.get("port", 22))
+    host["_resolved"] = True
     return ""
 
 

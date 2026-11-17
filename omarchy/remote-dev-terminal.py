@@ -1566,8 +1566,11 @@ class App(Gtk.Window):
             elif kind == "agents":
                 self.push_agent_list()
             if kind == "hosts":
-                self.push_host_profile(items[index] if action == "edit" else items[-1])
-                self.push_host_state(items[index] if action == "edit" else items[-1])
+                target_host = items[index] if action == "edit" else items[-1]
+                target_host.pop("_resolved", None)
+                ssh_address(target_host, force=True)
+                self.push_host_profile(target_host)
+                self.push_host_state(target_host)
                 self.refresh_all_shared()
             if kind == "hosts" and action == "add":
                 self.hosts.set_active(len(items) - 1)

@@ -338,7 +338,12 @@ class SshTerminalController(
         while (running.get()) {
             try {
                 connectedAt = 0L
-                val candidates = task.host.endpoints()
+                val resolved = HostRouteResolver.getRoute(task.host.id)
+                val allCandidates = task.host.endpoints()
+                val candidates = if (resolved != null) {
+                    val matched = allCandidates.firstOrNull { it.address == resolved.address && it.port == resolved.port }
+                    if (matched != null) listOf(matched) + allCandidates.filterNot { it == matched } else allCandidates
+                } else allCandidates
                 val initialCandidate = candidates.firstOrNull()
                 onStatus(if (retry == 0) "正在连接 ${initialCandidate?.let { "${it.address}:${it.port}" } ?: "${task.host.address}:${task.host.port}"}" else "连接中断 · 正在重连 ${retry}…")
                 val jsch = JSch()

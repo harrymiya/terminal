@@ -69,11 +69,17 @@ data class HostRoute(
 
 object HostRouteResolver {
     private val activeRoutes = androidx.compose.runtime.mutableStateMapOf<String, HostRoute>()
+    private val resolvedHostIds = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
     fun getRoute(hostId: String): HostRoute? = activeRoutes[hostId]
 
     fun updateRoute(hostId: String, route: HostRoute) {
         activeRoutes[hostId] = route
+        resolvedHostIds.add(hostId)
+    }
+
+    fun invalidate(hostId: String) {
+        resolvedHostIds.remove(hostId)
     }
 
     fun isPortReachable(address: String, port: Int, timeoutMs: Int): Boolean {
@@ -88,7 +94,10 @@ object HostRouteResolver {
         }
     }
 
-    suspend fun resolveHostRoute(host: HostProfile): HostRoute = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+    suspend fun resolveHostRoute(host: HostProfile, force: Boolean = false): HostRoute = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+        if (!force && resolvedHostIds.contains(host.id)) {
+            activeRoutes[host.id]?.let { return@withContext it }
+        }
         val candidates = host.endpoints()
         for (ep in candidates) {
             val timeout = if (ep.isLan) 1200 else 1800
@@ -96,6 +105,7 @@ object HostRouteResolver {
                 val route = HostRoute(ep.address, ep.port, ep.isLan, reachable = true)
                 kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
                     activeRoutes[host.id] = route
+                    resolvedHostIds.add(host.id)
                 }
                 return@withContext route
             }
@@ -104,6 +114,7 @@ object HostRouteResolver {
         val route = HostRoute(fallback.address, fallback.port, fallback.isLan, reachable = false)
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
             activeRoutes[host.id] = route
+            resolvedHostIds.add(host.id)
         }
         route
     }
