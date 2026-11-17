@@ -257,6 +257,7 @@ private class TerminalSessionState(var task: TerminalTask, private val mainHandl
     var handledPromptSignature by mutableStateOf<String?>(null)
     var autoEnterAwaitingResponse = false
     var lastOutputAt by mutableStateOf(0L)
+    val startedAt = android.os.SystemClock.elapsedRealtime()
     var isStreaming by mutableStateOf(false)
     var codexQuota by mutableStateOf<List<Pair<Int, Int>>?>(null)
     var hostFingerprint by mutableStateOf<String?>(null)
@@ -734,6 +735,11 @@ private fun RemoteTerminalApp(store: LocalStore) {
                     runCatching { withContext(SyncClient.dispatcher) { SyncClient.list(host) } }
                         .onSuccess { items ->
                             startupShared = startupShared.filterNot { it.first.id == host.id } + items.map { host to it }
+                            val remoteIds = items.map { it.optString("id") }.toSet()
+                            sessions.toList().filter { session ->
+                                session.task.host.id == host.id && session.task.id.replace("-", "") !in remoteIds &&
+                                    android.os.SystemClock.elapsedRealtime() - session.startedAt > 15_000L
+                            }.forEach(::closeSession)
                             val hadSessions = sessions.isNotEmpty()
                             items.forEach { item -> openSharedSession(host, item, activate = false) }
                             if (!hadSessions && sessions.isNotEmpty() && route == AppRoute.HOME) { activePage = 0; route = AppRoute.TERMINAL }

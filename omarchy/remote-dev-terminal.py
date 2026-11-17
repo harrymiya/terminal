@@ -1840,6 +1840,10 @@ class App(Gtk.Window):
                         sessions = []
                         self.shared_by_host[key] = result
                     if isinstance(sessions, list):
+                        remote_ids = {item.get("id") for item in sessions}
+                        for session in list(self.sessions):
+                            if session.get("key", (None,))[0] == key and session.get("id") not in remote_ids and time.monotonic() - session.get("started_at", 0) > 15:
+                                session.get("close_button").clicked()
                         for item in sessions:
                             if len(self.sessions) < 8 and not any(session["id"] == item["id"] for session in self.sessions):
                                 self.open_terminal(None, snapshot, item, activate=False)
@@ -2295,6 +2299,7 @@ class App(Gtk.Window):
             shutil.rmtree(socket_dir, ignore_errors=True)
         close.connect("clicked", close_tab)
         self.sessions.append({"terminal": terminal, "label": label, "key": key, "id": session_id, "state": state,
+                              "close_button": close, "started_at": time.monotonic(),
                               "quota_indicators": (hourly_img, weekly_img)})
         self.rebuild_view(selected=terminal if activate else None)
         def spawned(_terminal, _pid, error, *_):
