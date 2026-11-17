@@ -42,14 +42,22 @@ def make_quota_indicator():
     box.pack_start(battery, False, False, 0)
     box.pack_start(value, False, False, 0)
 
+    state = {"pct": None, "show_percent": True}
+
     def update(pct):
         pct = None if pct is None else max(0, min(100, pct))
+        state["pct"] = pct
         level.set_value(pct if pct is not None else 0)
-        value.set_text("--" if pct is None else f"{round(pct)}%")
+        value.set_text("--" if pct is None else f"{round(pct)}{'%' if state['show_percent'] else ''}")
         context = level.get_style_context()
         for name in ("quota-unknown", "quota-low", "quota-warning", "quota-ok"):
             context.remove_class(name)
         context.add_class("quota-unknown" if pct is None else "quota-low" if pct < 5 else "quota-warning" if pct < 20 else "quota-ok")
+    def set_show_percent(show):
+        state["show_percent"] = show
+        update(state["pct"])
+
+    box.set_show_percent = set_show_percent
     update(None)
     return box, update
 
@@ -316,6 +324,8 @@ class App(Gtk.Window):
                 box-shadow: 0 0 8px #ff9800, 0 2px 14px rgba(255, 152, 0, 0.7);
                 animation: orange-glow-breath 1.8s infinite ease-in-out;
             }
+            paned.sidebar-paned > separator { background-color: #243546; min-width: 6px; }
+            paned.sidebar-paned > separator:hover { background-color: #86dbb8; }
             paned.tile-paned > separator { background-color: #243546; margin: 0; padding: 0; }
             paned.tile-paned.horizontal > separator { min-width: 2px; }
             paned.tile-paned.vertical > separator { min-height: 2px; }
@@ -359,11 +369,16 @@ class App(Gtk.Window):
         '''
         self.apply_scale_css()
         Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), self.css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
-        root = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        root = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
+        root.get_style_context().add_class("sidebar-paned")
+        self.sidebar_paned = root
+        self.sidebar_width_timer = None
+        saved_width = self.data.get("sidebar_width")
+        self.sidebar_width = saved_width if isinstance(saved_width, int) and 200 <= saved_width <= 2000 else self.sidebar_target_width() + 32
         self.add(root)
         self.sidebar_revealer = Gtk.Revealer(reveal_child=True)
         self.sidebar_revealer.set_transition_type(Gtk.RevealerTransitionType.SLIDE_RIGHT)
-        root.pack_start(self.sidebar_revealer, False, False, 0)
+        root.pack1(self.sidebar_revealer, resize=False, shrink=False)
         sidebar_frame = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         sidebar_frame.get_style_context().add_class("sidebar")
         self.sidebar_revealer.add(sidebar_frame)
@@ -450,7 +465,9 @@ class App(Gtk.Window):
         hint.get_style_context().add_class("subtitle")
         sidebar.pack_start(hint, False, False, 0)
         workspace = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        root.pack_start(workspace, True, True, 0)
+        root.pack2(workspace, resize=True, shrink=False)
+        root.set_position(self.sidebar_width)
+        root.connect("notify::position", self.sidebar_width_changed)
         toolbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         toolbar.get_style_context().add_class("toolbar")
         workspace.pack_start(toolbar, False, False, 0)
@@ -462,7 +479,7 @@ class App(Gtk.Window):
         menu_content.pack_start(Gtk.Label(label="菜单"), False, False, 0)
         menu.add(menu_content)
         menu.set_active(True)
-        menu.connect("toggled", lambda button: self.sidebar_revealer.set_reveal_child(button.get_active()))
+        menu.connect("toggled", self.toggle_sidebar)
         toolbar.pack_start(menu, False, False, 0)
         title = Gtk.Label(label="工作区", xalign=0)
         title.get_style_context().add_class("workspace-title")
@@ -552,6 +569,34 @@ class App(Gtk.Window):
         self.layout_button.set_label(layout_labels.get(self.tile_layout, "⊞  切换布局 · 网格"))
         self.persist()
         self.rebuild_view()
+
+    def toggle_sidebar(self, button):
+        if button.get_active():
+            self.sidebar_revealer.show()
+            self.sidebar_revealer.set_reveal_child(True)
+            self.sidebar_paned.set_position(self.sidebar_width)
+        else:
+            self.sidebar_revealer.set_reveal_child(False)
+            self.sidebar_revealer.hide()
+            self.sidebar_paned.set_position(0)
+
+    def sidebar_width_changed(self, paned, _property):
+        if not self.sidebar_revealer.get_visible() or not paned.get_mapped():
+            return
+        width = paned.get_position()
+        minimum = max(200, paned.get_property("min-position"))
+        if width < minimum:
+            paned.set_position(minimum)
+            return
+        self.sidebar_width = width
+        if self.sidebar_width_timer:
+            GLib.source_remove(self.sidebar_width_timer)
+        def save_width():
+            self.sidebar_width_timer = None
+            self.data["sidebar_width"] = self.sidebar_width
+            self.persist()
+            return False
+        self.sidebar_width_timer = GLib.timeout_add(500, save_width)
 
     def sidebar_target_width(self):
         if self.scale >= 100:
@@ -841,6 +886,8 @@ class App(Gtk.Window):
         for child in self.grid.get_children():
             self.grid.remove(child)
         for session in self.sessions:
+            for indicator in session.get("quota_indicators", ()):
+                indicator.set_show_percent(not self.tiled)
             session["terminal"]._tile_frame = None
             session["terminal"]._glow_bar = None
             session["terminal"]._tab_glow_bar = None
@@ -1720,7 +1767,8 @@ class App(Gtk.Window):
             subprocess.Popen(["ssh", "-S", socket_path, "-O", "exit", "-p", str(host["port"]), "-l", host["username"], "--", host["address"]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             shutil.rmtree(socket_dir, ignore_errors=True)
         close.connect("clicked", close_tab)
-        self.sessions.append({"terminal": terminal, "label": label, "key": key, "id": session_id, "state": state})
+        self.sessions.append({"terminal": terminal, "label": label, "key": key, "id": session_id, "state": state,
+                              "quota_indicators": (hourly_img, weekly_img)})
         self.rebuild_view(selected=terminal if activate else None)
         def spawned(_terminal, _pid, error, *_):
             if error:

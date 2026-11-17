@@ -48,13 +48,17 @@ class UbuntuWindowAndTabsTest(unittest.TestCase):
         quota = Gtk.Label(label='余量 50%')
         header.pack_start(name, True, True, 0)
         header.pack_start(quota, False, False, 0)
-        self.app.sessions = [{'terminal': terminal, 'label': header, 'key': 'k', 'id': 'id', 'state': {}}]
+        indicator, update = app_module.make_quota_indicator()
+        update(85)
+        header.pack_start(indicator, False, False, 0)
+        self.app.sessions = [{'terminal': terminal, 'label': header, 'key': 'k', 'id': 'id', 'state': {}, 'quota_indicators': (indicator,)}]
         self.app.show_all()
         for tiled in (True, False, True, False, True, False):
             self.app.tiled = tiled
             self.app.rebuild_view()
-            self.assertEqual(header.get_children(), [name, quota])
+            self.assertEqual(header.get_children(), [name, quota, indicator])
             self.assertEqual(quota.get_text(), '余量 50%')
+            self.assertEqual(indicator.get_children()[1].get_text(), '85' if tiled else '85%')
             if not tiled:
                 self.assertEqual(self.app.tabs.get_n_pages(), 1)
                 self.assertIsNotNone(self.app.tabs.get_tab_label(terminal))
@@ -62,6 +66,28 @@ class UbuntuWindowAndTabsTest(unittest.TestCase):
                     Gtk.main_iteration()
                 self.assertTrue(name.get_mapped(), 'tab name must actually be displayed')
                 self.assertTrue(quota.get_mapped(), 'tab quota must actually be displayed')
+
+    def test_sidebar_width_clamps_and_restores_after_hiding(self):
+        Gtk = app_module.Gtk
+        self.app.show_all()
+        while Gtk.events_pending():
+            Gtk.main_iteration()
+        paned = self.app.sidebar_paned
+        self.assertIsInstance(paned, Gtk.Paned)
+        paned.set_position(1)
+        self.assertGreaterEqual(paned.get_position(), max(200, paned.get_property('min-position')))
+        paned.set_position(400)
+        self.assertEqual(self.app.sidebar_width, 400)
+        toggle = Gtk.ToggleButton()
+        self.app.toggle_sidebar(toggle)
+        self.assertFalse(self.app.sidebar_revealer.get_visible())
+        toggle.set_active(True)
+        self.app.toggle_sidebar(toggle)
+        self.assertTrue(self.app.sidebar_revealer.get_visible())
+        self.assertEqual(paned.get_position(), 400)
+        if self.app.sidebar_width_timer:
+            app_module.GLib.source_remove(self.app.sidebar_width_timer)
+            self.app.sidebar_width_timer = None
 
     def test_sidebar_edit_mode_hides_and_restores_management_controls(self):
         host = {'name': 'host', 'address': 'host', 'port': 22, 'username': 'user',
@@ -143,6 +169,14 @@ class UbuntuWindowAndTabsTest(unittest.TestCase):
             self.assertEqual(level.get_value(), pct or 0)
             self.assertTrue(level.get_style_context().has_class(style))
         self.assertIsInstance(level, Gtk.LevelBar)
+        indicator.set_show_percent(False)
+        self.assertEqual(text.get_text(), '85')
+        update(3)
+        self.assertEqual(text.get_text(), '3')
+        indicator.set_show_percent(True)
+        self.assertEqual(text.get_text(), '3%')
+        update(None)
+        self.assertEqual(text.get_text(), '--')
 
 
 if __name__ == '__main__':
