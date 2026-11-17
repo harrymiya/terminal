@@ -219,8 +219,8 @@ class LocalStore(context: Context) {
                 dirs.getJSONObject(n).let { ProjectDirectory(it.getString("id"), it.getString("name"), it.getString("path"), it.optString("icon", "📁")) }
             }
             val port = item.optInt("port", 22)
-            val lanPort = item.optInt("lan_port", port)
-            val externalPort = item.optInt("external_port", port)
+            val lanPort = if (item.has("lan_port") && !item.isNull("lan_port")) item.optInt("lan_port", port) else port
+            val externalPort = if (item.has("external_port") && !item.isNull("external_port")) item.optInt("external_port", port) else port
             HostProfile(
                 id = item.getString("id"), name = item.getString("name"), address = item.optString("external_address", item.getString("address")),
                 port = port, username = item.getString("username"),

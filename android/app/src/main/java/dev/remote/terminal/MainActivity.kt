@@ -474,8 +474,8 @@ private fun RemoteTerminalApp(store: LocalStore) {
                     idRemaps[local.id] = profile.optString("id", local.id)
                     val lan = profile.optString("lan_address")
                     val external = profile.optString("external_address")
-                    val lanPort = profile.optInt("lan_port", profile.optInt("port", local.lanPort))
-                    val externalPort = profile.optInt("external_port", profile.optInt("port", local.externalPort))
+                    val lanPort = if (profile.has("lan_port") && !profile.isNull("lan_port")) profile.optInt("lan_port", local.lanPort) else local.lanPort
+                    val externalPort = if (profile.has("external_port") && !profile.isNull("external_port")) profile.optInt("external_port", local.externalPort) else local.externalPort
                     local.copy(id = profile.optString("id", local.id), name = profile.optString("name", local.name),
                         address = external.ifBlank { lan }, lanAddress = lan, externalAddress = external,
                         port = profile.optInt("port", local.port), lanPort = lanPort, externalPort = externalPort,
@@ -487,8 +487,8 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 val lan = profile.optString("lan_address")
                 val external = profile.optString("external_address")
                 val port = profile.optInt("port", 22)
-                val lanPort = profile.optInt("lan_port", port)
-                val externalPort = profile.optInt("external_port", port)
+                val lanPort = if (profile.has("lan_port") && !profile.isNull("lan_port")) profile.optInt("lan_port", port) else port
+                val externalPort = if (profile.has("external_port") && !profile.isNull("external_port")) profile.optInt("external_port", port) else port
                 result.add(HostProfile(profile.optString("id"), profile.optString("name", "主机"), external.ifBlank { lan },
                     port, profile.optString("username"), icon = profile.optString("icon", "⌘"),
                     lanAddress = lan, externalAddress = external, legacyAddress = "",
@@ -2016,14 +2016,14 @@ private fun SettingsScreen(
 
 @Composable
 private fun HostEditorDialog(initial: HostProfile?, onDismiss: () -> Unit, onSave: (HostProfile) -> Unit) {
-    var name by remember(initial?.id) { mutableStateOf(initial?.name.orEmpty()) }
-    var lanAddress by remember(initial?.id) { mutableStateOf(initial?.lanAddress.orEmpty()) }
-    var lanPort by remember(initial?.id) { mutableStateOf(initial?.lanPort?.toString() ?: initial?.port?.toString() ?: "22") }
-    var externalAddress by remember(initial?.id) { mutableStateOf(initial?.externalAddress.orEmpty()) }
-    var externalPort by remember(initial?.id) { mutableStateOf(initial?.externalPort?.toString() ?: initial?.port?.toString() ?: "22") }
-    var username by remember(initial?.id) { mutableStateOf(initial?.username.orEmpty()) }
-    var password by remember(initial?.id) { mutableStateOf(initial?.password.orEmpty()) }
-    var icon by remember(initial?.id) { mutableStateOf(initial?.icon ?: "⌘") }
+    var name by remember(initial) { mutableStateOf(initial?.name.orEmpty()) }
+    var lanAddress by remember(initial) { mutableStateOf(initial?.lanAddress.orEmpty()) }
+    var lanPort by remember(initial) { mutableStateOf(initial?.lanPort?.toString() ?: "22") }
+    var externalAddress by remember(initial) { mutableStateOf(initial?.externalAddress.orEmpty()) }
+    var externalPort by remember(initial) { mutableStateOf(initial?.externalPort?.toString() ?: "22") }
+    var username by remember(initial) { mutableStateOf(initial?.username.orEmpty()) }
+    var password by remember(initial) { mutableStateOf(initial?.password.orEmpty()) }
+    var icon by remember(initial) { mutableStateOf(initial?.icon ?: "⌘") }
     EditorDialogFrame(if (initial == null) "添加主机" else "编辑主机", onDismiss, canSave = name.isNotBlank() && (lanAddress.isNotBlank() || externalAddress.isNotBlank()) && username.isNotBlank(), onConfirm = {
         val lan = lanAddress.trim()
         val external = externalAddress.trim()
