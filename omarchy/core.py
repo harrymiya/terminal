@@ -89,6 +89,39 @@ def save_config(data, path=None):
 
 
 
+def save_host_password(credential_id, password):
+    """Store an SSH password in the user's Secret Service keyring."""
+    try:
+        result = subprocess.run(
+            ["secret-tool", "store", "--label=Remote Dev Terminal SSH", "application", "remote-dev-terminal", "host", credential_id],
+            input=password, text=True, capture_output=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError("无法访问系统密钥环，请安装 secret-tool 并确保密钥环已解锁") from exc
+    if result.returncode:
+        raise RuntimeError("无法保存 SSH 密码到系统密钥环：" + (result.stderr.strip() or "密钥环不可用"))
+
+
+def clear_host_password(credential_id):
+    try:
+        result = subprocess.run(
+            ["secret-tool", "clear", "application", "remote-dev-terminal", "host", credential_id],
+            capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError("无法访问系统密钥环") from exc
+    if result.returncode:
+        raise RuntimeError("无法删除密钥环中的 SSH 密码：" + (result.stderr.strip() or "密钥环不可用"))
+
+
+def ssh_auth_environment(host, askpass_path):
+    env = os.environ.copy()
+    env.update(SSH_ASKPASS=str(askpass_path), SSH_ASKPASS_REQUIRE="force")
+    if host.get("credential_id"):
+        env["RDT_SSH_CREDENTIAL_ID"] = host["credential_id"]
+    else:
+        env.pop("RDT_SSH_CREDENTIAL_ID", None)
+    return env
+
+
 def sync_data_request(config, method, path, item=None):
     url = config.get("sync_url", "").rstrip("/")
     if not url.startswith(("http://", "https://")):

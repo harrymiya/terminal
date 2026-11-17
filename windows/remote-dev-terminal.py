@@ -18,7 +18,7 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("Vte", "2.91")
 gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Gtk, Vte, GLib, Gdk, GdkPixbuf
-from core import load_config, save_config, ssh_argv, auto_enter_signature, quota_agent, quota_remote_command, quota_from_codex, quota_from_agy, format_quota, upload_image, MAX_IMAGE_BYTES, sync_request, sync_data_request, sync_host_key, render_battery_pixbuf
+from core import load_config, save_config, ssh_argv, auto_enter_signature, quota_agent, quota_remote_command, quota_from_codex, quota_from_agy, format_quota, upload_image, MAX_IMAGE_BYTES, sync_request, sync_data_request, sync_host_key, render_battery_pixbuf, save_host_password, clear_host_password, ssh_auth_environment
 from version import VERSION
 
 
@@ -360,7 +360,7 @@ class App(Gtk.Window):
         self.delay = Gtk.SpinButton.new_with_range(1, 30, 1)
         self.delay.set_value(self.data.get("auto_enter_delay", 3))
         self.delay.connect("value-changed", self.save_settings)
-        hint = Gtk.Label(label="SSH 密码和密钥由系统 SSH 处理。\n关闭标签会断开连接；tmux 会话保留在远端。", xalign=0)
+        hint = Gtk.Label(label="SSH 密码可保存在系统密钥环中。\n关闭标签会断开连接；tmux 会话保留在远端。", xalign=0)
         hint.set_line_wrap(True)
         hint.get_style_context().add_class("subtitle")
         sidebar.pack_start(hint, False, False, 0)
@@ -970,6 +970,12 @@ class App(Gtk.Window):
             result = dialog.run()
             dialog.destroy()
             if result == Gtk.ResponseType.YES:
+                if kind == "hosts" and items[index].get("credential_id"):
+                    try:
+                        clear_host_password(items[index]["credential_id"])
+                    except RuntimeError as exc:
+                        self.message("删除密码失败", str(exc))
+                        return
                 items.pop(index)
                 if kind == "agents":
                     host["selected_agent"] = min(index, max(0, len(items) - 1))
@@ -992,6 +998,18 @@ class App(Gtk.Window):
             entry = Gtk.Entry(text=str(old.get(key, "")))
             grid.attach(entry, 1, row, 1, 1)
             entries[key] = entry
+        password_entry = None
+        clear_password = None
+        if kind == "hosts":
+            row = len(fields)
+            grid.attach(Gtk.Label(label="SSH 密码", xalign=0), 0, row, 1, 1)
+            password_entry = Gtk.Entry()
+            password_entry.set_visibility(False)
+            password_entry.set_placeholder_text("留空保留已保存密码" if old.get("credential_id") else "可留空，使用密钥或连接时输入")
+            grid.attach(password_entry, 1, row, 1, 1)
+            if old.get("credential_id"):
+                clear_password = Gtk.CheckButton(label="删除已保存的密码")
+                grid.attach(clear_password, 1, row + 1, 1, 1)
         if kind == "directories":
             browse = Gtk.Button(label="浏览远端目录…")
             browse.connect("clicked", lambda *_: self.browse_directories(host, entries["path"], dialog))
@@ -1010,10 +1028,22 @@ class App(Gtk.Window):
                     values["directories"] = old.get("directories", [])
                     values["agents"] = old.get("agents", [dict(agent) for agent in self.data["agents"]])
                     values["selected_agent"] = old.get("selected_agent", 0)
+                    credential_id = old.get("credential_id")
+                    password = password_entry.get_text()
+                    if clear_password and clear_password.get_active():
+                        if password:
+                            raise ValueError("请输入新密码或选择删除密码，不能同时操作")
+                        clear_host_password(credential_id)
+                        credential_id = None
+                    elif password:
+                        credential_id = credential_id or uuid.uuid4().hex
+                        save_host_password(credential_id, password)
+                    if credential_id:
+                        values["credential_id"] = credential_id
                 if kind == "directories" and not values["path"].startswith("/"):
                     raise ValueError("请填写远端绝对路径")
-            except ValueError as exc:
-                self.message("输入无效", str(exc))
+            except (ValueError, RuntimeError) as exc:
+                self.message("保存失败", str(exc))
                 continue
             if action == "edit":
                 items[index] = values
@@ -1065,8 +1095,7 @@ class App(Gtk.Window):
                 # The first NUL-delimited item is canonical cwd, followed by directory names.
                 command = "cd -- " + (shlex.quote(requested) if requested else '"$HOME"') + " && printf '%s\\0' \"$PWD\" && find -L . -mindepth 1 -maxdepth 1 -type d -printf '%f\\0'"
                 argv = ["ssh", "-o", "ConnectTimeout=20", "-p", str(host["port"]), "-l", host["username"], "--", host["address"], command]
-                env = os.environ.copy()
-                env.update(SSH_ASKPASS=str(Path(__file__).with_name("askpass.py")), SSH_ASKPASS_REQUIRE="force")
+                env = ssh_auth_environment(host, Path(__file__).with_name("askpass.py"))
                 try:
                     proc = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, timeout=60, start_new_session=True)
                     if proc.returncode:
@@ -1410,7 +1439,6 @@ class App(Gtk.Window):
         label.pack_start(Gtk.Label(label=directory["name"] + " · " + agent["name"]), True, True, 0)
         kind, quota_executable = quota_agent(agent["command"])
         quota_box = Gtk.Box(spacing=3)
-        quota_box.set_no_show_all(True)
         hourly_img = Gtk.Image.new_from_pixbuf(render_battery_pixbuf(None))
         sep = Gtk.Label(label="·")
         sep.get_style_context().add_class("subtitle")
@@ -1424,6 +1452,7 @@ class App(Gtk.Window):
         if kind:
             quota_box.show_all()
             days_label.hide()
+        quota_box.set_no_show_all(True)
         label.pack_start(quota_box, False, False, 0)
 
         def update_quota_display(result):
@@ -1733,7 +1762,9 @@ class App(Gtk.Window):
             state["last_output_at"] = time.monotonic()
             reconnect.hide()
             state["generation"] += 1
-            terminal.spawn_async(Vte.PtyFlags.DEFAULT, None, argv, None, GLib.SpawnFlags.SEARCH_PATH, None, None, -1, None, spawned, None)
+            auth_env = ssh_auth_environment(host, Path(__file__).with_name("askpass.py")) if host.get("credential_id") else None
+            envv = [f"{key}={value}" for key, value in auth_env.items()] if auth_env else None
+            terminal.spawn_async(Vte.PtyFlags.DEFAULT, None, argv, envv, GLib.SpawnFlags.SEARCH_PATH, None, None, -1, None, spawned, None)
             return False
         reconnect.connect("clicked", start)
         def child_exited(_terminal, status):

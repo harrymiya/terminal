@@ -6,5 +6,5 @@ if [[ ! -S /mnt/wslg/wayland-0 && ! -d /mnt/wslg ]]; then
     exit 1
 fi
 sudo apt-get update
-sudo apt-get install -y python3 python3-gi gir1.2-gtk-3.0 gir1.2-vte-2.91 openssh-client
+sudo apt-get install -y python3 python3-gi gir1.2-gtk-3.0 gir1.2-vte-2.91 openssh-client libsecret-tools gnome-keyring
 bash "$source_dir/install.sh"

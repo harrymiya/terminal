@@ -15,7 +15,7 @@
 ## 安装和启动
 
 ```bash
-sudo pacman -S --needed python python-gobject gtk3 vte3 openssh
+sudo pacman -S --needed python python-gobject gtk3 vte3 openssh libsecret gnome-keyring
 ./omarchy/install.sh
 ```
 
@@ -25,7 +25,7 @@ sudo pacman -S --needed python python-gobject gtk3 vte3 openssh
 python3 omarchy/remote-dev-terminal.py
 ```
 
-配置保存在 `${XDG_CONFIG_HOME:-~/.config}/remote-dev-terminal/config.json`。认证和主机密钥检查交给系统 OpenSSH；首次连接时确认主机指纹，并根据提示输入密码或密钥口令。推荐使用 `ssh-keygen` 和 `ssh-copy-id` 配置密钥。目录浏览需要远端提供 GNU find；密码和指纹确认会通过 SSH 提示窗口进行。远端需安装 tmux 才能保留断线会话。关闭标签或应用后，当前版本没有恢复旧标签的界面；远端 tmux 会话不会被自动删除。
+配置保存在 `${XDG_CONFIG_HOME:-~/.config}/remote-dev-terminal/config.json`。主机配置可选保存 SSH 密码，密码存入当前用户的系统密钥环，需要可用且已解锁的 Secret Service。认证和主机密钥检查交给系统 OpenSSH；首次连接时确认主机指纹，并根据提示输入密码或密钥口令。推荐使用 `ssh-keygen` 和 `ssh-copy-id` 配置密钥。目录浏览需要远端提供 GNU find；密码和指纹确认会通过 SSH 提示窗口进行。远端需安装 tmux 才能保留断线会话。关闭标签或应用后，当前版本没有恢复旧标签的界面；远端 tmux 会话不会被自动删除。
 
 终端中用鼠标拖选文字后会自动复制到系统剪贴板，也可以按 Ctrl+Shift+C 复制选中的文字。tmux 会话启用鼠标模式以支持滚轮；Codex 会话中滚轮通过 Page Up/Down 翻页。选中文字时按住 Shift 再拖选。按 Ctrl+Shift+V 可粘贴到终端；agy 会话中也可按 Ctrl+V 粘贴文字。
 

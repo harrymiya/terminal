@@ -14,6 +14,6 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 
 脚本会在 Ubuntu 内请求 sudo 密码、安装 GTK/VTE 和 OpenSSH，然后为当前用户创建 **Remote Dev Terminal** 开始菜单快捷方式。若发行版名称不是 `Ubuntu`，先通过 `wsl -l -v` 查看名称，再使用 `-Distro "发行版名称"` 参数。整个安装目录必须可从 WSL 访问（例如 Windows 本地磁盘）。
 
-更新时替换整个 `windows` 文件夹并重新运行安装命令。配置保存在所选 WSL 发行版的 `~/.config/remote-dev-terminal/config.json`，更新不会删除配置。远端需安装 tmux 才能在断线后恢复会话；目录浏览需要 GNU find。关闭标签或程序后，目前不能从界面恢复旧标签。
+更新时替换整个 `windows` 文件夹并重新运行安装命令。配置保存在所选 WSL 发行版的 `~/.config/remote-dev-terminal/config.json`，更新不会删除配置。主机配置可选保存 SSH 密码，密码存入 WSL 中当前用户的系统密钥环，需要可用且已解锁的 Secret Service。远端需安装 tmux 才能在断线后恢复会话；目录浏览需要 GNU find。关闭标签或程序后，目前不能从界面恢复旧标签。
 
 本版本尚未在真实 Windows/WSLg 环境和远端 SSH 主机上完成端到端验证。
