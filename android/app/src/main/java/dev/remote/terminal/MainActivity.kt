@@ -1109,11 +1109,14 @@ private fun HomeScreen(
                             Column(Modifier.weight(1f, fill = false)) {
                                 Text(host.name, color = White, fontWeight = FontWeight.SemiBold, fontSize = 13.sp, maxLines = 1)
                                 val route = HostRouteResolver.getRoute(host.id)
+                                val hasLan = host.lanAddress.isNotBlank()
+                                val hasExt = host.externalAddress.isNotBlank()
+                                val isSingle = !hasLan || !hasExt || host.lanAddress.trim() == host.externalAddress.trim()
                                 val routeText = when {
-                                    route != null && route.reachable -> "${if (route.isLan) "内网" else "外网"} ${route.address}:${route.port}"
+                                    route != null && route.reachable -> if (isSingle) "${route.address}:${route.port}" else "${if (route.isLan) "内网" else "外网"} ${route.address}:${route.port}"
                                     route != null && !route.reachable -> "离线 ${route.address}:${route.port}"
-                                    host.lanAddress.isNotBlank() -> "优先内网 ${host.lanAddress}:${host.lanPort}"
-                                    else -> "${host.address}:${host.port}"
+                                    isSingle -> "${host.address.ifBlank { host.lanAddress.ifBlank { host.externalAddress } }}:${host.port}"
+                                    else -> "优先内网 ${host.lanAddress}:${host.lanPort}"
                                 }
                                 val routeColor = when {
                                     route?.reachable == true -> if (route.isLan) Mint else Blue
@@ -1236,11 +1239,14 @@ private fun ManageScreen(
                             Column(Modifier.weight(1f).padding(start = 8.dp)) {
                                 Text(host.name, color = White, fontWeight = FontWeight.Medium, fontSize = 13.sp)
                                 val route = HostRouteResolver.getRoute(host.id)
+                                val hasLan = host.lanAddress.isNotBlank()
+                                val hasExt = host.externalAddress.isNotBlank()
+                                val isSingle = !hasLan || !hasExt || host.lanAddress.trim() == host.externalAddress.trim()
                                 val routeDesc = when {
-                                    route != null && route.reachable -> "${host.username} · ${if (route.isLan) "内网" else "外网"} ${route.address}:${route.port}"
+                                    route != null && route.reachable -> "${host.username} · ${if (isSingle) "" else if (route.isLan) "内网 " else "外网 "}${route.address}:${route.port}"
                                     route != null && !route.reachable -> "${host.username} · 离线 (${route.address}:${route.port})"
-                                    host.lanAddress.isNotBlank() -> "${host.username} · 优先内网 ${host.lanAddress}:${host.lanPort}"
-                                    else -> "${host.username}@${host.address}:${host.port}"
+                                    isSingle -> "${host.username}@${host.address.ifBlank { host.lanAddress.ifBlank { host.externalAddress } }}:${host.port}"
+                                    else -> "${host.username} · 优先内网 ${host.lanAddress}:${host.lanPort}"
                                 }
                                 val routeColor = when {
                                     route?.reachable == true -> if (route.isLan) Mint else Blue
@@ -2049,21 +2055,27 @@ private fun SettingsScreen(
 
 @Composable
 private fun HostEditorDialog(initial: HostProfile?, onDismiss: () -> Unit, onSave: (HostProfile) -> Unit) {
+    val initialLan = initial?.lanAddress.orEmpty()
+    val initialExt = initial?.externalAddress.orEmpty()
+    val initialAddr = initial?.address.orEmpty()
+    val defaultLan = if (initialLan.isBlank() && initialExt.isBlank()) initialAddr else initialLan
+    val defaultPort = initial?.port?.toString() ?: "22"
     var name by remember(initial) { mutableStateOf(initial?.name.orEmpty()) }
-    var lanAddress by remember(initial) { mutableStateOf(initial?.lanAddress.orEmpty()) }
-    var lanPort by remember(initial) { mutableStateOf(initial?.lanPort?.toString() ?: "22") }
-    var externalAddress by remember(initial) { mutableStateOf(initial?.externalAddress.orEmpty()) }
+    var lanAddress by remember(initial) { mutableStateOf(defaultLan) }
+    var lanPort by remember(initial) { mutableStateOf(if (initialLan.isBlank() && initialExt.isBlank()) defaultPort else (initial?.lanPort?.toString() ?: "22")) }
+    var externalAddress by remember(initial) { mutableStateOf(initialExt) }
     var externalPort by remember(initial) { mutableStateOf(initial?.externalPort?.toString() ?: "22") }
     var username by remember(initial) { mutableStateOf(initial?.username.orEmpty()) }
     var password by remember(initial) { mutableStateOf(initial?.password.orEmpty()) }
     var icon by remember(initial) { mutableStateOf(initial?.icon ?: "⌘") }
-    EditorDialogFrame(if (initial == null) "添加主机" else "编辑主机", onDismiss, canSave = name.isNotBlank() && (lanAddress.isNotBlank() || externalAddress.isNotBlank()) && username.isNotBlank(), onConfirm = {
+    val primary = lanAddress.trim().ifBlank { externalAddress.trim() }
+    EditorDialogFrame(if (initial == null) "添加主机" else "编辑主机", onDismiss, canSave = name.isNotBlank() && primary.isNotBlank() && username.isNotBlank(), onConfirm = {
         val lan = lanAddress.trim()
         val external = externalAddress.trim()
         val lPort = lanPort.toIntOrNull()?.takeIf { it in 1..65535 } ?: 22
         val ePort = externalPort.toIntOrNull()?.takeIf { it in 1..65535 } ?: 22
-        val legacyPort = if (external.isNotBlank() && lan.isBlank()) ePort else lPort
-        onSave(HostProfile(initial?.id ?: UUID.randomUUID().toString(), name.trim(), external.ifBlank { lan }, legacyPort, username.trim(), password, icon.ifBlank { "⌘" }, initial?.directories.orEmpty(), initial?.syncFingerprint.orEmpty(), initial?.syncId.orEmpty(), lan, external, initial?.legacyAddress ?: initial?.address.orEmpty(), lanPort = lPort, externalPort = ePort))
+        val legacyPort = if (lan.isNotBlank()) lPort else ePort
+        onSave(HostProfile(initial?.id ?: UUID.randomUUID().toString(), name.trim(), lan.ifBlank { external }, legacyPort, username.trim(), password, icon.ifBlank { "⌘" }, initial?.directories.orEmpty(), initial?.syncFingerprint.orEmpty(), initial?.syncId.orEmpty(), lan, external, initial?.legacyAddress ?: initial?.address.orEmpty(), lanPort = lPort, externalPort = ePort))
     }) {
         OutlinedTextField(name, { name = it }, label = { Text("主机名称") }, placeholder = { Text("例如：Mac Studio") }, singleLine = true, modifier = Modifier.fillMaxWidth())
         IconPicker(icon, { icon = it }, listOf("⌘", "🖥️", "☁️", "🐧", "⚡", "🧪", "🏠", "💻", "🔧", "🌐"))

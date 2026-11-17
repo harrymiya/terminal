@@ -72,6 +72,7 @@ class App(Gtk.Window):
         self.sync_pending = set()
         self.workspace_versions = {}
         self.workspace_dirty = set()
+        self.dirty_host_profiles = set()
         self.host_profile_sync_pending = False
         self.sync_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="session-sync")
         try:
@@ -1140,13 +1141,21 @@ class App(Gtk.Window):
             row.set_hexpand(True)
             active_address = ssh_address(item)
             active_port = item.get("_active_port", item.get("port", 22))
-            route = "内网" if active_address and active_address == item.get("lan_address") else "外网" if active_address else "未连接"
-            button = Gtk.RadioButton.new_with_label_from_widget(host_radio_group, item["name"] + "  ·  " + route + " " + (active_address or item.get("lan_address") or item.get("external_address") or item.get("address", "")))
+            has_lan = bool(item.get("lan_address"))
+            has_ext = bool(item.get("external_address"))
+            is_single = not has_lan or not has_ext or item.get("lan_address") == item.get("external_address")
+            if is_single:
+                route_desc = f"{active_address}:{active_port}" if active_address else (item.get("lan_address") or item.get("external_address") or item.get("address", ""))
+                route = active_address or "在线"
+            else:
+                route = "内网" if active_address and active_address == item.get("lan_address") else "外网" if active_address else "未连接"
+                route_desc = f"{route} {active_address or item.get('lan_address') or item.get('external_address') or item.get('address', '')}"
+            button = Gtk.RadioButton.new_with_label_from_widget(host_radio_group, item["name"] + "  ·  " + route_desc)
             button.set_mode(False)
             if host_radio_group is None:
                 host_radio_group = button
             button.set_active(index == selected)
-            button.set_tooltip_text(f"{item.get('username', '')}@{active_address or item.get('lan_address') or item.get('external_address') or item.get('address', '')}:{active_port}\n当前连接：{route}\n点击切换主机")
+            button.set_tooltip_text(f"{item.get('username', '')}@{active_address or item.get('lan_address') or item.get('external_address') or item.get('address', '')}:{active_port}\n当前状态：{route}\n点击切换主机")
             button.get_style_context().add_class("host-button")
             self.fit_sidebar_label(button)
             button.set_hexpand(True)
@@ -1396,6 +1405,8 @@ class App(Gtk.Window):
             return
         old = dict(items[index]) if action == "edit" else {"port": 22}
         if kind == "hosts":
+            if not old.get("lan_address") and not old.get("external_address") and old.get("address"):
+                old["lan_address"] = old.get("address", "")
             old.setdefault("lan_port", old.get("port", 22)); old.setdefault("external_port", old.get("port", 22))
         fields = {"hosts": [("name", "名称"), ("lan_address", "内网地址"), ("lan_port", "内网端口"), ("external_address", "外网地址"), ("external_port", "外网端口"), ("username", "用户名")], "directories": [("name", "名称"), ("path", "远端绝对路径")], "agents": [("name", "名称"), ("command", "启动命令")]}[kind]
         dialog = Gtk.Dialog(title="编辑" if action == "edit" else "添加", transient_for=self, modal=True)
@@ -1449,9 +1460,11 @@ class App(Gtk.Window):
                 if any(not values.get(key) for key in required_fields) or (kind == "hosts" and not (values.get("lan_address") or values.get("external_address"))):
                     raise ValueError("请填写所有必填字段")
                 if kind == "hosts":
+                    primary = values.get("lan_address") or values.get("external_address")
                     values["lan_port"] = int(values["lan_port"] or old.get("port", 22))
                     values["external_port"] = int(values["external_port"] or old.get("port", 22))
-                    values["port"] = int(old.get("port", values["lan_port"]))
+                    values["port"] = int(values["external_port"] if (values.get("external_address") and not values.get("lan_address")) else values["lan_port"])
+                    values["address"] = primary or ""
                     if any(not 1 <= values[key] <= 65535 for key in ("lan_port", "external_port")) or any(v.startswith("-") for v in (values["lan_address"], values["external_address"])):
                         raise ValueError("主机地址或端口无效")
                     values["id"] = old.get("id") or uuid.uuid4().hex
@@ -1905,13 +1918,18 @@ class App(Gtk.Window):
     def push_host_profile(self, host):
         if not self.data.get("sync_url") or not self.data.get("sync_token"): return
         payload = self.host_profile_payload(host)
+        host_id = payload["id"]
+        self.dirty_host_profiles.add(host_id)
         def worker():
-            try: sync_data_request(self.data, "PUT", "/v1/hosts/" + payload["id"], payload)
+            try:
+                sync_data_request(self.data, "PUT", "/v1/hosts/" + host_id, payload)
+                self.dirty_host_profiles.discard(host_id)
             except Exception: pass
         self.sync_executor.submit(worker)
 
     def delete_host_profile(self, host_id):
         if not self.data.get("sync_url") or not self.data.get("sync_token"): return
+        self.dirty_host_profiles.discard(host_id)
         self.sync_executor.submit(lambda: sync_data_request(self.data, "DELETE", "/v1/hosts/" + str(host_id)))
 
     def sync_host_profiles(self):
@@ -1936,6 +1954,14 @@ class App(Gtk.Window):
                         if len(named) == 1: candidates = named
                     if candidates:
                         profile = candidates[0]; matched.add(profile.get("id"))
+                        if host.get("id") in self.dirty_host_profiles:
+                            payload = self.host_profile_payload(host)
+                            try:
+                                sync_data_request(config, "PUT", "/v1/hosts/" + payload["id"], payload)
+                                self.dirty_host_profiles.discard(host.get("id"))
+                            except Exception: pass
+                            result.append(host)
+                            continue
                         merged = dict(host)
                         merged.update({key: profile.get(key, merged.get(key, "")) for key in ("id", "name", "lan_address", "external_address", "lan_port", "external_port", "port", "username", "icon")})
                         merged["address"] = merged.get("external_address") or merged.get("lan_address") or ""

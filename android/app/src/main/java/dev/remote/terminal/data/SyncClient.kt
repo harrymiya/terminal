@@ -9,6 +9,8 @@ import org.json.JSONArray
 import kotlinx.coroutines.asCoroutineDispatcher
 import java.util.concurrent.Executors
 
+class SyncConflictException(val revision: Int, val body: JSONObject) : Exception("版本冲突(409)")
+
 object SyncClient {
     val dispatcher = Executors.newSingleThreadExecutor { runnable -> Thread(runnable, "session-sync").apply { isDaemon = true } }.asCoroutineDispatcher()
     @Volatile private var syncUrl: String = ""
@@ -51,7 +53,14 @@ object SyncClient {
                 connection.setRequestProperty("Content-Type", "application/json")
                 connection.outputStream.use { it.write(payload.toString().toByteArray(Charsets.UTF_8)) }
             }
-            check(connection.responseCode in 200..299) { "同步服务返回 ${connection.responseCode}" }
+            val code = connection.responseCode
+            if (code == 409) {
+                val errorText = connection.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
+                val errorBody = runCatching { JSONObject(errorText) }.getOrDefault(JSONObject())
+                val revision = errorBody.optInt("revision", 0)
+                throw SyncConflictException(revision, errorBody)
+            }
+            check(code in 200..299) { "同步服务返回 $code" }
             return JSONObject(connection.inputStream.bufferedReader().use { it.readText() })
         } finally { connection.disconnect() }
     }
@@ -156,7 +165,17 @@ object SyncClient {
     fun saveWorkspaces(host: HostProfile, directories: List<ProjectDirectory>, baseRevision: Int): JSONObject {
         val array = JSONArray()
         directories.forEach { array.put(JSONObject().put("id", it.id).put("name", it.name).put("path", it.path).put("icon", it.icon)) }
-        return request(host, "PUT", "/v1/workspaces/${workspaceKey(host)}", JSONObject().put("workspaces", array).put("base_revision", baseRevision))
+        var revision = baseRevision
+        var lastException: Exception? = null
+        for (attempt in 0 until 3) {
+            try {
+                return request(host, "PUT", "/v1/workspaces/${workspaceKey(host)}", JSONObject().put("workspaces", array).put("base_revision", revision))
+            } catch (e: SyncConflictException) {
+                lastException = e
+                revision = e.revision
+            }
+        }
+        throw lastException ?: IllegalStateException("工作区保存失败")
     }
 
     fun agentIdentity(): String = "account"
@@ -178,6 +197,16 @@ object SyncClient {
     fun saveAgents(host: HostProfile, agents: List<AgentPreset>, baseRevision: Int): JSONObject {
         val array = JSONArray()
         agents.forEach { array.put(JSONObject().put("id", it.id).put("name", it.name).put("command", it.command).put("icon", it.icon)) }
-        return request(host, "PUT", "/v1/agents/${agentIdentity()}", JSONObject().put("agents", array).put("base_revision", baseRevision))
+        var revision = baseRevision
+        var lastException: Exception? = null
+        for (attempt in 0 until 3) {
+            try {
+                return request(host, "PUT", "/v1/agents/${agentIdentity()}", JSONObject().put("agents", array).put("base_revision", revision))
+            } catch (e: SyncConflictException) {
+                lastException = e
+                revision = e.revision
+            }
+        }
+        throw lastException ?: IllegalStateException("Agent 保存失败")
     }
 }
