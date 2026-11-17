@@ -415,19 +415,16 @@ class App(Gtk.Window):
             sidebar.pack_start(heading, False, False, 0)
             combo = Gtk.ComboBoxText()
             setattr(self, attr, combo)
-            if attr == "agents":
-                sidebar.pack_start(combo, False, False, 0)
-            else:
-                items_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
-                setattr(self, attr + "_list", items_box)
-                sidebar.pack_start(items_box, False, False, 0)
+            items_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+            setattr(self, attr + "_list", items_box)
+            sidebar.pack_start(items_box, False, False, 0)
             buttons = Gtk.Box(spacing=4)
             if attr == "hosts":
                 actions = [("添加主机", "add")]
             elif attr == "directories":
                 actions = [("添加工作区", "add")]
             else:
-                actions = [("添加", "add"), ("编辑", "edit"), ("删除", "delete")]
+                actions = [("添加 Agent", "add")]
             for label, action in actions:
                 button = Gtk.Button(label=label)
                 button.connect("clicked", self.manage, attr, action)
@@ -999,6 +996,7 @@ class App(Gtk.Window):
         if not self.refreshing and host and self.agents.get_active() >= 0:
             host["selected_agent"] = self.agents.get_active()
             self.persist()
+            self.refresh_agent_list()
 
     def host_agents(self, host):
         return self.data["agents"]
@@ -1042,7 +1040,43 @@ class App(Gtk.Window):
         if agents:
             self.agents.set_active(min(max(host.get("selected_agent", 0), 0), len(agents) - 1))
         self.refreshing = False
+        self.refresh_agent_list()
         self.refresh_directories()
+
+    def refresh_agent_list(self):
+        for child in self.agents_list.get_children():
+            self.agents_list.remove(child)
+        host = self.current_host()
+        agents = self.host_agents(host) if host else []
+        for index, item in enumerate(agents):
+            row = Gtk.Box(spacing=4)
+            button = Gtk.Button(label=item["name"])
+            button.set_tooltip_text(item.get("command", "") + "\n点击选择 Agent")
+            button.get_style_context().add_class("host-button")
+            if button.get_child():
+                button.get_child().set_xalign(0.0)
+            if index == self.agents.get_active():
+                button.get_style_context().add_class("host-selected")
+            button.connect("clicked", lambda _button, i=index: self.agents.set_active(i))
+            row.pack_start(button, True, True, 0)
+            if self.edit_mode:
+                for label, action in [("✎", "edit"), ("×", "delete")]:
+                    edit = Gtk.Button(label=label)
+                    edit.set_tooltip_text("编辑 Agent" if action == "edit" else "删除 Agent")
+                    edit.get_style_context().add_class("manage-button")
+                    edit.connect("clicked", self.manage_agent, index, action)
+                    row.pack_start(edit, False, False, 0)
+            self.agents_list.pack_start(row, False, False, 0)
+            self.scale_layout(row)
+        if not agents:
+            hint = Gtk.Label(label="请先选择主机，再点击顶部“编辑”添加 Agent", xalign=0)
+            hint.get_style_context().add_class("subtitle")
+            self.agents_list.pack_start(hint, False, False, 0)
+        self.agents_list.show_all()
+
+    def manage_agent(self, button, index, action):
+        self.agents.set_active(index)
+        self.manage(button, "agents", action)
 
     def toggle_sidebar_edit(self, button):
         self.edit_mode = button.get_active()
