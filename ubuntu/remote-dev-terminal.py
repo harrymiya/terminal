@@ -1853,7 +1853,7 @@ class App(Gtk.Window):
                         local_agent_revision = agent_revisions.get(identity, 0)
                         remote_agent_revision = agents.get("revision", 0)
                         if agents.get("configured") and local_agent_revision < remote_agent_revision:
-                            self.push_agent_list(local_host)
+                            self.data["agents"] = agents["agents"]; agent_revisions[identity] = remote_agent_revision; changed = True
                         elif agents.get("configured") and self.data.get("agents", []) != agents["agents"]:
                             self.data["agents"] = agents["agents"]; agent_revisions[identity] = remote_agent_revision; changed = True
                         elif not agents.get("configured") and self.data.get("agents"):
@@ -1947,17 +1947,28 @@ class App(Gtk.Window):
         identity = self.data.get("sync_username", "") + ":account"
         base_revision = self.data.setdefault("agent_sync_revisions", {}).get(identity, 0)
         def worker():
-            try:
-                response = sync_data_request(self.data, "PUT", "/v1/agents/account", {"agents": items, "base_revision": base_revision})
+            revision = base_revision
+            response = None
+            for attempt in range(3):
+                try:
+                    response = sync_data_request(self.data, "PUT", "/v1/agents/account", {"agents": items, "base_revision": revision})
+                    break
+                except Exception as exc:
+                    if getattr(exc, "code", None) != 409 or attempt == 2:
+                        break
+                    try:
+                        conflict = json.loads(exc.read().decode("utf-8"))
+                        revision = int(conflict["revision"])
+                    except (AttributeError, KeyError, TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
+                        break
+            if response is not None:
                 def finish():
-                    self.data.setdefault("agent_sync_revisions", {})[identity] = response.get("revision", base_revision)
+                    self.data.setdefault("agent_sync_revisions", {})[identity] = response.get("revision", revision)
                     if self.data.get("agents", []) != response.get("agents", []):
                         self.data["agents"] = response.get("agents", []); self.persist(); self.refresh()
                     else: self.persist()
                     return False
                 GLib.idle_add(finish)
-            except Exception:
-                pass
         self.sync_executor.submit(worker)
 
     def push_host_state(self, host):
