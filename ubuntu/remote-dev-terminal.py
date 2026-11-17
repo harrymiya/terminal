@@ -241,7 +241,7 @@ class App(Gtk.Window):
                 color: #8fa2b4;
             }
             notebook tab button:hover { background-image: none; background-color: rgba(255, 255, 255, 0.15); color: #ffffff; }
-            .sidebar { background: #131b26; border-right: 1px solid #243546; }
+            .sidebar { background: #131b26; }
             .sidebar button {
                 background-image: none;
                 background-color: #16222f;
@@ -324,7 +324,7 @@ class App(Gtk.Window):
                 box-shadow: 0 0 8px #ff9800, 0 2px 14px rgba(255, 152, 0, 0.7);
                 animation: orange-glow-breath 1.8s infinite ease-in-out;
             }
-            paned.sidebar-paned > separator { background-color: #243546; min-width: 6px; }
+            paned.sidebar-paned > separator { background-color: #243546; min-width: 4px; }
             paned.sidebar-paned > separator:hover { background-color: #86dbb8; }
             paned.tile-paned > separator { background-color: #243546; margin: 0; padding: 0; }
             paned.tile-paned.horizontal > separator { min-width: 2px; }
@@ -386,6 +386,7 @@ class App(Gtk.Window):
         sidebar_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         sidebar_frame.pack_start(sidebar_scroll, True, True, 0)
         sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=16)
+        sidebar.set_margin_end(4)
         self.sidebar = sidebar
         sidebar.set_size_request(self.sidebar_target_width(), -1)
         sidebar_scroll.add(sidebar)
@@ -1511,8 +1512,8 @@ class App(Gtk.Window):
                 workspaces = sync_data_request(self.data, "GET", "/v1/workspaces/" + sync_host_key(snapshot))
                 agents = sync_data_request(self.data, "GET", "/v1/agents/global")
                 result = (result, workspaces, agents)
-            except Exception:
-                result = "同步失败，请检查地址和令牌"
+            except Exception as exc:
+                result = "同步失败：" + (str(exc) or type(exc).__name__)
             def finish():
                 self.sync_pending.discard(pending_key)
                 if any(self.shared_host_key(h) == key for h in self.data["hosts"]):

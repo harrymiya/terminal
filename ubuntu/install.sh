@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 source_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+if ! command -v secret-tool >/dev/null 2>&1; then
+    echo "提示：未安装 secret-tool，保存 SSH 密码需要运行：sudo apt install libsecret-tools gnome-keyring" >&2
+fi
 data_dir="${XDG_DATA_HOME:-$HOME/.local/share}"
 install_dir="$data_dir/remote-dev-terminal"
 mkdir -p "$install_dir" "$data_dir/applications"

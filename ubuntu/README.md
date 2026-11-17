@@ -18,6 +18,8 @@ sudo apt install python3 python3-gi gir1.2-gtk-3.0 gir1.2-vte-2.91 openssh-clien
 
 远端需要 `tmux` 才能在断线后恢复会话，浏览目录需要 GNU `find`。主机配置可选保存 SSH 密码，密码存入当前用户的系统密钥环；需要可用且已解锁的 Secret Service。SSH 密钥和主机指纹由系统 OpenSSH 处理。
 
+如果提示无法访问系统密钥环，请先运行 `sudo apt install libsecret-tools gnome-keyring`，然后退出并重新登录 Ubuntu 图形桌面，再按提示解锁登录密钥环。
+
 ## 共享会话
 
 在每台设备上分别配置连接同一 SSH 主机的地址、端口和用户名，并在主机编辑界面填写相同的同步服务地址和令牌。侧栏显示同步状态，可用「刷新同步」重试或用「共享会话」查看会话。同步服务只保存会话信息，不同步主机配置、SSH 凭据或终端内容；远端 tmux 会话仍须存在。同步失败时检查地址、令牌和网络连接。
