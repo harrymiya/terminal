@@ -17,8 +17,8 @@ import gi
 gi.require_version("Gtk", "3.0")
 gi.require_version("Vte", "2.91")
 gi.require_version("GdkPixbuf", "2.0")
-from gi.repository import Gtk, Vte, GLib, Gdk, GdkPixbuf
-from core import load_config, save_config, ssh_argv, auto_enter_signature, AutoEnterController, quota_agent, quota_remote_command, quota_from_codex, quota_from_agy, format_quota, upload_image, MAX_IMAGE_BYTES, sync_request, sync_data_request, sync_host_key, legacy_sync_keys, ssh_address, ssh_host_fingerprint, sync_auth_request, save_sync_password, load_sync_password, clear_sync_password, render_battery_pixbuf, save_host_password, clear_host_password, ssh_auth_environment
+from gi.repository import Gtk, Vte, GLib, Gdk, GdkPixbuf, Pango
+from core import load_config, save_config, ssh_argv, auto_enter_signature, AutoEnterController, quota_agent, quota_remote_command, quota_from_codex, quota_from_agy, format_quota, upload_image, MAX_IMAGE_BYTES, sync_request, sync_data_request, sync_host_key, legacy_sync_keys, ssh_address, ssh_port, ssh_host_fingerprint, sync_auth_request, save_sync_password, load_sync_password, clear_sync_password, render_battery_pixbuf, save_host_password, load_host_password, clear_host_password, ssh_auth_environment
 from version import VERSION
 
 
@@ -403,6 +403,8 @@ class App(Gtk.Window):
         settings_button.connect("clicked", self.show_settings)
         brand_row.pack_start(settings_button, False, False, 0)
         sidebar.pack_start(brand_row, False, False, 0)
+        self.sidebar_title_min_width = brand_row.get_preferred_size()[0].width + sidebar.get_margin_start() + sidebar.get_margin_end()
+        sidebar.set_size_request(max(self.sidebar_target_width(), self.sidebar_title_min_width), -1)
         subtitle = Gtk.Label(label=f"远程开发工作台 · v{VERSION}", xalign=0)
         subtitle.get_style_context().add_class("subtitle")
         sidebar.pack_start(subtitle, False, False, 0)
@@ -733,7 +735,7 @@ class App(Gtk.Window):
         self.scale = spin.get_value_as_int()
         self.data["ui_scale"] = self.scale
         self.apply_scale_css()
-        self.sidebar.set_size_request(self.sidebar_target_width(), -1)
+        self.sidebar.set_size_request(max(self.sidebar_target_width(), getattr(self, "sidebar_title_min_width", 0)), -1)
         self.scale_layout(self)
         term_scale = self.terminal_font_scale()
         for session in self.sessions:
@@ -1133,15 +1135,19 @@ class App(Gtk.Window):
         host_radio_group = None
         for index, item in enumerate(self.data["hosts"]):
             row = Gtk.Box(spacing=4)
-            button = Gtk.RadioButton.new_with_label_from_widget(host_radio_group, item["name"] + "  ·  " + (item.get("lan_address") or item.get("external_address") or item.get("address", "")))
+            row.set_hexpand(True)
+            active_address = ssh_address(item)
+            active_port = item.get("_active_port", item.get("port", 22))
+            route = "内网" if active_address and active_address == item.get("lan_address") else "外网" if active_address else "未连接"
+            button = Gtk.RadioButton.new_with_label_from_widget(host_radio_group, item["name"] + "  ·  " + route + " " + (active_address or item.get("lan_address") or item.get("external_address") or item.get("address", "")))
             button.set_mode(False)
             if host_radio_group is None:
                 host_radio_group = button
             button.set_active(index == selected)
-            button.set_tooltip_text(f"{item.get('username', '')}@{item.get('lan_address') or item.get('external_address') or item.get('address', '')}:{item.get('port', 22)}\n点击切换主机")
+            button.set_tooltip_text(f"{item.get('username', '')}@{active_address or item.get('lan_address') or item.get('external_address') or item.get('address', '')}:{active_port}\n当前连接：{route}\n点击切换主机")
             button.get_style_context().add_class("host-button")
-            if button.get_child():
-                button.get_child().set_xalign(0.0)
+            self.fit_sidebar_label(button)
+            button.set_hexpand(True)
             if index == selected:
                 button.get_style_context().add_class("host-selected")
             button.connect("toggled", lambda radio, i=index: self.hosts.set_active(i) if radio.get_active() else None)
@@ -1178,11 +1184,12 @@ class App(Gtk.Window):
         agents = self.host_agents(host) if host else []
         for index, item in enumerate(agents):
             row = Gtk.Box(spacing=4)
+            row.set_hexpand(True)
             button = Gtk.Button(label=item["name"])
             button.set_tooltip_text(item.get("command", "") + "\n点击选择 Agent")
             button.get_style_context().add_class("host-button")
-            if button.get_child():
-                button.get_child().set_xalign(0.0)
+            self.fit_sidebar_label(button)
+            button.set_hexpand(True)
             if index == self.agents.get_active():
                 button.get_style_context().add_class("agent-selected")
             button.connect("clicked", lambda _button, i=index: self.agents.set_active(i))
@@ -1205,6 +1212,16 @@ class App(Gtk.Window):
     def manage_agent(self, button, index, action):
         self.agents.set_active(index)
         self.manage(button, "agents", action)
+
+    @staticmethod
+    def fit_sidebar_label(button):
+        label = button.get_child()
+        if isinstance(label, Gtk.Label):
+            label.set_xalign(0.0)
+            label.set_single_line_mode(True)
+            label.set_ellipsize(Pango.EllipsizeMode.END)
+            label.set_width_chars(1)
+            label.set_max_width_chars(14)
 
     def toggle_sidebar_edit(self, button):
         restore_width = None
@@ -1258,9 +1275,10 @@ class App(Gtk.Window):
         for index, item in enumerate(directories):
             self.directories.append_text(item["name"])
             row = Gtk.Box(spacing=4)
+            row.set_hexpand(True)
             button = Gtk.Button(label="▸  " + item["name"])
-            if button.get_child():
-                button.get_child().set_xalign(0.0)
+            self.fit_sidebar_label(button)
+            button.set_hexpand(True)
             button.set_tooltip_text(item["path"] + "\n点击使用当前 Agent 打开")
             button.get_style_context().add_class("project-button")
             button.connect("clicked", self.open_directory, index)
@@ -1344,8 +1362,10 @@ class App(Gtk.Window):
                 if kind == "hosts":
                     self.refresh_all_shared()
             return
-        fields = {"hosts": [("name", "名称"), ("lan_address", "内网地址"), ("external_address", "外网地址"), ("port", "端口"), ("username", "用户名")], "directories": [("name", "名称"), ("path", "远端绝对路径")], "agents": [("name", "名称"), ("command", "启动命令")]}[kind]
-        old = items[index] if action == "edit" else {"port": 22}
+        old = dict(items[index]) if action == "edit" else {"port": 22}
+        if kind == "hosts":
+            old.setdefault("lan_port", old.get("port", 22)); old.setdefault("external_port", old.get("port", 22))
+        fields = {"hosts": [("name", "名称"), ("lan_address", "内网地址"), ("lan_port", "内网端口"), ("external_address", "外网地址"), ("external_port", "外网端口"), ("username", "用户名")], "directories": [("name", "名称"), ("path", "远端绝对路径")], "agents": [("name", "名称"), ("command", "启动命令")]}[kind]
         dialog = Gtk.Dialog(title="编辑" if action == "edit" else "添加", transient_for=self, modal=True)
         dialog.add_buttons("取消", Gtk.ResponseType.CANCEL, "保存", Gtk.ResponseType.OK)
         parent_width, parent_height = self.get_size()
@@ -1376,7 +1396,7 @@ class App(Gtk.Window):
             grid.attach(hint, 1, len(fields), 1, 1)
             row = len(fields) + 1
             grid.attach(Gtk.Label(label="SSH 密码", xalign=0), 0, row, 1, 1)
-            password_entry = Gtk.Entry()
+            password_entry = Gtk.Entry(text=load_host_password(old.get("credential_id")))
             password_entry.set_hexpand(True)
             password_entry.set_visibility(False)
             password_entry.set_placeholder_text("留空保留已保存密码" if old.get("credential_id") else "可留空，使用密钥或连接时输入")
@@ -1393,12 +1413,14 @@ class App(Gtk.Window):
         while dialog.run() == Gtk.ResponseType.OK:
             values = {key: entry.get_text().strip() for key, entry in entries.items()}
             try:
-                required_fields = {"hosts": ("name", "port", "username"), "directories": ("name", "path"), "agents": ("name", "command")}[kind]
+                required_fields = {"hosts": ("name", "username"), "directories": ("name", "path"), "agents": ("name", "command")}[kind]
                 if any(not values.get(key) for key in required_fields) or (kind == "hosts" and not (values.get("lan_address") or values.get("external_address"))):
                     raise ValueError("请填写所有必填字段")
                 if kind == "hosts":
-                    values["port"] = int(values["port"])
-                    if not 1 <= values["port"] <= 65535 or any(v.startswith("-") for v in (values["lan_address"], values["external_address"])):
+                    values["lan_port"] = int(values["lan_port"] or old.get("port", 22))
+                    values["external_port"] = int(values["external_port"] or old.get("port", 22))
+                    values["port"] = int(old.get("port", values["lan_port"]))
+                    if any(not 1 <= values[key] <= 65535 for key in ("lan_port", "external_port")) or any(v.startswith("-") for v in (values["lan_address"], values["external_address"])):
                         raise ValueError("主机地址或端口无效")
                     values["id"] = old.get("id") or uuid.uuid4().hex
                     values["legacy_address"] = old.get("legacy_address", old.get("address", ""))
@@ -1476,7 +1498,8 @@ class App(Gtk.Window):
             def worker():
                 # The first NUL-delimited item is canonical cwd, followed by directory names.
                 command = "cd -- " + (shlex.quote(requested) if requested else '"$HOME"') + " && printf '%s\\0' \"$PWD\" && find -L . -mindepth 1 -maxdepth 1 -type d -printf '%f\\0'"
-                argv = ["ssh", "-o", "ConnectTimeout=20", "-p", str(host["port"]), "-l", host["username"], "--", ssh_address(host), command]
+                address = ssh_address(host)
+                argv = ["ssh", "-o", "ConnectTimeout=20", "-p", str(ssh_port(host)), "-l", host["username"], "--", address, command]
                 env = ssh_auth_environment(host, Path(__file__).with_name("askpass.py"))
                 try:
                     proc = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, timeout=60, start_new_session=True)
@@ -1843,7 +1866,7 @@ class App(Gtk.Window):
         selected = min(max(int(host.get("selected_agent", 0)), 0), max(0, len(agents) - 1))
         return {"id": str(host.get("id") or uuid.uuid4().hex), "name": host.get("name", "主机"),
                 "lan_address": host.get("lan_address", ""), "external_address": host.get("external_address", host.get("address", "")),
-                "port": int(host.get("port", 22)), "username": host.get("username", ""), "icon": host.get("icon", "⌘"),
+                "lan_port": int(host.get("lan_port", host.get("port", 22))), "external_port": int(host.get("external_port", host.get("port", 22))), "port": int(host.get("port", 22)), "username": host.get("username", ""), "icon": host.get("icon", "⌘"),
                 "selected_agent_command": agents[selected].get("command", "") if agents else "",
                 "legacy_keys": legacy_sync_keys(host)}
 
@@ -1882,7 +1905,7 @@ class App(Gtk.Window):
                     if candidates:
                         profile = candidates[0]; matched.add(profile.get("id"))
                         merged = dict(host)
-                        merged.update({key: profile.get(key, merged.get(key, "")) for key in ("id", "name", "lan_address", "external_address", "port", "username", "icon")})
+                        merged.update({key: profile.get(key, merged.get(key, "")) for key in ("id", "name", "lan_address", "external_address", "lan_port", "external_port", "port", "username", "icon")})
                         merged["address"] = merged.get("external_address") or merged.get("lan_address") or ""
                         if profile.get("selected_agent_command"):
                             selected = next((i for i, item in enumerate(self.data.get("agents", [])) if item.get("command") == profile["selected_agent_command"]), None)
@@ -1896,7 +1919,7 @@ class App(Gtk.Window):
                     if profile.get("id") in matched: continue
                     result.append({"id": profile.get("id"), "name": profile.get("name", "主机"), "lan_address": profile.get("lan_address", ""),
                                    "external_address": profile.get("external_address", ""), "address": profile.get("external_address") or profile.get("lan_address", ""),
-                                   "port": profile.get("port", 22), "username": profile.get("username", ""), "icon": profile.get("icon", "⌘"),
+                                   "port": profile.get("port", 22), "lan_port": profile.get("lan_port", profile.get("port", 22)), "external_port": profile.get("external_port", profile.get("port", 22)), "username": profile.get("username", ""), "icon": profile.get("icon", "⌘"),
                                    "selected_agent": next((i for i, item in enumerate(self.data.get("agents", [])) if item.get("command") == profile.get("selected_agent_command")), 0),
                                    "directories": [], "agents": [dict(item) for item in self.data.get("agents", [])]})
             except Exception:
@@ -2154,7 +2177,8 @@ class App(Gtk.Window):
             self.sessions[:] = [item for item in self.sessions if item["terminal"] is not terminal]
             self.rebuild_view()
             # Stop the multiplex master as well as the visible SSH client.
-            subprocess.Popen(["ssh", "-S", socket_path, "-O", "exit", "-p", str(host["port"]), "-l", host["username"], "--", ssh_address(host)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            address = ssh_address(host)
+            subprocess.Popen(["ssh", "-S", socket_path, "-O", "exit", "-p", str(ssh_port(host)), "-l", host["username"], "--", address], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             shutil.rmtree(socket_dir, ignore_errors=True)
         close.connect("clicked", close_tab)
         self.sessions.append({"terminal": terminal, "label": label, "key": key, "id": session_id, "state": state,
@@ -2179,7 +2203,8 @@ class App(Gtk.Window):
             state["quota_busy"] = True
             def worker():
                 result = []
-                base = ["ssh", "-S", socket_path, "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-p", str(host["port"]), "-l", host["username"], "--", ssh_address(host)]
+                address = ssh_address(host)
+                base = ["ssh", "-S", socket_path, "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-p", str(ssh_port(host)), "-l", host["username"], "--", address]
                 try:
                     if kind == "agy":
                         output = subprocess.check_output(base + ["bash -lc 'agy -p \"/usage\" --output-format json'"], stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)

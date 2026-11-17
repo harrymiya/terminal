@@ -322,10 +322,12 @@ def create_server(address, database, token=None):
                     if not isinstance(host, dict) or host.get("id") != host_id: raise ValueError()
                     if any(not isinstance(host.get(key, ""), str) or len(host.get(key, "")) > 4096 for key in fields): raise ValueError()
                     port = host.get("port", 22)
+                    lan_port = host.get("lan_port", port)
+                    external_port = host.get("external_port", port)
                     aliases = host.get("legacy_keys", [])
-                    if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535: raise ValueError()
+                    if any(not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= 65535 for value in (port, lan_port, external_port)): raise ValueError()
                     if not isinstance(aliases, list) or len(aliases) > 16 or any(not isinstance(key, str) or len(key) > 256 for key in aliases): raise ValueError()
-                    host = {key: host.get(key, "") for key in fields} | {"port": port, "legacy_keys": list(dict.fromkeys(aliases))}
+                    host = {key: host.get(key, "") for key in fields} | {"port": port, "lan_port": lan_port, "external_port": external_port, "legacy_keys": list(dict.fromkeys(aliases))}
                     host["id"] = host_id
                     payload = json.dumps(host, ensure_ascii=False)
                 except (ValueError, AttributeError, UnicodeDecodeError, json.JSONDecodeError):

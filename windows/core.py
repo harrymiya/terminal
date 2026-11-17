@@ -38,9 +38,10 @@ def image_upload_command():
 def upload_image(host, control_path, image):
     if not image or len(image) > MAX_IMAGE_BYTES:
         raise ValueError("图片为空或超过 20 MB")
+    address = ssh_address(host)
     argv = ["ssh", "-S", control_path, "-o", "ControlMaster=no", "-o", "BatchMode=yes",
-            "-o", "ConnectTimeout=5", "-p", str(host["port"]), "-l", host["username"],
-            "--", ssh_address(host), image_upload_command()]
+            "-o", "ConnectTimeout=5", "-p", str(ssh_port(host)), "-l", host["username"],
+            "--", address, image_upload_command()]
     result = subprocess.run(argv, input=image, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
     if result.returncode:
         raise RuntimeError(result.stderr.decode("utf-8", errors="replace").strip() or "图片上传失败")
@@ -93,7 +94,9 @@ def save_config(data, path=None):
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".config-")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+            persisted = dict(data)
+            persisted["hosts"] = [{key: value for key, value in host.items() if key not in ("_active_address", "_active_port")} for host in data.get("hosts", [])]
+            json.dump(persisted, f, ensure_ascii=False, indent=2)
         os.replace(tmp, path)
     finally:
         if os.path.exists(tmp):
@@ -174,6 +177,14 @@ def save_host_password(credential_id, password):
         raise RuntimeError("无法保存 SSH 密码到系统密钥环：" + (result.stderr.strip() or "密钥环不可用"))
 
 
+def load_host_password(credential_id):
+    if not credential_id: return ""
+    try:
+        result = subprocess.run(["secret-tool", "lookup", "application", "remote-dev-terminal", "host", credential_id], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired): return ""
+    return result.stdout.rstrip("\n") if result.returncode == 0 else ""
+
+
 def clear_host_password(credential_id):
     try:
         result = subprocess.run(
@@ -225,28 +236,46 @@ def legacy_sync_keys(host):
     if sync_id: values.append(hashlib.sha256(("manual:" + sync_id).encode("utf-8")).hexdigest())
     fingerprint = host.get("_sync_fingerprint", "")
     if fingerprint: values.append(hashlib.sha256(fingerprint.encode("utf-8")).hexdigest())
-    for address in (host.get("legacy_address", ""), host.get("address", "")):
+    for address in (host.get("legacy_address", ""), host.get("address", ""), host.get("lan_address", ""), host.get("external_address", "")):
         if address: values.append(hashlib.sha256(address.lower().encode("utf-8")).hexdigest())
     return list(dict.fromkeys(values))
 
 
 def ssh_address(host):
-    candidates = list(dict.fromkeys(x.strip() for x in (host.get("lan_address", ""), host.get("external_address", ""), host.get("address", "")) if x and x.strip()))
-    for address in candidates:
+    candidates = [(host.get("lan_address", ""), host.get("lan_port", host.get("port", 22))), (host.get("external_address", ""), host.get("external_port", host.get("port", 22)))]
+    if not any(address for address, _port in candidates) and host.get("address"):
+        candidates.append((host["address"], host.get("port", 22)))
+    candidates = list(dict.fromkeys((address.strip(), int(port or 22)) for address, port in candidates if address and address.strip()))
+    for address, port in candidates:
         try:
-            with socket.create_connection((address, int(host.get("port", 22))), timeout=1.2): return address
+            with socket.create_connection((address, port), timeout=1.2):
+                host["_active_address"], host["_active_port"] = address, port
+                return address
         except (OSError, ValueError):
             continue
-    return candidates[0] if candidates else ""
+    if candidates:
+        host["_active_address"], host["_active_port"] = candidates[0]
+        return candidates[0][0]
+    host["_active_address"], host["_active_port"] = "", int(host.get("port", 22))
+    return ""
+
+
+def ssh_port(host):
+    if not host.get("_active_address"):
+        ssh_address(host)
+    return int(host.get("_active_port", host.get("port", 22)))
 
 
 def ssh_host_fingerprint(host):
     known_hosts = Path.home() / ".ssh" / "known_hosts"
     if not known_hosts.exists(): return ""
     keys = []
-    for address in dict.fromkeys(item for item in (host.get("lan_address", ""), host.get("external_address", ""), host.get("address", "")) if item):
+    candidates = [(host.get("lan_address", ""), host.get("lan_port", host.get("port", 22))), (host.get("external_address", ""), host.get("external_port", host.get("port", 22)))]
+    if not any(address for address, _port in candidates) and host.get("address"):
+        candidates.append((host["address"], host.get("port", 22)))
+    for address, port in dict.fromkeys((item, int(port or 22)) for item, port in candidates if item):
         args = ["ssh-keygen", "-F", address, "-f", str(known_hosts)]
-        if int(host.get("port", 22)) != 22: args += ["-p", str(host["port"])]
+        if port != 22: args += ["-p", str(port)]
         try: result = subprocess.run(args, capture_output=True, timeout=5)
         except (OSError, subprocess.TimeoutExpired): continue
         for line in result.stdout.decode("utf-8", errors="ignore").splitlines():
@@ -274,7 +303,8 @@ def ssh_argv(host, directory, agent, session_id=None, control_path=None, restore
         remote = (f"cd -- {directory} && if command -v tmux >/dev/null 2>&1 && tmux has-session -t {name} 2>/dev/null; then "
                   f"tmux attach-session -t {name}; else printf '\\n[会话已不存在，无法恢复]\\n'; exit 1; fi")
     options = ["-o", "ControlMaster=auto", "-o", "ControlPersist=60", "-o", "ControlPath=" + control_path] if control_path else []
-    return ["ssh", "-tt", "-o", "ServerAliveInterval=20", "-o", "ServerAliveCountMax=6", *options, "-p", str(host["port"]), "-l", host["username"], "--", ssh_address(host), remote], session_id
+    address = ssh_address(host)
+    return ["ssh", "-tt", "-o", "ServerAliveInterval=20", "-o", "ServerAliveCountMax=6", *options, "-p", str(ssh_port(host)), "-l", host["username"], "--", address, remote], session_id
 
 
 def _normalize_signature(sig):
