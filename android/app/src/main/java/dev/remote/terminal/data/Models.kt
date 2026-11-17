@@ -36,7 +36,78 @@ data class HostProfile(
     val lanAddress: String = "",
     val externalAddress: String = address,
     val legacyAddress: String = address,
+    val lanPort: Int = port,
+    val externalPort: Int = port,
 )
+
+data class HostEndpoint(
+    val address: String,
+    val port: Int,
+    val isLan: Boolean,
+)
+
+fun HostProfile.endpoints(): List<HostEndpoint> {
+    val list = mutableListOf<HostEndpoint>()
+    if (lanAddress.isNotBlank()) {
+        list.add(HostEndpoint(lanAddress.trim(), lanPort, isLan = true))
+    }
+    if (externalAddress.isNotBlank()) {
+        list.add(HostEndpoint(externalAddress.trim(), externalPort, isLan = false))
+    }
+    if (list.isEmpty() && address.isNotBlank()) {
+        list.add(HostEndpoint(address.trim(), port, isLan = false))
+    }
+    return list.distinctBy { it.address to it.port }
+}
+
+data class HostRoute(
+    val address: String,
+    val port: Int,
+    val isLan: Boolean,
+    val reachable: Boolean = true,
+)
+
+object HostRouteResolver {
+    private val activeRoutes = androidx.compose.runtime.mutableStateMapOf<String, HostRoute>()
+
+    fun getRoute(hostId: String): HostRoute? = activeRoutes[hostId]
+
+    fun updateRoute(hostId: String, route: HostRoute) {
+        activeRoutes[hostId] = route
+    }
+
+    fun isPortReachable(address: String, port: Int, timeoutMs: Int): Boolean {
+        if (address.isBlank() || port !in 1..65535) return false
+        return try {
+            java.net.Socket().use { socket ->
+                socket.connect(java.net.InetSocketAddress(address, port), timeoutMs)
+                true
+            }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    suspend fun resolveHostRoute(host: HostProfile): HostRoute = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+        val candidates = host.endpoints()
+        for (ep in candidates) {
+            val timeout = if (ep.isLan) 1200 else 1800
+            if (isPortReachable(ep.address, ep.port, timeout)) {
+                val route = HostRoute(ep.address, ep.port, ep.isLan, reachable = true)
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    activeRoutes[host.id] = route
+                }
+                return@withContext route
+            }
+        }
+        val fallback = candidates.firstOrNull() ?: HostEndpoint(host.address, host.port, false)
+        val route = HostRoute(fallback.address, fallback.port, fallback.isLan, reachable = false)
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+            activeRoutes[host.id] = route
+        }
+        route
+    }
+}
 
 data class AgentPreset(
     val id: String,
@@ -147,9 +218,12 @@ class LocalStore(context: Context) {
             val directories = (0 until dirs.length()).map { n ->
                 dirs.getJSONObject(n).let { ProjectDirectory(it.getString("id"), it.getString("name"), it.getString("path"), it.optString("icon", "📁")) }
             }
+            val port = item.optInt("port", 22)
+            val lanPort = item.optInt("lan_port", port)
+            val externalPort = item.optInt("external_port", port)
             HostProfile(
                 id = item.getString("id"), name = item.getString("name"), address = item.optString("external_address", item.getString("address")),
-                port = item.optInt("port", 22), username = item.getString("username"),
+                port = port, username = item.getString("username"),
                 password = vault.decrypt(preferences.getString("password_${item.getString("id")}", null)),
                 icon = item.optString("icon", "⌘"), directories = directories,
                 syncFingerprint = item.optString("sync_fingerprint", ""),
@@ -157,6 +231,8 @@ class LocalStore(context: Context) {
                 lanAddress = item.optString("lan_address", ""),
                 externalAddress = item.optString("external_address", item.optString("address", "")),
                 legacyAddress = item.optString("legacy_address", item.optString("address", "")),
+                lanPort = lanPort,
+                externalPort = externalPort,
             )
         }
     }.getOrDefault(emptyList())
@@ -168,7 +244,8 @@ class LocalStore(context: Context) {
             val dirs = JSONArray()
             host.directories.forEach { dirs.put(JSONObject().put("id", it.id).put("name", it.name).put("path", it.path).put("icon", it.icon)) }
             root.put(JSONObject().put("id", host.id).put("name", host.name).put("address", host.externalAddress.ifBlank { host.lanAddress })
-                .put("port", host.port).put("username", host.username).put("icon", host.icon).put("directories", dirs)
+                .put("port", host.port).put("lan_port", host.lanPort).put("external_port", host.externalPort)
+                .put("username", host.username).put("icon", host.icon).put("directories", dirs)
                 .put("sync_fingerprint", host.syncFingerprint).put("sync_id", host.syncId.trim())
                 .put("lan_address", host.lanAddress).put("external_address", host.externalAddress).put("legacy_address", host.legacyAddress))
             preferences.edit().putString("password_${host.id}", vault.encrypt(host.password)).apply()

@@ -6,35 +6,58 @@ import com.jcraft.jsch.HostKeyRepository
 import com.jcraft.jsch.JSch
 import com.jcraft.jsch.Session
 import dev.remote.terminal.data.HostProfile
+import dev.remote.terminal.data.HostRoute
+import dev.remote.terminal.data.HostRouteResolver
 import dev.remote.terminal.data.LocalStore
+import dev.remote.terminal.data.endpoints
+import java.io.IOException
 import java.security.MessageDigest
 
 data class RemoteDirectoryEntry(val name: String, val path: String)
 
 data class RemoteDirectoryListing(val path: String, val directories: List<RemoteDirectoryEntry>)
 
-class HostKeyApprovalRequiredException(val fingerprint: String) : Exception("需要确认 SSH 主机指纹")
+class HostKeyApprovalRequiredException(val address: String, val port: Int, val fingerprint: String) : Exception("需要确认 SSH 主机指纹")
 
 object RemoteDirectoryBrowser {
     fun listDirectories(host: HostProfile, store: LocalStore, requestedPath: String): RemoteDirectoryListing {
-        val hostKeys = BrowserHostKeyRepository(host, store)
+        var currentAddress = host.address
+        var currentPort = host.port
+        val hostKeys = BrowserHostKeyRepository(store) { currentAddress to currentPort }
         val jsch = JSch().apply { hostKeyRepository = hostKeys; store.addSshIdentity(this) }
-        val session = jsch.getSession(host.username, host.address, host.port)
+        val endpoints = host.endpoints()
+        var openedSession: Session? = null
+        var connectFailure: Exception? = null
+
+        for (endpoint in endpoints) {
+            currentAddress = endpoint.address
+            currentPort = endpoint.port
+            val candidate = jsch.getSession(host.username, endpoint.address, endpoint.port)
+            candidate.setPassword(host.password)
+            candidate.setConfig("StrictHostKeyChecking", "yes")
+            candidate.setConfig("PreferredAuthentications", "publickey,keyboard-interactive,password")
+            candidate.setServerAliveInterval(10_000)
+            candidate.setServerAliveCountMax(2)
+            candidate.setTimeout(20_000)
+            try {
+                val connectTimeout = if (endpoint.isLan && endpoints.size > 1) 3_000 else 15_000
+                candidate.connect(connectTimeout)
+                openedSession = candidate
+                HostRouteResolver.updateRoute(host.id, HostRoute(endpoint.address, endpoint.port, endpoint.isLan, reachable = true))
+                break
+            } catch (error: Exception) {
+                candidate.disconnect()
+                hostKeys.untrustedFingerprint?.let { throw HostKeyApprovalRequiredException(endpoint.address, endpoint.port, it) }
+                connectFailure = error
+            }
+        }
+        val session = openedSession ?: run {
+            hostKeys.untrustedFingerprint?.let { throw HostKeyApprovalRequiredException(currentAddress, currentPort, it) }
+            throw (connectFailure ?: IOException("无法连接主机"))
+        }
+
         var channel: ChannelSftp? = null
         try {
-            session.setPassword(host.password)
-            session.setConfig("StrictHostKeyChecking", "yes")
-            session.setConfig("PreferredAuthentications", "publickey,keyboard-interactive,password")
-            session.setServerAliveInterval(10_000)
-            session.setServerAliveCountMax(2)
-            session.setTimeout(20_000)
-            try {
-                session.connect(20_000)
-            } catch (error: Exception) {
-                hostKeys.untrustedFingerprint?.let { throw HostKeyApprovalRequiredException(it) }
-                throw error
-            }
-
             val sftp = session.openChannel("sftp") as ChannelSftp
             channel = sftp
             sftp.connect(15_000)
@@ -49,7 +72,7 @@ object RemoteDirectoryBrowser {
             }.sortedBy { it.name.lowercase() }
             return RemoteDirectoryListing(normalizedPath, entries)
         } catch (error: Exception) {
-            hostKeys.untrustedFingerprint?.let { throw HostKeyApprovalRequiredException(it) }
+            hostKeys.untrustedFingerprint?.let { throw HostKeyApprovalRequiredException(currentAddress, currentPort, it) }
             throw error
         } finally {
             runCatching { channel?.disconnect() }
@@ -61,8 +84,8 @@ object RemoteDirectoryBrowser {
         if (parent == "/") "/$child" else "${parent.trimEnd('/')}/$child"
 
     private class BrowserHostKeyRepository(
-        private val host: HostProfile,
         private val store: LocalStore,
+        private val currentTarget: () -> Pair<String, Int>,
     ) : HostKeyRepository {
         @Volatile var untrustedFingerprint: String? = null
             private set
@@ -72,7 +95,8 @@ object RemoteDirectoryBrowser {
                 MessageDigest.getInstance("SHA-256").digest(key),
                 android.util.Base64.NO_WRAP or android.util.Base64.NO_PADDING,
             )
-            if (store.isHostKeyTrusted(host.address, host.port, fingerprint)) return HostKeyRepository.OK
+            val (address, port) = currentTarget()
+            if (store.isHostKeyTrusted(address, port, fingerprint)) return HostKeyRepository.OK
             untrustedFingerprint = fingerprint
             return HostKeyRepository.NOT_INCLUDED
         }

@@ -7,7 +7,10 @@ import com.jcraft.jsch.HostKeyRepository
 import com.jcraft.jsch.JSch
 import com.jcraft.jsch.Session
 import com.jcraft.jsch.UserInfo
+import dev.remote.terminal.data.HostRoute
+import dev.remote.terminal.data.HostRouteResolver
 import dev.remote.terminal.data.LocalStore
+import dev.remote.terminal.data.endpoints
 import dev.remote.terminal.data.TerminalTask
 import dev.remote.terminal.data.codexExecutable
 import android.os.SystemClock
@@ -29,7 +32,7 @@ class SshTerminalController(
     private val restoreOnly: Boolean = false,
     private val onStatus: (String) -> Unit,
     private val onBytes: (String) -> Unit,
-    private val onHostKey: (String, String, (Boolean) -> Unit) -> Unit,
+    private val onHostKey: (String, Int, String, (Boolean) -> Unit) -> Unit,
     private val onQuota: (List<Pair<Int, Int>>?) -> Unit,
 ) {
     private data class ActiveConnection(
@@ -47,6 +50,8 @@ class SshTerminalController(
 
     private val running = AtomicBoolean(false)
     @Volatile private var currentAddress: String = task.host.address
+    @Volatile private var currentPort: Int = task.host.port
+    @Volatile private var currentIsLan: Boolean = false
     private val activeConnection = AtomicReference<ActiveConnection?>(null)
     private val sessionRef = AtomicReference<Session?>(null)
     private val channelRef = AtomicReference<ChannelShell?>(null)
@@ -333,26 +338,29 @@ class SshTerminalController(
         while (running.get()) {
             try {
                 connectedAt = 0L
-                val candidates = listOf(task.host.lanAddress, task.host.externalAddress, task.host.address).filter { it.isNotBlank() }.distinct()
-                onStatus(if (retry == 0) "正在连接 ${candidates.firstOrNull() ?: task.host.address}:${task.host.port}" else "连接中断 · 正在重连 ${retry}…")
+                val candidates = task.host.endpoints()
+                val initialCandidate = candidates.firstOrNull()
+                onStatus(if (retry == 0) "正在连接 ${initialCandidate?.let { "${it.address}:${it.port}" } ?: "${task.host.address}:${task.host.port}"}" else "连接中断 · 正在重连 ${retry}…")
                 val jsch = JSch()
                 store.addSshIdentity(jsch)
                 jsch.hostKeyRepository = TrustedHostRepository()
                 var openedSession: Session? = null
                 var connectFailure: Exception? = null
-                for (address in candidates) {
+                for (endpoint in candidates) {
                     ensureRunning()
-                    val candidate = jsch.getSession(task.host.username, address, task.host.port)
+                    val candidate = jsch.getSession(task.host.username, endpoint.address, endpoint.port)
                     candidate.setPassword(task.host.password)
                     candidate.setConfig("StrictHostKeyChecking", "yes")
                     candidate.setConfig("PreferredAuthentications", "publickey,keyboard-interactive,password")
                     candidate.setServerAliveInterval(20_000)
                     candidate.setServerAliveCountMax(6)
                     sessionRef.set(candidate)
-                    currentAddress = address
+                    currentAddress = endpoint.address
+                    currentPort = endpoint.port
+                    currentIsLan = endpoint.isLan
                     try {
-                        candidate.connect(12_000)
-                        currentAddress = address
+                        val connectTimeout = if (endpoint.isLan && candidates.size > 1) 3_000 else 12_000
+                        candidate.connect(connectTimeout)
                         openedSession = candidate
                         break
                     } catch (error: Exception) {
@@ -386,7 +394,8 @@ class SshTerminalController(
                     activeConnection.set(connection)
                 }
                 connectedAt = SystemClock.elapsedRealtime()
-                onStatus("已连接 · ${task.host.username}@$currentAddress")
+                onStatus("已连接 · ${task.host.username}@$currentAddress:$currentPort (${if (currentIsLan) "内网" else "外网"})")
+                HostRouteResolver.updateRoute(task.host.id, HostRoute(currentAddress, currentPort, currentIsLan, reachable = true))
                 if (codexExecutable(task.agent.command) != null ||
                     (task.agent.id == "antigravity" && task.agent.command.trim().matches(Regex("^agy(?:\\s.*)?$")))) {
                     Thread({ quotaLoop(connection) }, "codex-quota-${task.id.take(8)}").apply { isDaemon = true; start() }
@@ -485,17 +494,17 @@ class SshTerminalController(
             val fingerprint = "SHA256:" + android.util.Base64.encodeToString(
                 MessageDigest.getInstance("SHA-256").digest(key), android.util.Base64.NO_WRAP or android.util.Base64.NO_PADDING,
             )
-            if (store.isHostKeyTrusted(currentAddress, task.host.port, fingerprint)) return HostKeyRepository.OK
+            if (store.isHostKeyTrusted(currentAddress, currentPort, fingerprint)) return HostKeyRepository.OK
 
             val latch = CountDownLatch(1)
             var accepted = false
             val decide: (Boolean) -> Unit = { value -> accepted = value; latch.countDown() }
             hostKeyDecision = decide
-            onHostKey(currentAddress, fingerprint, decide)
+            onHostKey(currentAddress, currentPort, fingerprint, decide)
             val answered = latch.await(2, TimeUnit.MINUTES)
             hostKeyDecision = null
             if (answered && accepted) {
-                store.trustHostKey(currentAddress, task.host.port, fingerprint)
+                store.trustHostKey(currentAddress, currentPort, fingerprint)
                 return HostKeyRepository.OK
             }
             return HostKeyRepository.NOT_INCLUDED

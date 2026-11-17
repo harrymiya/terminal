@@ -63,6 +63,7 @@ object SyncClient {
         val legacy = JSONArray().apply { aliases.forEach { put(it) } }
         return JSONObject().put("id", host.id).put("name", host.name)
             .put("lan_address", host.lanAddress).put("external_address", host.externalAddress)
+            .put("lan_port", host.lanPort).put("external_port", host.externalPort)
             .put("port", host.port).put("username", host.username).put("icon", host.icon)
             .put("selected_agent_command", selectedAgentCommand).put("legacy_keys", legacy)
     }

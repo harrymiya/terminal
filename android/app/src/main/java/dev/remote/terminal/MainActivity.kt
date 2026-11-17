@@ -58,6 +58,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.LazyColumn
@@ -151,6 +152,10 @@ import dev.remote.terminal.data.LocalStore
 import dev.remote.terminal.data.ProjectDirectory
 import dev.remote.terminal.data.TerminalTask
 import dev.remote.terminal.data.codexExecutable
+import dev.remote.terminal.data.HostRoute
+import dev.remote.terminal.data.HostRouteResolver
+import dev.remote.terminal.data.HostEndpoint
+import dev.remote.terminal.data.endpoints
 import dev.remote.terminal.ssh.SshTerminalController
 import dev.remote.terminal.ssh.HostKeyApprovalRequiredException
 import dev.remote.terminal.ssh.RemoteDirectoryBrowser
@@ -262,6 +267,7 @@ private class TerminalSessionState(var task: TerminalTask, private val mainHandl
     var codexQuota by mutableStateOf<List<Pair<Int, Int>>?>(null)
     var hostFingerprint by mutableStateOf<String?>(null)
     var hostKeyAddress by mutableStateOf("")
+    var hostKeyPort by mutableStateOf(22)
     var resolveHostKey: ((Boolean) -> Unit)? = null
     private var autoEnterRunnable: Runnable? = null
     var autoEnterDeadline by mutableStateOf<Long?>(null)
@@ -468,18 +474,25 @@ private fun RemoteTerminalApp(store: LocalStore) {
                     idRemaps[local.id] = profile.optString("id", local.id)
                     val lan = profile.optString("lan_address")
                     val external = profile.optString("external_address")
+                    val lanPort = profile.optInt("lan_port", profile.optInt("port", local.lanPort))
+                    val externalPort = profile.optInt("external_port", profile.optInt("port", local.externalPort))
                     local.copy(id = profile.optString("id", local.id), name = profile.optString("name", local.name),
                         address = external.ifBlank { lan }, lanAddress = lan, externalAddress = external,
-                        port = profile.optInt("port", local.port), username = profile.optString("username", local.username),
+                        port = profile.optInt("port", local.port), lanPort = lanPort, externalPort = externalPort,
+                        username = profile.optString("username", local.username),
                         icon = profile.optString("icon", local.icon))
                 }
             }.toMutableList()
             active.filterNot { it.optString("id") in matched }.forEach { profile ->
                 val lan = profile.optString("lan_address")
                 val external = profile.optString("external_address")
+                val port = profile.optInt("port", 22)
+                val lanPort = profile.optInt("lan_port", port)
+                val externalPort = profile.optInt("external_port", port)
                 result.add(HostProfile(profile.optString("id"), profile.optString("name", "主机"), external.ifBlank { lan },
-                    profile.optInt("port", 22), profile.optString("username"), icon = profile.optString("icon", "⌘"),
-                    lanAddress = lan, externalAddress = external, legacyAddress = ""))
+                    port, profile.optString("username"), icon = profile.optString("icon", "⌘"),
+                    lanAddress = lan, externalAddress = external, legacyAddress = "",
+                    lanPort = lanPort, externalPort = externalPort))
             }
             if (result != hosts.toList()) {
                 val oldSelected = selectedHostId
@@ -580,8 +593,8 @@ private fun RemoteTerminalApp(store: LocalStore) {
                         }
                     }
                 },
-                onHostKey = { address, fingerprint, resolver -> mainHandler.post {
-                    state.hostKeyAddress = address; state.hostFingerprint = fingerprint; state.resolveHostKey = resolver
+                onHostKey = { address, port, fingerprint, resolver -> mainHandler.post {
+                    state.hostKeyAddress = address; state.hostKeyPort = port; state.hostFingerprint = fingerprint; state.resolveHostKey = resolver
                     alertConfirmation(appContext)
                 } },
             )
@@ -938,11 +951,11 @@ private fun RemoteTerminalApp(store: LocalStore) {
                     title = { Text("首次连接这台主机？", color = White, fontWeight = FontWeight.SemiBold) },
                     text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text("请核对 SSH 主机指纹。接受后会保存在本机，后续连接会自动校验。", color = Muted)
-                        Text("${session.hostKeyAddress}:${session.task.host.port}", color = White, fontWeight = FontWeight.Medium)
+                        Text("${session.hostKeyAddress}:${session.hostKeyPort}", color = White, fontWeight = FontWeight.Medium)
                         Text(fingerprint, color = Mint, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
                     } },
                     confirmButton = { TextButton(onClick = {
-                        store.trustHostKey(session.hostKeyAddress, session.task.host.port, fingerprint)
+                        store.trustHostKey(session.hostKeyAddress, session.hostKeyPort, fingerprint)
                         val trustedHost = session.task.host.copy(syncFingerprint = fingerprint)
                         saveHosts(hosts.map { if (it.id == trustedHost.id) trustedHost else it })
                         session.task = session.task.copy(host = trustedHost)
@@ -967,6 +980,14 @@ private fun HomeScreen(
 ) {
     var draggingDirectoryId by remember(selectedHost?.id) { mutableStateOf<String?>(null) }
     var dragOffsetY by remember(selectedHost?.id) { mutableStateOf(0f) }
+
+    LaunchedEffect(hosts) {
+        hosts.forEach { host ->
+            launch(Dispatchers.IO) {
+                HostRouteResolver.resolveHostRoute(host)
+            }
+        }
+    }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
         Row(Modifier.fillMaxWidth().padding(top = 24.dp, bottom = 18.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.size(42.dp).clip(RoundedCornerShape(14.dp)).background(PanelRaised), contentAlignment = Alignment.Center) {
@@ -1047,14 +1068,25 @@ private fun HomeScreen(
                     val selected = selectedHost?.id == host.id
                     Surface(onClick = { onSelectHost(host) }, color = if (selected) Color(0xFF20342F) else Panel,
                         shape = RoundedCornerShape(15.dp), border = androidx.compose.foundation.BorderStroke(1.dp, if (selected) Mint.copy(alpha = .7f) else Edge)) {
-                        Row(Modifier.width(160.dp).padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Row(Modifier.widthIn(min = 165.dp).padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                             Text(if (selected) "◉" else "○", color = if (selected) Mint else Muted, fontSize = 17.sp)
                             Spacer(Modifier.width(6.dp))
                             Text(host.icon, fontSize = 21.sp)
                             Spacer(Modifier.width(9.dp))
-                            Column(Modifier.weight(1f)) {
+                            Column(Modifier.weight(1f, fill = false)) {
                                 Text(host.name, color = White, fontWeight = FontWeight.SemiBold, fontSize = 13.sp, maxLines = 1)
-                                Text("${host.username}@${host.address}", color = Muted, fontSize = 10.sp, maxLines = 1)
+                                val route = HostRouteResolver.getRoute(host.id)
+                                val routeText = when {
+                                    route != null && route.reachable -> "${if (route.isLan) "内网" else "外网"} ${route.address}:${route.port}"
+                                    route != null && !route.reachable -> "离线 ${route.address}:${route.port}"
+                                    host.lanAddress.isNotBlank() -> "优先内网 ${host.lanAddress}:${host.lanPort}"
+                                    else -> "${host.address}:${host.port}"
+                                }
+                                val routeColor = when {
+                                    route?.reachable == true -> if (route.isLan) Mint else Blue
+                                    else -> Muted
+                                }
+                                Text(routeText, color = routeColor, fontSize = 10.sp, maxLines = 1)
                             }
                         }
                     }
@@ -1170,7 +1202,18 @@ private fun ManageScreen(
                             Text(host.icon, fontSize = 20.sp, modifier = Modifier.padding(horizontal = 5.dp))
                             Column(Modifier.weight(1f).padding(start = 8.dp)) {
                                 Text(host.name, color = White, fontWeight = FontWeight.Medium, fontSize = 13.sp)
-                                Text("${host.username}@${host.address}:${host.port}", color = Muted, fontFamily = FontFamily.Monospace, fontSize = 10.sp, maxLines = 1)
+                                val route = HostRouteResolver.getRoute(host.id)
+                                val routeDesc = when {
+                                    route != null && route.reachable -> "${host.username} · ${if (route.isLan) "内网" else "外网"} ${route.address}:${route.port}"
+                                    route != null && !route.reachable -> "${host.username} · 离线 (${route.address}:${route.port})"
+                                    host.lanAddress.isNotBlank() -> "${host.username} · 优先内网 ${host.lanAddress}:${host.lanPort}"
+                                    else -> "${host.username}@${host.address}:${host.port}"
+                                }
+                                val routeColor = when {
+                                    route?.reachable == true -> if (route.isLan) Mint else Blue
+                                    else -> Muted
+                                }
+                                Text(routeDesc, color = routeColor, fontFamily = FontFamily.Monospace, fontSize = 10.sp, maxLines = 1)
                             }
                             IconButton(onClick = { onEditHost(host) }) { Icon(Icons.Default.Edit, "编辑主机", tint = Muted, modifier = Modifier.size(18.dp)) }
                             IconButton(onClick = { onDeleteHost(host) }) { Icon(Icons.Default.DeleteOutline, "删除主机", tint = Muted, modifier = Modifier.size(19.dp)) }
@@ -1975,24 +2018,31 @@ private fun SettingsScreen(
 private fun HostEditorDialog(initial: HostProfile?, onDismiss: () -> Unit, onSave: (HostProfile) -> Unit) {
     var name by remember(initial?.id) { mutableStateOf(initial?.name.orEmpty()) }
     var lanAddress by remember(initial?.id) { mutableStateOf(initial?.lanAddress.orEmpty()) }
+    var lanPort by remember(initial?.id) { mutableStateOf(initial?.lanPort?.toString() ?: initial?.port?.toString() ?: "22") }
     var externalAddress by remember(initial?.id) { mutableStateOf(initial?.externalAddress.orEmpty()) }
-    var port by remember(initial?.id) { mutableStateOf(initial?.port?.toString() ?: "22") }
+    var externalPort by remember(initial?.id) { mutableStateOf(initial?.externalPort?.toString() ?: initial?.port?.toString() ?: "22") }
     var username by remember(initial?.id) { mutableStateOf(initial?.username.orEmpty()) }
     var password by remember(initial?.id) { mutableStateOf(initial?.password.orEmpty()) }
     var icon by remember(initial?.id) { mutableStateOf(initial?.icon ?: "⌘") }
     EditorDialogFrame(if (initial == null) "添加主机" else "编辑主机", onDismiss, canSave = name.isNotBlank() && (lanAddress.isNotBlank() || externalAddress.isNotBlank()) && username.isNotBlank(), onConfirm = {
         val lan = lanAddress.trim()
         val external = externalAddress.trim()
-        onSave(HostProfile(initial?.id ?: UUID.randomUUID().toString(), name.trim(), external.ifBlank { lan }, port.toIntOrNull()?.takeIf { it in 1..65535 } ?: 22, username.trim(), password, icon.ifBlank { "⌘" }, initial?.directories.orEmpty(), initial?.syncFingerprint.orEmpty(), initial?.syncId.orEmpty(), lan, external, initial?.legacyAddress ?: initial?.address.orEmpty()))
+        val lPort = lanPort.toIntOrNull()?.takeIf { it in 1..65535 } ?: 22
+        val ePort = externalPort.toIntOrNull()?.takeIf { it in 1..65535 } ?: 22
+        val legacyPort = if (external.isNotBlank() && lan.isBlank()) ePort else lPort
+        onSave(HostProfile(initial?.id ?: UUID.randomUUID().toString(), name.trim(), external.ifBlank { lan }, legacyPort, username.trim(), password, icon.ifBlank { "⌘" }, initial?.directories.orEmpty(), initial?.syncFingerprint.orEmpty(), initial?.syncId.orEmpty(), lan, external, initial?.legacyAddress ?: initial?.address.orEmpty(), lanPort = lPort, externalPort = ePort))
     }) {
         OutlinedTextField(name, { name = it }, label = { Text("主机名称") }, placeholder = { Text("例如：Mac Studio") }, singleLine = true, modifier = Modifier.fillMaxWidth())
         IconPicker(icon, { icon = it }, listOf("⌘", "🖥️", "☁️", "🐧", "⚡", "🧪", "🏠", "💻", "🔧", "🌐"))
-        OutlinedTextField(lanAddress, { lanAddress = it }, label = { Text("内网地址（优先）") }, placeholder = { Text("例如：192.168.1.20") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(externalAddress, { externalAddress = it }, label = { Text("外网地址（备用）") }, placeholder = { Text("域名或公网 IP") }, singleLine = true, modifier = Modifier.fillMaxWidth())
         Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-            OutlinedTextField(port, { port = it.filter(Char::isDigit).take(5) }, label = { Text("SSH 端口") }, singleLine = true, modifier = Modifier.weight(0.65f))
-            OutlinedTextField(username, { username = it }, label = { Text("用户名") }, singleLine = true, modifier = Modifier.weight(1f))
+            OutlinedTextField(lanAddress, { lanAddress = it }, label = { Text("内网地址（优先）") }, placeholder = { Text("例如：192.168.1.20") }, singleLine = true, modifier = Modifier.weight(1f))
+            OutlinedTextField(lanPort, { lanPort = it.filter(Char::isDigit).take(5) }, label = { Text("内网端口") }, placeholder = { Text("22") }, singleLine = true, modifier = Modifier.width(96.dp))
         }
+        Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+            OutlinedTextField(externalAddress, { externalAddress = it }, label = { Text("外网地址（备用）") }, placeholder = { Text("域名或公网 IP") }, singleLine = true, modifier = Modifier.weight(1f))
+            OutlinedTextField(externalPort, { externalPort = it.filter(Char::isDigit).take(5) }, label = { Text("外网端口") }, placeholder = { Text("22") }, singleLine = true, modifier = Modifier.width(96.dp))
+        }
+        OutlinedTextField(username, { username = it }, label = { Text("用户名") }, singleLine = true, modifier = Modifier.fillMaxWidth())
         Text("优先连接内网地址；无法连接时自动切换外网地址。主机配置会按同步账号分发。", color = Muted, fontSize = 11.sp)
         OutlinedTextField(password, { password = it }, label = { Text("SSH 密码") }, placeholder = { Text("密码保存在本机加密区") }, singleLine = true,
             visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
@@ -2046,7 +2096,7 @@ private fun RemoteDirectoryPickerDialog(
     var directories by remember(host.id) { mutableStateOf<List<RemoteDirectoryEntry>>(emptyList()) }
     var loading by remember(host.id) { mutableStateOf(false) }
     var errorMessage by remember(host.id) { mutableStateOf<String?>(null) }
-    var pendingFingerprint by remember(host.id) { mutableStateOf<String?>(null) }
+    var pendingApproval by remember(host.id) { mutableStateOf<HostKeyApprovalRequiredException?>(null) }
     var directoryQuery by remember(host.id) { mutableStateOf("") }
     val filteredDirectories = remember(directories, directoryQuery) {
         if (directoryQuery.isBlank()) directories
@@ -2068,7 +2118,7 @@ private fun RemoteDirectoryPickerDialog(
                 currentPath = listing.path
                 directories = listing.directories
             } catch (approval: HostKeyApprovalRequiredException) {
-                pendingFingerprint = approval.fingerprint
+                pendingApproval = approval
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Exception) {
@@ -2146,10 +2196,10 @@ private fun RemoteDirectoryPickerDialog(
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消", color = Muted) } },
     )
 
-    pendingFingerprint?.let { fingerprint ->
+    pendingApproval?.let { approval ->
         AlertDialog(
             onDismissRequest = {
-                pendingFingerprint = null
+                pendingApproval = null
                 errorMessage = "未确认主机指纹，无法浏览目录。"
             },
             containerColor = Panel,
@@ -2157,20 +2207,20 @@ private fun RemoteDirectoryPickerDialog(
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("请核对 SSH 主机指纹。接受后会保存在本机，后续连接会自动校验。", color = Muted)
-                    Text("${host.address}:${host.port}", color = White, fontWeight = FontWeight.Medium)
-                    Text(fingerprint, color = Mint, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+                    Text("${approval.address}:${approval.port}", color = White, fontWeight = FontWeight.Medium)
+                    Text(approval.fingerprint, color = Mint, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
                 }
             },
             confirmButton = {
                 TextButton(onClick = {
-                    store.trustHostKey(host.address, host.port, fingerprint)
-                    pendingFingerprint = null
+                    store.trustHostKey(approval.address, approval.port, approval.fingerprint)
+                    pendingApproval = null
                     loadDirectory(currentPath)
                 }) { Text("信任并继续", color = Mint) }
             },
             dismissButton = {
                 TextButton(onClick = {
-                    pendingFingerprint = null
+                    pendingApproval = null
                     errorMessage = "未确认主机指纹，无法浏览目录。"
                 }) { Text("取消", color = Muted) }
             },

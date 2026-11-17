@@ -1119,10 +1119,12 @@ class App(Gtk.Window):
     def agent_changed(self, *_):
         host = self.current_host()
         if not self.refreshing and host and self.agents.get_active() >= 0:
-            host["selected_agent"] = self.agents.get_active()
-            self.persist()
-            self.refresh_agent_list()
-            self.push_host_state(host)
+            if host.get("selected_agent") != self.agents.get_active():
+                host["selected_agent"] = self.agents.get_active()
+                self.persist()
+                self.refresh_agent_list()
+                self.push_host_state(host)
+                self.push_host_profile(host)
 
     def host_agents(self, host):
         return self.data["agents"]
@@ -1166,22 +1168,52 @@ class App(Gtk.Window):
             hint.get_style_context().add_class("subtitle")
             self.hosts_list.pack_start(hint, False, False, 0)
         self.hosts_list.show_all()
-        self.refreshing = True
-        self.agents.remove_all()
         agents = self.host_agents(host) if host else []
-        for agent in agents:
-            self.agents.append_text(agent["name"])
-        if agents:
-            self.agents.set_active(min(max(host.get("selected_agent", 0), 0), len(agents) - 1))
-        self.refreshing = False
+        target_names = [agent["name"] for agent in agents]
+        current_model = self.agents.get_model()
+        current_names = [row[0] for row in current_model] if current_model else []
+        target_active = min(max(host.get("selected_agent", 0), 0), len(agents) - 1) if agents else -1
+        if current_names != target_names:
+            self.refreshing = True
+            self.agents.remove_all()
+            for agent in agents:
+                self.agents.append_text(agent["name"])
+            if target_active >= 0:
+                self.agents.set_active(target_active)
+            self.refreshing = False
+        elif self.agents.get_active() != target_active and target_active >= 0:
+            self.refreshing = True
+            self.agents.set_active(target_active)
+            self.refreshing = False
         self.refresh_agent_list()
         self.refresh_directories()
 
     def refresh_agent_list(self):
-        for child in self.agents_list.get_children():
-            self.agents_list.remove(child)
         host = self.current_host()
         agents = self.host_agents(host) if host else []
+        active_index = self.agents.get_active()
+        children = self.agents_list.get_children()
+        if len(children) == len(agents):
+            matched = True
+            for child, item in zip(children, agents):
+                btn = child.get_children()[0] if isinstance(child, Gtk.Box) and child.get_children() else None
+                if not isinstance(btn, Gtk.Button) or btn.get_label() != item.get("name", ""):
+                    matched = False
+                    break
+            if matched:
+                for index, child in enumerate(children):
+                    btn = child.get_children()[0] if isinstance(child, Gtk.Box) and child.get_children() else None
+                    if btn:
+                        ctx = btn.get_style_context()
+                        if index == active_index:
+                            if not ctx.has_class("agent-selected"):
+                                ctx.add_class("agent-selected")
+                        else:
+                            if ctx.has_class("agent-selected"):
+                                ctx.remove_class("agent-selected")
+                return
+        for child in self.agents_list.get_children():
+            self.agents_list.remove(child)
         for index, item in enumerate(agents):
             row = Gtk.Box(spacing=4)
             row.set_hexpand(True)
@@ -1190,7 +1222,7 @@ class App(Gtk.Window):
             button.get_style_context().add_class("host-button")
             self.fit_sidebar_label(button)
             button.set_hexpand(True)
-            if index == self.agents.get_active():
+            if index == active_index:
                 button.get_style_context().add_class("agent-selected")
             button.connect("clicked", lambda _button, i=index: self.agents.set_active(i))
             row.pack_start(button, True, True, 0)
@@ -1909,7 +1941,8 @@ class App(Gtk.Window):
                         merged["address"] = merged.get("external_address") or merged.get("lan_address") or ""
                         if profile.get("selected_agent_command"):
                             selected = next((i for i, item in enumerate(self.data.get("agents", [])) if item.get("command") == profile["selected_agent_command"]), None)
-                            if selected is not None: merged["selected_agent"] = selected
+                            if selected is not None and host.get("selected_agent") is None:
+                                merged["selected_agent"] = selected
                         result.append(merged)
                     else:
                         payload = self.host_profile_payload(host)
