@@ -95,6 +95,8 @@ object SyncClient {
             if (host.syncFingerprint.isNotBlank()) add(host.syncFingerprint)
             if (host.legacyAddress.isNotBlank()) add(host.legacyAddress.lowercase())
             if (host.address.isNotBlank()) add(host.address.lowercase())
+            if (host.lanAddress.isNotBlank()) add(host.lanAddress.lowercase())
+            if (host.externalAddress.isNotBlank()) add(host.externalAddress.lowercase())
         }
         return sources.map { source -> MessageDigest.getInstance("SHA-256").digest(source.toByteArray()).joinToString("") { "%02x".format(it.toInt() and 0xff) } }.distinct()
     }
