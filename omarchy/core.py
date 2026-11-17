@@ -1,6 +1,7 @@
 """Persistent configuration and remote session command construction."""
 import json
 import hashlib
+import base64
 import os
 from pathlib import Path
 import shlex
@@ -11,6 +12,7 @@ import uuid
 import re
 import subprocess
 import urllib.request
+from urllib.parse import quote
 
 DEFAULT_AGENTS = [
     {"name": "Codex", "command": "codex"},
@@ -133,17 +135,80 @@ def sync_data_request(config, method, path, item=None):
     class NoRedirect(urllib.request.HTTPRedirectHandler):
         def redirect_request(self, req, fp, code, msg, headers, newurl):
             return None
-    with urllib.request.build_opener(NoRedirect).open(req, timeout=5) as response:
+    with urllib.request.build_opener(NoRedirect, urllib.request.ProxyHandler({})).open(req, timeout=5) as response:
         return json.load(response)
 
 
-def sync_request(config, method, session_id=None, item=None):
+def sync_request(config, method, session_id=None, item=None, host=None):
+    if host:
+        path = "/v1/hosts/" + sync_host_key(host) + "/users/" + quote(host.get("username", ""), safe="") + "/sessions"
+        return sync_data_request(config, method, path + ("/" + session_id if session_id else ""), item)
     return sync_data_request(config, method, "/v1/sessions" + ("/" + session_id if session_id else ""), item)
 
 
 def sync_host_key(host):
-    value = f"{host.get('username', '')}@{host.get('address', '').lower()}:{host.get('port', 22)}"
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+    fingerprint = host.get("_sync_fingerprint", "")
+    if fingerprint: return hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()
+    return hashlib.sha256(host.get("address", "").lower().encode("utf-8")).hexdigest()
+
+
+def ssh_host_fingerprint(host):
+    known_hosts = Path.home() / ".ssh" / "known_hosts"
+    if not known_hosts.exists(): return ""
+    args = ["ssh-keygen", "-F", host.get("address", ""), "-f", str(known_hosts)]
+    if int(host.get("port", 22)) != 22: args += ["-p", str(host["port"])]
+    try: result = subprocess.run(args, capture_output=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired): return ""
+    keys = []
+    for line in result.stdout.decode("utf-8", errors="ignore").splitlines():
+        fields = line.split()
+        if len(fields) >= 3 and not fields[0].startswith("#"):
+            try: keys.append(base64.b64decode(fields[2]))
+            except Exception: pass
+    return "SHA256:" + base64.b64encode(hashlib.sha256(sorted(keys)[0]).digest()).decode("ascii").rstrip("=") if keys else ""
+
+
+def sync_auth_request(config, action, username, password):
+    url = config.get("sync_url", "").rstrip("/") + "/v1/auth/" + action
+    body = json.dumps({"username": username, "password": password}).encode()
+    req = urllib.request.Request(url, data=body, method="POST", headers={"Content-Type": "application/json"})
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl): return None
+    with urllib.request.build_opener(NoRedirect, urllib.request.ProxyHandler({})).open(req, timeout=10) as response:
+        return json.load(response)
+
+
+def save_sync_password(username, password):
+    identifier = hashlib.sha256(username.lower().encode()).hexdigest()
+    try:
+        result = subprocess.run(["secret-tool", "store", "--label=Remote Dev Terminal Account", "application", "remote-dev-terminal", "sync-user", identifier],
+                                input=password, text=True, capture_output=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError("无法保存登录密码到系统密钥环，请安装 secret-tool 并解锁密钥环") from exc
+    if result.returncode:
+        raise RuntimeError("无法保存登录密码：" + (result.stderr.strip() or "密钥环不可用"))
+
+
+def load_sync_password(username):
+    if not username: return ""
+    identifier = hashlib.sha256(username.lower().encode()).hexdigest()
+    try:
+        result = subprocess.run(["secret-tool", "lookup", "application", "remote-dev-terminal", "sync-user", identifier],
+                                capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return result.stdout if result.returncode == 0 else ""
+
+
+def clear_sync_password(username):
+    if not username:
+        return
+    identifier = hashlib.sha256(username.lower().encode()).hexdigest()
+    try:
+        subprocess.run(["secret-tool", "clear", "application", "remote-dev-terminal", "sync-user", identifier],
+                       capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
 
 
 def ssh_argv(host, directory, agent, session_id=None, control_path=None, restore_only=False):

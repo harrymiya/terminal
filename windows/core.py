@@ -1,6 +1,7 @@
 """Persistent configuration and remote session command construction."""
 import json
 import hashlib
+import base64
 import os
 from pathlib import Path
 import shlex
@@ -11,6 +12,7 @@ import uuid
 import re
 import subprocess
 import urllib.request
+from urllib.parse import quote
 
 DEFAULT_AGENTS = [
     {"name": "Codex", "command": "codex"},
@@ -86,8 +88,65 @@ def save_config(data, path=None):
 
 
 
-def sync_request(config, method, session_id=None, item=None):
+def sync_request(config, method, session_id=None, item=None, host=None):
+    if host:
+        path = "/v1/hosts/" + sync_host_key(host) + "/users/" + quote(host.get("username", ""), safe="") + "/sessions"
+        return sync_data_request(config, method, path + ("/" + session_id if session_id else ""), item)
     return sync_data_request(config, method, "/v1/sessions" + ("/" + session_id if session_id else ""), item)
+
+
+def sync_auth_request(config, action, username, password):
+    url = config.get("sync_url", "").rstrip("/") + "/v1/auth/" + action
+    req = urllib.request.Request(url, data=json.dumps({"username": username, "password": password}).encode(), method="POST", headers={"Content-Type": "application/json"})
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl): return None
+    with urllib.request.build_opener(NoRedirect, urllib.request.ProxyHandler({})).open(req, timeout=10) as response:
+        return json.load(response)
+
+
+def _dpapi(data, protect):
+    import ctypes
+    from ctypes import wintypes
+    class DATA_BLOB(ctypes.Structure):
+        _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_byte))]
+    source_buffer = ctypes.create_string_buffer(data)
+    source = DATA_BLOB(len(data), ctypes.cast(source_buffer, ctypes.POINTER(ctypes.c_byte)))
+    target = DATA_BLOB()
+    fn = ctypes.windll.crypt32.CryptProtectData if protect else ctypes.windll.crypt32.CryptUnprotectData
+    if not fn(ctypes.byref(source), None, None, None, None, 0, ctypes.byref(target)):
+        raise RuntimeError("Windows 无法解密或加密登录密码")
+    try: return ctypes.string_at(target.pbData, target.cbData)
+    finally: ctypes.windll.kernel32.LocalFree(target.pbData)
+
+
+def save_sync_password(username, password, config=None):
+    import base64
+    identifier = hashlib.sha256(username.lower().encode()).hexdigest()
+    config = config if config is not None else load_config()
+    config.setdefault("sync_passwords", {})[identifier] = base64.b64encode(_dpapi(password.encode(), True)).decode("ascii")
+    save_config(config)
+
+
+def load_sync_password(username):
+    import base64
+    if not username: return ""
+    identifier = hashlib.sha256(username.lower().encode()).hexdigest()
+    try:
+        raw = load_config().get("sync_passwords", {}).get(identifier)
+        return _dpapi(base64.b64decode(raw), False).decode("utf-8") if raw else ""
+    except (ValueError, RuntimeError, OSError): return ""
+
+
+def clear_sync_password(username, config=None):
+    if not username: return
+    identifier = hashlib.sha256(username.lower().encode()).hexdigest()
+    config = config if config is not None else load_config()
+    passwords = config.get("sync_passwords", {})
+    if identifier in passwords:
+        passwords.pop(identifier, None)
+        if passwords: config["sync_passwords"] = passwords
+        else: config.pop("sync_passwords", None)
+        save_config(config)
 
 
 def save_host_password(credential_id, password):
@@ -134,13 +193,30 @@ def sync_data_request(config, method, path, item=None):
     class NoRedirect(urllib.request.HTTPRedirectHandler):
         def redirect_request(self, req, fp, code, msg, headers, newurl):
             return None
-    with urllib.request.build_opener(NoRedirect).open(req, timeout=5) as response:
+    with urllib.request.build_opener(NoRedirect, urllib.request.ProxyHandler({})).open(req, timeout=5) as response:
         return json.load(response)
 
 
 def sync_host_key(host):
-    value = f"{host.get('username', '')}@{host.get('address', '').lower()}:{host.get('port', 22)}"
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+    fingerprint = host.get("_sync_fingerprint", "")
+    if fingerprint: return hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()
+    return hashlib.sha256(host.get("address", "").lower().encode("utf-8")).hexdigest()
+
+
+def ssh_host_fingerprint(host):
+    known_hosts = Path.home() / ".ssh" / "known_hosts"
+    if not known_hosts.exists(): return ""
+    args = ["ssh-keygen", "-F", host.get("address", ""), "-f", str(known_hosts)]
+    if int(host.get("port", 22)) != 22: args += ["-p", str(host["port"])]
+    try: result = subprocess.run(args, capture_output=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired): return ""
+    keys = []
+    for line in result.stdout.decode("utf-8", errors="ignore").splitlines():
+        fields = line.split()
+        if len(fields) >= 3 and not fields[0].startswith("#"):
+            try: keys.append(base64.b64decode(fields[2]))
+            except Exception: pass
+    return "SHA256:" + base64.b64encode(hashlib.sha256(sorted(keys)[0]).digest()).decode("ascii").rstrip("=") if keys else ""
 
 
 def ssh_argv(host, directory, agent, session_id=None, control_path=None, restore_only=False):

@@ -18,7 +18,7 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("Vte", "2.91")
 gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Gtk, Vte, GLib, Gdk, GdkPixbuf
-from core import load_config, save_config, ssh_argv, auto_enter_signature, AutoEnterController, quota_agent, quota_remote_command, quota_from_codex, quota_from_agy, format_quota, upload_image, MAX_IMAGE_BYTES, sync_request, sync_data_request, sync_host_key, render_battery_pixbuf, save_host_password, clear_host_password, ssh_auth_environment
+from core import load_config, save_config, ssh_argv, auto_enter_signature, AutoEnterController, quota_agent, quota_remote_command, quota_from_codex, quota_from_agy, format_quota, upload_image, MAX_IMAGE_BYTES, sync_request, sync_data_request, sync_host_key, ssh_host_fingerprint, sync_auth_request, save_sync_password, load_sync_password, clear_sync_password, render_battery_pixbuf, save_host_password, clear_host_password, ssh_auth_environment
 from version import VERSION
 
 
@@ -193,7 +193,7 @@ class App(Gtk.Window):
             .quota-value { color: #e8eef6; font-size: 12px; font-weight: bold; }
             .quota-value:backdrop { color: #e8eef6; }
             notebook { background-color: #0c1119; border: none; }
-            notebook > header { background-color: #101823; border-bottom: 1px solid #243546; padding: 2px 4px 0 4px; }
+            notebook > header { background-color: #101823; border-bottom: 1px solid #243546; min-height: 32px; padding: 0 4px; }
             notebook tab {
                 background-image: none;
                 background-color: #16222f;
@@ -202,7 +202,7 @@ class App(Gtk.Window):
                 border-bottom: none;
                 border-radius: 0;
                 padding: 4px 12px;
-                margin: 2px 2px 0 2px;
+                margin: 0 2px;
                 box-shadow: none;
                 min-height: 24px;
             }
@@ -356,12 +356,14 @@ class App(Gtk.Window):
         root.get_style_context().add_class("sidebar-paned")
         self.sidebar_paned = root
         self.sidebar_width_timer = None
+        self._edit_sidebar_width = None
+        self._restoring_sidebar_width = False
         saved_width = self.data.get("sidebar_width")
         self.sidebar_width = saved_width if isinstance(saved_width, int) and 200 <= saved_width <= 2000 else self.sidebar_target_width() + 32
         self.add(root)
         self.sidebar_revealer = Gtk.Revealer(reveal_child=True)
         self.sidebar_revealer.set_transition_type(Gtk.RevealerTransitionType.SLIDE_RIGHT)
-        root.pack1(self.sidebar_revealer, resize=False, shrink=False)
+        root.pack1(self.sidebar_revealer, resize=False, shrink=True)
         sidebar_frame = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         sidebar_frame.get_style_context().add_class("sidebar")
         self.sidebar_revealer.add(sidebar_frame)
@@ -540,7 +542,7 @@ class App(Gtk.Window):
             self.sidebar_paned.set_position(0)
 
     def sidebar_width_changed(self, paned, _property):
-        if not self.sidebar_revealer.get_visible() or not paned.get_mapped():
+        if self._restoring_sidebar_width or not self.sidebar_revealer.get_visible() or not paned.get_mapped():
             return
         width = paned.get_position()
         minimum = max(200, paned.get_property("min-position"))
@@ -913,22 +915,129 @@ class App(Gtk.Window):
         self.data["auto_enter_delay"] = self.delay.get_value_as_int()
         self.persist()
 
+    def manage_sync_users(self, parent=None):
+        if not self.data.get("sync_is_admin"):
+            return Gtk.Box() if parent is not None else None
+        dialog = parent or Gtk.Dialog(title="用户维护", transient_for=self, modal=True)
+        if parent is None:
+            dialog.add_buttons("关闭", Gtk.ResponseType.CLOSE)
+            dialog.set_default_size(760, 520)
+            box = dialog.get_content_area()
+        else:
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin=8)
+            box.pack_start(Gtk.Label(label="用户维护", xalign=0), False, False, 0)
+        rows = Gtk.ListBox()
+        rows.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_min_content_height(190 if parent is not None else 240)
+        scroll.add(rows)
+        box.pack_start(scroll, True, True, 8)
+        status = Gtk.Label(xalign=0)
+        box.pack_start(status, False, False, 8)
+        actions = Gtk.Box(spacing=8)
+        add_button, edit_button, delete_button = (Gtk.Button(label=s) for s in ("添加用户", "编辑所选", "删除所选"))
+        for button in (add_button, edit_button, delete_button): actions.pack_start(button, True, True, 0)
+        box.pack_start(actions, False, False, 8)
+        def reload_users():
+            for child in rows.get_children(): rows.remove(child)
+            try:
+                users = sync_data_request(self.data, "GET", "/v1/admin/users").get("users", [])
+                for user in users:
+                    suffix = " · 管理员" if user.get("is_admin") else ""
+                    row = Gtk.ListBoxRow()
+                    row.user = user
+                    row.add(Gtk.Label(label=user["username"] + suffix, xalign=0, margin=8))
+                    rows.add(row)
+                rows.show_all()
+                status.set_text("")
+            except Exception as exc:
+                status.set_text(str(exc))
+        def edit_user(_button, user=None):
+            selected = user or getattr(rows.get_selected_row(), "user", None)
+            if user is None and selected is None:
+                status.set_text("请先选择一个用户。")
+                return
+            form = Gtk.Dialog(title="添加用户" if selected is None else "编辑用户", transient_for=dialog, modal=True)
+            form.add_buttons("取消", Gtk.ResponseType.CANCEL, "保存", Gtk.ResponseType.OK)
+            grid = Gtk.Grid(column_spacing=10, row_spacing=8, margin=16)
+            form.get_content_area().add(grid)
+            name_entry = Gtk.Entry(text=selected.get("username", "") if selected else "")
+            pass_entry = Gtk.Entry()
+            pass_entry.set_visibility(False)
+            pass_entry.set_placeholder_text("留空保留当前密码" if selected else "至少 8 位")
+            admin_check = Gtk.CheckButton(label="管理员")
+            admin_check.set_active(bool(selected and selected.get("is_admin")))
+            grid.attach(Gtk.Label(label="账号", xalign=0), 0, 0, 1, 1); grid.attach(name_entry, 1, 0, 1, 1)
+            grid.attach(Gtk.Label(label="密码", xalign=0), 0, 1, 1, 1); grid.attach(pass_entry, 1, 1, 1, 1)
+            grid.attach(admin_check, 1, 2, 1, 1)
+            form.show_all()
+            if form.run() == Gtk.ResponseType.OK:
+                payload = {"username": name_entry.get_text().strip(), "password": pass_entry.get_text(), "is_admin": admin_check.get_active()}
+                try:
+                    if selected:
+                        sync_data_request(self.data, "PUT", "/v1/admin/users/" + str(selected["id"]), payload)
+                        if selected["username"] == self.data.get("sync_username"):
+                            old_username = selected["username"]
+                            remembered_password = load_sync_password(old_username) if self.data.get("sync_remember", True) else ""
+                            password_to_remember = payload["password"] or remembered_password
+                            self.data["sync_username"] = payload["username"]
+                            self.persist()
+                            if old_username != payload["username"] or payload["password"] or not self.data.get("sync_remember", True):
+                                clear_sync_password(old_username, self.data)
+                                if self.data.get("sync_remember", True) and password_to_remember:
+                                    save_sync_password(payload["username"], password_to_remember, self.data)
+                                self.persist()
+                    else:
+                        sync_data_request(self.data, "POST", "/v1/admin/users", payload)
+                    reload_users()
+                except Exception as exc:
+                    status.set_text(str(exc))
+            form.destroy()
+        def delete_user(_button):
+            selected = getattr(rows.get_selected_row(), "user", None)
+            if not selected:
+                status.set_text("请先选择一个用户。")
+                return
+            confirm = Gtk.MessageDialog(transient_for=dialog, modal=True, message_type=Gtk.MessageType.QUESTION,
+                buttons=Gtk.ButtonsType.YES_NO, text="删除账号「%s」？" % selected["username"])
+            answer = confirm.run(); confirm.destroy()
+            if answer == Gtk.ResponseType.YES:
+                try:
+                    sync_data_request(self.data, "DELETE", "/v1/admin/users/" + str(selected["id"]))
+                    reload_users()
+                except Exception as exc:
+                    status.set_text(str(exc))
+        add_button.connect("clicked", edit_user, None)
+        edit_button.connect("clicked", edit_user)
+        delete_button.connect("clicked", delete_user)
+        reload_users()
+        if parent is None:
+            self.scale_layout(dialog)
+            dialog.show_all()
+            dialog.run()
+            dialog.destroy()
+        else:
+            box.show_all()
+        return box
     def show_settings(self, *_):
         dialog = Gtk.Dialog(title="系统设置", transient_for=self, modal=True)
+        dialog.set_default_size(820, 720)
         dialog.add_buttons("取消", Gtk.ResponseType.CANCEL, "保存", Gtk.ResponseType.OK)
         grid = Gtk.Grid(column_spacing=10, row_spacing=8, margin=16)
         dialog.get_content_area().add(grid)
         url = Gtk.Entry(text=self.data.get("sync_url", ""))
-        token = Gtk.Entry(text=self.data.get("sync_token", "")); token.set_visibility(False)
         grid.attach(Gtk.Label(label="同步服务地址", xalign=0), 0, 0, 1, 1); grid.attach(url, 1, 0, 1, 1)
-        grid.attach(Gtk.Label(label="同步服务令牌", xalign=0), 0, 1, 1, 1); grid.attach(token, 1, 1, 1, 1)
+        grid.attach(Gtk.Label(label="同步账号", xalign=0), 0, 1, 1, 1); grid.attach(Gtk.Label(label=self.data.get("sync_username", "未登录"), xalign=0), 1, 1, 1, 1)
         grid.attach(self.auto_enter, 0, 2, 2, 1)
         delay_row = Gtk.Box(spacing=6); delay_row.pack_start(Gtk.Label(label="自动回车延迟"), False, False, 0)
         delay_row.pack_start(self.delay, False, False, 0); delay_row.pack_start(Gtk.Label(label="秒"), False, False, 0)
         grid.attach(delay_row, 0, 3, 2, 1)
+        if self.data.get("sync_is_admin"):
+            grid.attach(self.manage_sync_users(dialog), 0, 4, 2, 1)
         self.scale_layout(dialog); dialog.show_all()
         if dialog.run() == Gtk.ResponseType.OK:
-            self.data["sync_url"], self.data["sync_token"] = url.get_text().strip(), token.get_text().strip()
+            if self.data.get("sync_url") != url.get_text().strip(): self.data["sync_token"] = ""
+            self.data["sync_url"] = url.get_text().strip()
             self.save_settings(); self.refresh_all_shared()
         delay_row.remove(self.delay); grid.remove(self.auto_enter); dialog.destroy()
 
@@ -959,6 +1068,7 @@ class App(Gtk.Window):
             host["selected_agent"] = self.agents.get_active()
             self.persist()
             self.refresh_agent_list()
+            self.push_host_state(host)
 
     def host_agents(self, host):
         return self.data["agents"]
@@ -968,16 +1078,20 @@ class App(Gtk.Window):
         selected = self.hosts.get_active()
         for child in self.hosts_list.get_children():
             self.hosts_list.remove(child)
+        host_radio_group = None
         for index, item in enumerate(self.data["hosts"]):
             row = Gtk.Box(spacing=4)
-            button = Gtk.Button(label=item["name"] + "  ·  " + item["address"])
+            button = Gtk.RadioButton.new_with_label_from_widget(host_radio_group, item["name"] + "  ·  " + item["address"])
+            if host_radio_group is None:
+                host_radio_group = button
+            button.set_active(index == selected)
             button.set_tooltip_text(f"{item.get('username', '')}@{item['address']}:{item.get('port', 22)}\n点击切换主机")
             button.get_style_context().add_class("host-button")
             if button.get_child():
                 button.get_child().set_xalign(0.0)
             if index == selected:
                 button.get_style_context().add_class("host-selected")
-            button.connect("clicked", lambda _button, i=index: self.hosts.set_active(i))
+            button.connect("toggled", lambda radio, i=index: self.hosts.set_active(i) if radio.get_active() else None)
             row.pack_start(button, True, True, 0)
             if self.edit_mode:
                 for label, action in [("✎", "edit"), ("×", "delete")]:
@@ -1040,12 +1154,39 @@ class App(Gtk.Window):
         self.manage(button, "agents", action)
 
     def toggle_sidebar_edit(self, button):
+        restore_width = None
+        if button.get_active():
+            if self.sidebar_width_timer:
+                GLib.source_remove(self.sidebar_width_timer)
+                self.sidebar_width_timer = None
+            self._edit_sidebar_width = self.sidebar_paned.get_position()
+        else:
+            restore_width = self._edit_sidebar_width
+            self._edit_sidebar_width = None
         self.edit_mode = button.get_active()
         button.set_label("完成" if self.edit_mode else "编辑")
         button.set_tooltip_text("退出编辑模式" if self.edit_mode else "进入编辑模式，管理主机、Agent 和工作区")
         for actions in self.edit_actions:
             actions.set_visible(self.edit_mode)
         self.refresh_host_content()
+        if restore_width is not None:
+            GLib.idle_add(self.restore_sidebar_width, restore_width)
+
+    def restore_sidebar_width(self, width):
+        if self.sidebar_width_timer:
+            GLib.source_remove(self.sidebar_width_timer)
+            self.sidebar_width_timer = None
+        self._restoring_sidebar_width = True
+        self.sidebar_paned.set_position(width)
+        self.sidebar_width = width
+        self.data["sidebar_width"] = width
+        self.persist()
+        GLib.timeout_add(700, self.finish_sidebar_width_restore)
+        return False
+
+    def finish_sidebar_width_restore(self):
+        self._restoring_sidebar_width = False
+        return False
 
     def manage_host(self, button, index, action):
         self.hosts.set_active(index)
@@ -1219,6 +1360,7 @@ class App(Gtk.Window):
             if kind == "directories": self.push_workspace_list(host)
             elif kind == "agents": self.push_agent_list()
             if kind == "hosts":
+                self.push_host_state(items[index] if action == "edit" else items[-1])
                 self.refresh_all_shared()
             if kind == "hosts" and action == "add":
                 self.hosts.set_active(len(items) - 1)
@@ -1444,8 +1586,11 @@ class App(Gtk.Window):
         if not self.data.get("sync_url"):
             return
         key = self.shared_host_key(host)
+        fingerprint = ssh_host_fingerprint(host)
+        if fingerprint: host["_sync_fingerprint"] = fingerprint
         snapshot = dict(host)
-        pending_key = (key, self.data.get("sync_token"))
+        request_token = self.data.get("sync_token")
+        pending_key = (key, request_token)
         if pending_key in self.sync_pending:
             return
         if key in self.workspace_dirty:
@@ -1454,29 +1599,63 @@ class App(Gtk.Window):
         self.sync_pending.add(pending_key)
         def worker():
             try:
-                result = sync_request(self.data, "GET")["sessions"]
+                result = sync_request(self.data, "GET", host=snapshot)["sessions"]
                 workspaces = sync_data_request(self.data, "GET", "/v1/workspaces/" + sync_host_key(snapshot))
-                agents = sync_data_request(self.data, "GET", "/v1/agents/global")
-                result = (result, workspaces, agents)
-            except Exception:
-                result = "同步失败，请检查地址和令牌"
+                agents = sync_data_request(self.data, "GET", "/v1/agents/account")
+                profile = sync_data_request(self.data, "GET", "/v1/hosts/" + sync_host_key(snapshot) + "/state")
+                result = (result, workspaces, agents, profile)
+            except Exception as exc:
+                if getattr(exc, "code", None) in (401, 403):
+                    GLib.idle_add(self.expire_sync_token, request_token)
+                result = "同步失败，请检查服务地址和登录账号"
             def finish():
                 self.sync_pending.discard(pending_key)
                 if any(self.shared_host_key(h) == key for h in self.data["hosts"]):
                     if isinstance(result, tuple):
-                        sessions, workspaces, agents = result
+                        sessions, workspaces, agents, profile = result
                         changed = False
                         local_host = next((h for h in self.data["hosts"] if self.shared_host_key(h) == key), None)
                         if (local_host is not None and key not in self.workspace_dirty
                                 and workspace_version == self.workspace_versions.get(key, 0)):
-                            if workspaces.get("configured") and local_host.get("directories", []) != workspaces["workspaces"]:
-                                local_host["directories"] = workspaces["workspaces"]; changed = True
+                            revisions = self.data.setdefault("workspace_sync_revisions", {})
+                            identity = self.data.get("sync_username", "") + ":" + sync_host_key(snapshot)
+                            local_revision = revisions.get(identity, 0)
+                            remote_revision = workspaces.get("revision", 0)
+                            if workspaces.get("configured") and local_revision < remote_revision:
+                                self.push_workspace_list(local_host)
+                            elif workspaces.get("configured") and local_host.get("directories", []) != workspaces["workspaces"]:
+                                local_host["directories"] = workspaces["workspaces"]
+                                revisions[identity] = remote_revision
+                                changed = True
                             elif not workspaces.get("configured") and local_host.get("directories"):
                                 self.push_workspace_list(local_host)
-                        if agents.get("configured") and self.data.get("agents", []) != agents["agents"]:
-                            self.data["agents"] = agents["agents"]; changed = True
+                            elif workspaces.get("configured"):
+                                revisions[identity] = remote_revision
+                        agent_revisions = self.data.setdefault("agent_sync_revisions", {})
+                        identity = self.data.get("sync_username", "") + ":account"
+                        local_agent_revision = agent_revisions.get(identity, 0)
+                        remote_agent_revision = agents.get("revision", 0)
+                        if agents.get("configured") and local_agent_revision < remote_agent_revision:
+                            self.push_agent_list(local_host)
+                        elif agents.get("configured") and self.data.get("agents", []) != agents["agents"]:
+                            self.data["agents"] = agents["agents"]; agent_revisions[identity] = remote_agent_revision; changed = True
                         elif not agents.get("configured") and self.data.get("agents"):
-                            self.push_agent_list()
+                            self.push_agent_list(local_host)
+                        elif agents.get("configured"):
+                            agent_revisions[identity] = remote_agent_revision
+                        local_profile = profile.get("state", {})
+                        if profile.get("configured") and local_host is not None:
+                            if local_profile.get("name") and local_host.get("name") != local_profile["name"]:
+                                local_host["name"] = local_profile["name"]; changed = True
+                            if local_profile.get("icon") and local_host.get("icon") != local_profile["icon"]:
+                                local_host["icon"] = local_profile["icon"]; changed = True
+                            command = local_profile.get("selected_agent_command")
+                            if command:
+                                index = next((i for i, agent in enumerate(self.data.get("agents", [])) if agent.get("command") == command), -1)
+                                if index >= 0 and local_host.get("selected_agent", 0) != index:
+                                    local_host["selected_agent"] = index; changed = True
+                        elif local_host is not None:
+                            self.push_host_state(local_host)
                         if changed:
                             self.persist(); self.refresh()
                         self.shared_by_host[key] = sessions
@@ -1499,11 +1678,14 @@ class App(Gtk.Window):
         self.workspace_dirty.add(key)
         items = [{"id": d.get("id") or __import__("hashlib").sha256(d["path"].encode()).hexdigest()[:32], "name": d["name"], "path": d["path"], "icon": d.get("icon", "📁")} for d in host.get("directories", [])]
         path = "/v1/workspaces/" + sync_host_key(host)
+        identity = self.data.get("sync_username", "") + ":" + sync_host_key(host)
+        base_revision = self.data.setdefault("workspace_sync_revisions", {}).get(identity, 0)
         def worker():
             try:
-                sync_data_request(self.data, "PUT", path, {"workspaces": items})
+                response = sync_data_request(self.data, "PUT", path, {"workspaces": items, "base_revision": base_revision})
                 error = False
             except Exception:
+                response = None
                 error = True
             def finish():
                 if self.workspace_versions.get(key) == version:
@@ -1511,23 +1693,130 @@ class App(Gtk.Window):
                         self.shared_by_host[key] = "工作区同步失败，将自动重试"
                     else:
                         self.workspace_dirty.discard(key)
+                        self.data.setdefault("workspace_sync_revisions", {})[identity] = response.get("revision", base_revision)
+                        local_host = next((h for h in self.data["hosts"] if self.shared_host_key(h) == key), None)
+                        merged = response.get("workspaces", items)
+                        if local_host is not None and local_host.get("directories", []) != merged:
+                            local_host["directories"] = merged
+                            self.persist(); self.refresh()
+                        else:
+                            self.persist()
                     self.update_sync_status()
                 return False
             GLib.idle_add(finish)
         self.sync_executor.submit(worker)
 
-    def push_agent_list(self):
+    def push_agent_list(self, host=None):
         if not self.data.get("sync_url"): return
         items = [{"id": a.get("id") or __import__("hashlib").sha256(a["command"].encode()).hexdigest()[:32], "name": a["name"], "command": a["command"], "icon": a.get("icon", "✳")} for a in self.data.get("agents", [])]
-        self.sync_executor.submit(lambda: sync_data_request(self.data, "PUT", "/v1/agents/global", {"agents": items}))
+        host = host or self.current_host()
+        if not host: return
+        identity = self.data.get("sync_username", "") + ":account"
+        base_revision = self.data.setdefault("agent_sync_revisions", {}).get(identity, 0)
+        def worker():
+            try:
+                response = sync_data_request(self.data, "PUT", "/v1/agents/account", {"agents": items, "base_revision": base_revision})
+                def finish():
+                    self.data.setdefault("agent_sync_revisions", {})[identity] = response.get("revision", base_revision)
+                    if self.data.get("agents", []) != response.get("agents", []):
+                        self.data["agents"] = response.get("agents", []); self.persist(); self.refresh()
+                    else: self.persist()
+                    return False
+                GLib.idle_add(finish)
+            except Exception:
+                pass
+        self.sync_executor.submit(worker)
+
+    def push_host_state(self, host):
+        if not host or not self.data.get("sync_url"): return
+        agents = self.host_agents(host)
+        index = min(max(host.get("selected_agent", 0), 0), max(0, len(agents) - 1))
+        state = {"name": host.get("name", "主机"), "icon": host.get("icon", "⌘")}
+        if agents: state["selected_agent_command"] = agents[index].get("command", "")
+        path = "/v1/hosts/" + sync_host_key(host) + "/state"
+        def worker():
+            try:
+                for _ in range(3):
+                    current = sync_data_request(self.data, "GET", path)
+                    merged = dict(current.get("state", {})); merged.update(state)
+                    try:
+                        sync_data_request(self.data, "PUT", path, {"state": merged, "base_revision": current.get("revision", 0)})
+                        break
+                    except Exception as exc:
+                        if "409" not in str(exc): raise
+            except Exception:
+                pass
+        self.sync_executor.submit(worker)
 
     def poll_shared(self):
         for host in self.data["hosts"]:
             self.refresh_host_shared(host)
         return True
 
+    def ensure_sync_login(self):
+        if not self.data.get("sync_url"):
+            return False
+        if self.data.get("sync_token"):
+            try:
+                account = sync_data_request(self.data, "GET", "/v1/auth/me")
+                self.data["sync_username"] = account.get("username", "")
+                self.data["sync_is_admin"] = account.get("is_admin", False)
+                return True
+            except Exception:
+                self.data["sync_token"] = ""
+        dialog = Gtk.Dialog(title="同步账号登录", transient_for=self, modal=True)
+        dialog.add_button("取消", Gtk.ResponseType.CANCEL)
+        dialog.add_button("登录", Gtk.ResponseType.OK)
+        grid = Gtk.Grid(column_spacing=10, row_spacing=8, margin=16)
+        dialog.get_content_area().add(grid)
+        username = Gtk.Entry(text=self.data.get("sync_username", ""))
+        password = Gtk.Entry()
+        password.set_visibility(False)
+        password.set_text(load_sync_password(username.get_text()))
+        remember = Gtk.CheckButton(label="保持账号密码")
+        remember.set_active(bool(self.data.get("sync_remember", True)))
+        status = Gtk.Label(xalign=0)
+        status.set_line_wrap(True)
+        grid.attach(Gtk.Label(label="账号", xalign=0), 0, 0, 1, 1)
+        grid.attach(username, 1, 0, 1, 1)
+        grid.attach(Gtk.Label(label="密码", xalign=0), 0, 1, 1, 1)
+        grid.attach(password, 1, 1, 1, 1)
+        grid.attach(remember, 1, 2, 1, 1)
+        grid.attach(status, 0, 3, 2, 1)
+        dialog.show_all()
+        while True:
+            response = dialog.run()
+            if response != Gtk.ResponseType.OK:
+                dialog.destroy()
+                return False
+            account_name, account_password = username.get_text().strip(), password.get_text()
+            try:
+                result = sync_auth_request(self.data, "login", account_name, account_password)
+                self.data["sync_username"] = result["username"]
+                self.data["sync_token"] = result["access_token"]
+                self.data["sync_is_admin"] = result.get("is_admin", False)
+                self.data["sync_remember"] = remember.get_active()
+                if remember.get_active():
+                    save_sync_password(account_name, account_password, self.data)
+                else:
+                    clear_sync_password(account_name, self.data)
+                self.persist()
+                dialog.destroy()
+                return True
+            except Exception as exc:
+                status.set_text(str(exc))
+
+    def expire_sync_token(self, expired_token):
+        if expired_token and self.data.get("sync_token") == expired_token:
+            self.data["sync_token"] = ""
+            self.persist()
+            self.ensure_sync_login()
+        return False
+
     def refresh_all_shared(self):
         self.shared_by_host = {}
+        if self.data.get("sync_url") and not self.ensure_sync_login():
+            return
         for host in self.data["hosts"]:
             if self.data.get("sync_url"):
                 self.shared_by_host[self.shared_host_key(host)] = "正在同步…"
@@ -1538,7 +1827,7 @@ class App(Gtk.Window):
             return
         def worker():
             try:
-                sync_request(self.data, method, session_id, item)
+                sync_request(self.data, method, session_id, item, host=host)
                 GLib.idle_add(self.refresh_host_shared, host)
             except Exception as exc:
                 GLib.idle_add(self.message, "会话同步失败", str(exc))
@@ -1547,11 +1836,11 @@ class App(Gtk.Window):
     def show_shared_sessions(self, _button):
         host = self.current_host()
         if not host or not self.data.get("sync_url"):
-            self.message("共享会话", "请先在系统设置中填写同步服务地址和令牌。")
+            self.message("共享会话", "请先在系统设置中填写同步服务地址并登录账号。")
             return
         def worker():
             try:
-                items = sync_request(self.data, "GET")["sessions"]
+                items = sync_request(self.data, "GET", host=host)["sessions"]
             except Exception as exc:
                 GLib.idle_add(self.message, "读取共享会话失败", str(exc))
                 return
