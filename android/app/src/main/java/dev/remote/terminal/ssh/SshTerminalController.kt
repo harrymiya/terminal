@@ -68,6 +68,9 @@ class SshTerminalController(
     @Volatile private var columns = 80
     @Volatile private var rows = 30
 
+    fun isConnected(): Boolean = activeConnection.get()?.session?.isConnected == true
+    fun isClosed(): Boolean = !running.get()
+
     fun start() {
         if (!running.compareAndSet(false, true)) return
         Thread(::connectionLoop, "ssh-${task.id.take(8)}").start()

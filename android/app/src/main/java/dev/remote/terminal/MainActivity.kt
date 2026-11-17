@@ -164,6 +164,7 @@ import dev.remote.terminal.ssh.TerminalCell
 import dev.remote.terminal.ssh.TerminalBuffer
 import dev.remote.terminal.ssh.TerminalConnectionRegistry
 import dev.remote.terminal.ssh.TerminalKeepAliveService
+import dev.remote.terminal.ssh.AutoConfirmEngine
 import dev.remote.terminal.ssh.terminalColor
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
@@ -251,7 +252,11 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private class TerminalSessionState(var task: TerminalTask, private val mainHandler: Handler) {
+private class TerminalSessionState(
+    var task: TerminalTask,
+    private val mainHandler: Handler,
+    private val appContext: Context,
+) : AutoConfirmEngine.SessionCallback {
     val buffer = TerminalBuffer()
     var status by mutableStateOf("等待连接")
     var unread by mutableStateOf(false)
@@ -269,32 +274,67 @@ private class TerminalSessionState(var task: TerminalTask, private val mainHandl
     var hostKeyAddress by mutableStateOf("")
     var hostKeyPort by mutableStateOf(22)
     var resolveHostKey: ((Boolean) -> Unit)? = null
-    private var autoEnterRunnable: Runnable? = null
     var autoEnterDeadline by mutableStateOf<Long?>(null)
         private set
     lateinit var controller: SshTerminalController
 
-    fun cancelAutoEnter() {
-        autoEnterRunnable?.let(mainHandler::removeCallbacks)
-        autoEnterRunnable = null
+    override fun isConnected(): Boolean = status.startsWith("已连接") && controller.isConnected()
+    override fun isClosed(): Boolean = controller.isClosed()
+    override fun getVisibleTail(): String = buffer.visibleTextTail(100)
+    override fun sendInput(text: String): Boolean = controller.sendIfConnected(text)
+
+    override fun onAutoEnterScheduled(deadlineUptimeMillis: Long, promptSignature: String) {
+        autoEnterDeadline = deadlineUptimeMillis
+        autoEnterPromptSignature = promptSignature
+        autoEnterEligible = true
+    }
+
+    override fun onAutoEnterCancelled() {
         autoEnterDeadline = null
+        autoEnterEligible = false
+        autoEnterAwaitingResponse = false
+    }
+
+    override fun onAutoEnterTriggered(promptSignature: String) {
+        autoEnterDeadline = null
+        autoEnterAwaitingResponse = true
+        handledPromptSignature = promptSignature
+    }
+
+    override fun onNeedsActionChanged(needsAction: Boolean) {
+        if (needsAction && !this.needsAction && !confirmationAlerted) {
+            confirmationAlerted = true
+            alertConfirmation(appContext)
+        } else if (!needsAction) {
+            confirmationAlerted = false
+        }
+        this.needsAction = needsAction
+    }
+
+    fun cancelAutoEnter() {
+        AutoConfirmEngine.cancel(task.id)
+        autoEnterDeadline = null
+        autoEnterEligible = false
+        autoEnterAwaitingResponse = false
     }
 
     fun pauseAutoEnter() {
-        cancelAutoEnter()
+        AutoConfirmEngine.pause(task.id)
+        autoEnterDeadline = null
         autoEnterEligible = false
         autoEnterPromptSignature = null
         autoEnterAwaitingResponse = false
     }
 
     fun onConnectionUnavailable() {
-        cancelAutoEnter()
+        AutoConfirmEngine.cancel(task.id)
+        autoEnterDeadline = null
         autoEnterAwaitingResponse = false
     }
 
     fun clearAttention() {
-        autoEnterPromptSignature?.let { handledPromptSignature = it }
-        cancelAutoEnter()
+        AutoConfirmEngine.markHandled(task.id, autoEnterPromptSignature)
+        autoEnterDeadline = null
         needsAction = false
         autoEnterEligible = false
         autoEnterPromptSignature = null
@@ -302,38 +342,14 @@ private class TerminalSessionState(var task: TerminalTask, private val mainHandl
         unread = false
     }
 
-    fun hasScheduledAutoEnter(): Boolean = autoEnterRunnable != null
+    fun hasScheduledAutoEnter(): Boolean = autoEnterDeadline != null
 
     fun resumeAutoEnter(delaySeconds: Int, enabled: Boolean) {
-        if (!enabled || !needsAction || !autoEnterEligible || autoEnterAwaitingResponse) return
-        val signature = autoEnterPromptSignature ?: return
-        scheduleAutoEnter(delaySeconds, signature) {
-            detectAutoEnterPromptSignature(buffer.visibleTextTail(100)) == signature
+        AutoConfirmEngine.globalEnabled = enabled
+        AutoConfirmEngine.globalDelaySeconds = delaySeconds
+        if (enabled && isConnected()) {
+            AutoConfirmEngine.onOutputReceived(task.id)
         }
-    }
-
-    fun scheduleAutoEnter(delaySeconds: Int, promptSignature: String, isPromptStillActive: () -> Boolean) {
-        cancelAutoEnter()
-        autoEnterPromptSignature = promptSignature
-        lateinit var pending: Runnable
-        pending = Runnable {
-            if (autoEnterRunnable !== pending) return@Runnable
-            autoEnterRunnable = null
-            autoEnterDeadline = null
-            if (!needsAction || !autoEnterEligible || autoEnterPromptSignature != promptSignature || !isPromptStillActive()) {
-                autoEnterAwaitingResponse = false
-                return@Runnable
-            }
-            if (controller.sendIfConnected("\r")) {
-                autoEnterAwaitingResponse = true
-            } else {
-                autoEnterAwaitingResponse = false
-            }
-        }
-        autoEnterRunnable = pending
-        val delayMillis = delaySeconds.coerceIn(1, 30) * 1000L
-        autoEnterDeadline = android.os.SystemClock.uptimeMillis() + delayMillis
-        mainHandler.postDelayed(pending, delayMillis)
     }
 }
 
@@ -365,6 +381,9 @@ private fun RemoteTerminalApp(store: LocalStore) {
         }
         var autoEnterEnabled by remember { mutableStateOf(store.loadAutoEnterEnabled()) }
         var autoEnterDelaySeconds by remember { mutableIntStateOf(store.loadAutoEnterDelaySeconds()) }
+        AutoConfirmEngine.init(appContext)
+        AutoConfirmEngine.globalEnabled = autoEnterEnabled
+        AutoConfirmEngine.globalDelaySeconds = autoEnterDelaySeconds
         var syncUrl by remember { mutableStateOf(store.loadSyncUrl()) }
         var syncToken by remember { mutableStateOf(store.loadSyncToken()) }
         var editingHost by remember { mutableStateOf<HostProfile?>(null) }
@@ -561,6 +580,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
                     .onSuccess { startupShared = startupShared.filterNot { it.first.id == session.task.host.id && it.second.optString("id") == session.task.id.replace("-", "") } }
                     .onFailure { snackbars.showSnackbar("同步关闭失败：${it.message}") }
             }
+            AutoConfirmEngine.unregisterSession(session.task.id)
             session.cancelAutoEnter()
             TerminalConnectionRegistry.unregister(session.task.id, session.controller)
             session.controller.close()
@@ -590,7 +610,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
                         .onFailure { snackbars.showSnackbar("会话同步失败：${it.message}") }
                 }
             }
-            val state = TerminalSessionState(task, mainHandler)
+            val state = TerminalSessionState(task, mainHandler, appContext)
             state.controller = SshTerminalController(
                 task = task, store = store, restoreOnly = restoredTask != null,
                 onStatus = { value -> mainHandler.post {
@@ -604,41 +624,13 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 onQuota = { quota -> mainHandler.post { state.codexQuota = quota } },
                 onBytes = { bytes ->
                     state.buffer.feed(bytes)
+                    AutoConfirmEngine.onOutputReceived(task.id)
                     mainHandler.post {
                         state.lastOutputAt = android.os.SystemClock.elapsedRealtime()
                         state.isStreaming = true
                         mainHandler.postDelayed({
                             if (android.os.SystemClock.elapsedRealtime() - state.lastOutputAt >= 1_100L) state.isStreaming = false
                         }, 1_150L)
-                        val visibleText = state.buffer.visibleTextTail(100)
-                        val hasRequest = ActionRequestRegex.containsMatchIn(visibleText)
-                        if (hasRequest && !state.confirmationAlerted) {
-                            state.confirmationAlerted = true
-                            alertConfirmation(appContext)
-                        } else if (!hasRequest) {
-                            state.confirmationAlerted = false
-                        }
-                        val promptSignature = if (hasRequest) detectAutoEnterPromptSignature(visibleText) else null
-                        val previousPromptSignature = state.autoEnterPromptSignature
-                        state.needsAction = hasRequest
-                        if (promptSignature != null) {
-                            if (previousPromptSignature != promptSignature) state.autoEnterAwaitingResponse = false
-                            state.autoEnterPromptSignature = promptSignature
-                            state.autoEnterEligible = promptSignature != state.handledPromptSignature
-                            if (state.autoEnterEligible && autoEnterEnabled && !state.autoEnterAwaitingResponse &&
-                                (previousPromptSignature != promptSignature || !state.hasScheduledAutoEnter())
-                            ) {
-                                state.scheduleAutoEnter(autoEnterDelaySeconds, promptSignature) {
-                                    detectAutoEnterPromptSignature(state.buffer.visibleTextTail(100)) == promptSignature
-                                }
-                            } else if (!state.autoEnterEligible || !autoEnterEnabled) {
-                                state.cancelAutoEnter()
-                            }
-                        } else {
-                            state.autoEnterAwaitingResponse = false
-                            state.handledPromptSignature = null
-                            state.pauseAutoEnter()
-                        }
                         if (route != AppRoute.TERMINAL || sessions.getOrNull(activePage) !== state) {
                             state.unread = true
                         }
@@ -650,6 +642,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 } },
             )
             TerminalConnectionRegistry.register(task.id, state.controller)
+            AutoConfirmEngine.registerSession(task.id, state)
             sessions.add(state)
             if (restoredTask == null) {
                 activePage = sessions.lastIndex
@@ -876,6 +869,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
                     onEnabledChange = { enabled ->
                         autoEnterEnabled = enabled
                         store.saveAutoEnterEnabled(enabled)
+                        AutoConfirmEngine.globalEnabled = enabled
                         sessions.forEach { session ->
                             if (enabled) session.resumeAutoEnter(autoEnterDelaySeconds, enabled)
                             else session.cancelAutoEnter()
@@ -884,6 +878,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
                     onDelaySecondsChange = { seconds ->
                         autoEnterDelaySeconds = seconds
                         store.saveAutoEnterDelaySeconds(seconds)
+                        AutoConfirmEngine.globalDelaySeconds = seconds
                         if (autoEnterEnabled) sessions.forEach { it.resumeAutoEnter(seconds, autoEnterEnabled) }
                     },
                     onBack = { route = if (syncUrl.isNotBlank() && syncToken.isBlank()) AppRoute.LOGIN else AppRoute.HOME },
@@ -2113,6 +2108,28 @@ private fun SettingsScreen(
                 steps = 28,
             )
             Text("倒计时期间手动输入或操作会取消自动回车。", color = Muted, fontSize = 11.sp)
+            Divider()
+            Text("后台保活与熄屏运行", color = White, fontWeight = FontWeight.SemiBold)
+            val isIgnoringBattery = remember { mutableStateOf(TerminalKeepAliveService.isIgnoringBatteryOptimizations(context)) }
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Column(Modifier.weight(1f)) {
+                    Text("无限制后台运行 / 忽略电池优化", color = White, fontSize = 13.sp)
+                    Text(
+                        if (isIgnoringBattery.value) "系统已允许无限制后台运行，熄屏后终端与自动确认持续生效。"
+                        else "系统可能会在手机熄屏后冻结网络或限制后台定时器，建议开启以保证熄屏自动确认。",
+                        color = if (isIgnoringBattery.value) Mint else Coral, fontSize = 11.sp
+                    )
+                }
+                if (!isIgnoringBattery.value) {
+                    FilledTonalButton(onClick = {
+                        TerminalKeepAliveService.requestIgnoreBatteryOptimizations(context)
+                    }) {
+                        Text("去设置")
+                    }
+                } else {
+                    Text("已允许", color = Mint, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                }
+            }
         }
     }
 }

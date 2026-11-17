@@ -50,6 +50,7 @@ class TerminalKeepAliveService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        AutoConfirmEngine.init(this)
         createNotificationChannel()
         monitorDefaultNetwork()
     }
@@ -62,7 +63,9 @@ class TerminalKeepAliveService : Service() {
         }
 
         val notification = buildNotification()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
         } else {
             startForeground(NOTIFICATION_ID, notification)
@@ -201,6 +204,25 @@ class TerminalKeepAliveService : Service() {
 
         fun stop(context: Context) {
             context.stopService(Intent(context, TerminalKeepAliveService::class.java).setAction(ACTION_STOP))
+        }
+
+        fun isIgnoringBatteryOptimizations(context: Context): Boolean {
+            val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return true
+            return pm.isIgnoringBatteryOptimizations(context.packageName)
+        }
+
+        fun requestIgnoreBatteryOptimizations(context: Context) {
+            runCatching {
+                val intent = if (!isIgnoringBatteryOptimizations(context)) {
+                    Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                        data = android.net.Uri.parse("package:${context.packageName}")
+                    }
+                } else {
+                    Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+                }
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                context.startActivity(intent)
+            }
         }
     }
 }
