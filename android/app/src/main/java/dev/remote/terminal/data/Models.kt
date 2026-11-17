@@ -31,6 +31,7 @@ data class HostProfile(
     val password: String = "",
     val icon: String = "⌘",
     val directories: List<ProjectDirectory> = emptyList(),
+    val syncFingerprint: String = "",
 )
 
 data class AgentPreset(
@@ -67,6 +68,16 @@ class LocalStore(context: Context) {
         preferences.edit().putStringSet("dirty_workspaces", hostIds.toSet()).apply()
     }
 
+    fun loadWorkspaceRevision(identity: String): Int = preferences.getInt("workspace_revision_$identity", -1)
+    fun saveWorkspaceRevision(identity: String, revision: Int) {
+        preferences.edit().putInt("workspace_revision_$identity", revision).apply()
+    }
+
+    fun loadAgentRevision(identity: String): Int = preferences.getInt("agent_revision_$identity", -1)
+    fun saveAgentRevision(identity: String, revision: Int) {
+        preferences.edit().putInt("agent_revision_$identity", revision).apply()
+    }
+
     fun loadSyncUrl(): String {
         preferences.getString("sync_url", null)?.let { return it }
         val legacy = runCatching { JSONArray(preferences.getString("hosts", "[]")) }.getOrNull()
@@ -84,6 +95,14 @@ class LocalStore(context: Context) {
     }
     fun saveSyncSettings(url: String, token: String) {
         preferences.edit().putString("sync_url", url.trim()).putString("sync_token", vault.encrypt(token)).apply()
+    }
+
+    fun loadSyncUsername(): String = preferences.getString("sync_username", "").orEmpty()
+    fun loadSyncPassword(): String = vault.decrypt(preferences.getString("sync_password", null))
+    fun saveSyncCredentials(username: String, password: String, remember: Boolean) {
+        val editor = preferences.edit().putString("sync_username", username.trim())
+        if (remember) editor.putString("sync_password", vault.encrypt(password)) else editor.remove("sync_password")
+        editor.apply()
     }
 
     @Synchronized
@@ -124,6 +143,7 @@ class LocalStore(context: Context) {
                 port = item.optInt("port", 22), username = item.getString("username"),
                 password = vault.decrypt(preferences.getString("password_${item.getString("id")}", null)),
                 icon = item.optString("icon", "⌘"), directories = directories,
+                syncFingerprint = item.optString("sync_fingerprint", ""),
             )
         }
     }.getOrDefault(emptyList())
@@ -135,7 +155,8 @@ class LocalStore(context: Context) {
             val dirs = JSONArray()
             host.directories.forEach { dirs.put(JSONObject().put("id", it.id).put("name", it.name).put("path", it.path).put("icon", it.icon)) }
             root.put(JSONObject().put("id", host.id).put("name", host.name).put("address", host.address)
-                .put("port", host.port).put("username", host.username).put("icon", host.icon).put("directories", dirs))
+                .put("port", host.port).put("username", host.username).put("icon", host.icon).put("directories", dirs)
+                .put("sync_fingerprint", host.syncFingerprint))
             preferences.edit().putString("password_${host.id}", vault.encrypt(host.password)).apply()
         }
         (oldIds - hosts.map { it.id }.toSet()).forEach { preferences.edit().remove("password_$it").apply() }

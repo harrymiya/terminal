@@ -5,7 +5,7 @@ import re
 import sys
 
 root = Path(__file__).resolve().parent.parent
-gradle = (root / "app/build.gradle.kts").read_text(encoding="utf-8")
+gradle = (root / "android/app/build.gradle.kts").read_text(encoding="utf-8")
 match = re.search(r'^\s*versionName\s*=\s*"([^"\n]+)"', gradle, re.MULTILINE)
 if not match or not re.fullmatch(r"[0-9]+(?:\.[0-9]+)+", match.group(1)):
     sys.exit("Cannot find a valid Android versionName")

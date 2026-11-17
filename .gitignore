@@ -1,7 +1,10 @@
 .gradle/
+**/.gradle/
 .kotlin/
+**/.kotlin/
 **/build/
 local.properties
+**/local.properties
 dist/*.apk
 config/app-release-upload.token
 __pycache__/

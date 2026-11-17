@@ -6,6 +6,8 @@ import android.content.ClipboardManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import org.json.JSONArray
+import org.json.JSONObject
 import android.text.Editable
 import android.text.InputType
 import android.text.TextWatcher
@@ -88,6 +90,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Divider
 import androidx.compose.material3.FilledTonalButton
@@ -242,7 +245,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private class TerminalSessionState(val task: TerminalTask, private val mainHandler: Handler) {
+private class TerminalSessionState(var task: TerminalTask, private val mainHandler: Handler) {
     val buffer = TerminalBuffer()
     var status by mutableStateOf("等待连接")
     var unread by mutableStateOf(false)
@@ -325,7 +328,7 @@ private class TerminalSessionState(val task: TerminalTask, private val mainHandl
     }
 }
 
-private enum class AppRoute { HOME, MANAGE, TERMINAL, AGENTS, SETTINGS }
+private enum class AppRoute { HOME, MANAGE, TERMINAL, AGENTS, SETTINGS, LOGIN }
 
 @Composable
 private fun RemoteTerminalApp(store: LocalStore) {
@@ -339,7 +342,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
         val sessions = remember { mutableStateListOf<TerminalSessionState>() }
         var selectedHostId by rememberSaveable { mutableStateOf(hosts.firstOrNull()?.id.orEmpty()) }
         var selectedAgentId by rememberSaveable { mutableStateOf(agents.firstOrNull()?.id.orEmpty()) }
-        var route by rememberSaveable { mutableStateOf(AppRoute.HOME) }
+        var route by rememberSaveable { mutableStateOf(if (store.loadSyncUrl().isNotBlank() && store.loadSyncToken().isBlank()) AppRoute.LOGIN else AppRoute.HOME) }
         var activePage by rememberSaveable { mutableIntStateOf(0) }
         val sessionStore = remember { SessionStore(appContext) }
         var sessionsRestored by remember { mutableStateOf(false) }
@@ -372,6 +375,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
         val scope = rememberCoroutineScope()
         val dirtyWorkspaces = remember { store.loadDirtyWorkspaces().toMutableSet() }
         val workspaceVersions = remember { mutableMapOf<String, Int>() }
+        val agentVersions = remember { mutableMapOf<String, Int>() }
         val mainHandler = remember { Handler(Looper.getMainLooper()) }
         val selectedHost = hosts.firstOrNull { it.id == selectedHostId } ?: hosts.firstOrNull()
         val selectedAgent = agents.firstOrNull { it.id == selectedAgentId } ?: agents.firstOrNull()
@@ -388,12 +392,27 @@ private fun RemoteTerminalApp(store: LocalStore) {
             workspaceVersions[host.id] = version
             dirtyWorkspaces.add(host.id)
             store.saveDirtyWorkspaces(dirtyWorkspaces)
+            val identity = "${store.loadSyncUsername().lowercase()}:${SyncClient.hostIdentity(host)}"
             scope.launch {
-                runCatching { withContext(SyncClient.dispatcher) { SyncClient.saveWorkspaces(host, directories) } }
-                    .onSuccess {
+                runCatching {
+                    withContext(SyncClient.dispatcher) {
+                        val baseRevision = store.loadWorkspaceRevision(identity).coerceAtLeast(0)
+                        val response = SyncClient.saveWorkspaces(host, directories, baseRevision)
+                        response to baseRevision
+                    }
+                }
+                    .onSuccess { (response, baseRevision) ->
                         if (workspaceVersions[host.id] == version) {
+                            store.saveWorkspaceRevision(identity, response.optInt("revision", baseRevision))
                             dirtyWorkspaces.remove(host.id)
                             store.saveDirtyWorkspaces(dirtyWorkspaces)
+                            val array = response.optJSONArray("workspaces") ?: JSONArray()
+                            val merged = (0 until array.length()).map { index ->
+                                array.getJSONObject(index).let { ProjectDirectory(it.getString("id"), it.getString("name"), it.getString("path"), it.optString("icon", "📁")) }
+                            }
+                            hosts.firstOrNull { it.id == host.id }?.takeIf { it.directories != merged }?.let { current ->
+                                saveHosts(hosts.map { if (it.id == current.id) it.copy(directories = merged) else it })
+                            }
                         }
                     }
                     .onFailure { snackbars.showSnackbar("工作区同步失败，将自动重试：${it.message}") }
@@ -402,8 +421,26 @@ private fun RemoteTerminalApp(store: LocalStore) {
 
         fun syncAgentList(host: HostProfile, items: List<AgentPreset>) {
             if (syncUrl.isBlank()) return
+            val identity = SyncClient.agentRevisionIdentity(store.loadSyncUsername())
+            val version = (agentVersions[identity] ?: 0) + 1
+            agentVersions[identity] = version
             scope.launch {
-                runCatching { withContext(SyncClient.dispatcher) { SyncClient.saveAgents(host, items) } }
+                runCatching {
+                    withContext(SyncClient.dispatcher) {
+                        val baseRevision = store.loadAgentRevision(identity).coerceAtLeast(0)
+                        val response = SyncClient.saveAgents(host, items, baseRevision)
+                        store.saveAgentRevision(identity, response.optInt("revision", baseRevision))
+                        response
+                    }
+                }
+                    .onSuccess { response ->
+                        if (agentVersions[identity] == version) {
+                            val merged = SyncClient.agentsFromSnapshot(response)
+                            if (agents.toList() != merged) {
+                                agents.clear(); agents.addAll(merged); store.saveAgents(merged)
+                            }
+                        }
+                    }
                     .onFailure { snackbars.showSnackbar("Agent 同步失败：${it.message}") }
             }
         }
@@ -551,7 +588,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
             sessionsRestored = true
         }
 
-        val syncHosts = if (syncUrl.isNotBlank()) hosts else emptyList()
+        val syncHosts = if (syncUrl.isNotBlank() && syncToken.isNotBlank()) hosts else emptyList()
         LaunchedEffect(syncHosts, syncUrl, syncToken) {
             startupShared = startupShared.filter { entry -> syncHosts.any { it.id == entry.first.id } }
             syncLoading = syncHosts.isNotEmpty()
@@ -561,9 +598,17 @@ private fun RemoteTerminalApp(store: LocalStore) {
                     if (host.id in dirtyWorkspaces) {
                         val current = hosts.firstOrNull { it.id == host.id }
                         if (current != null) {
-                            runCatching { withContext(SyncClient.dispatcher) { SyncClient.saveWorkspaces(current, current.directories) } }
-                                .onSuccess {
+                            val identity = SyncClient.hostIdentity(current)
+                            val revisionIdentity = "${store.loadSyncUsername().lowercase()}:$identity"
+                            runCatching {
+                                withContext(SyncClient.dispatcher) {
+                                    val baseRevision = store.loadWorkspaceRevision(revisionIdentity).coerceAtLeast(0)
+                                    val response = SyncClient.saveWorkspaces(current, current.directories, baseRevision)
+                                    response to baseRevision
+                                }
+                            }.onSuccess { (response, baseRevision) ->
                                     if ((workspaceVersions[host.id] ?: 0) == workspaceVersion) {
+                                        store.saveWorkspaceRevision(revisionIdentity, response.optInt("revision", baseRevision))
                                         dirtyWorkspaces.remove(host.id)
                                         store.saveDirtyWorkspaces(dirtyWorkspaces)
                                     }
@@ -572,23 +617,72 @@ private fun RemoteTerminalApp(store: LocalStore) {
                     }
                     runCatching {
                         withContext(SyncClient.dispatcher) {
-                        val configuredWorkspaces = SyncClient.hasWorkspaces(host)
-                        val configuredAgents = SyncClient.hasAgents(host)
-                            val remoteWorkspaces = SyncClient.listWorkspaces(host)
-                            val remoteAgents = SyncClient.listAgents(host)
-                        Triple(configuredWorkspaces to remoteWorkspaces, configuredAgents to remoteAgents, Unit)
+                        val workspaceSnapshot = SyncClient.getWorkspacesSnapshot(host)
+                        val configuredWorkspaces = workspaceSnapshot.optBoolean("configured", false)
+                        val agentsSnapshot = SyncClient.getAgentsSnapshot(host)
+                        val configuredAgents = agentsSnapshot.optBoolean("configured", false)
+                            val workspaceArray = workspaceSnapshot.getJSONArray("workspaces")
+                            val remoteWorkspaces = (0 until workspaceArray.length()).map { index ->
+                                workspaceArray.getJSONObject(index).let { ProjectDirectory(it.getString("id"), it.getString("name"), it.getString("path"), it.optString("icon", "📁")) }
+                            }
+                            val remoteAgents = SyncClient.agentsFromSnapshot(agentsSnapshot)
+                        val hostState = SyncClient.getHostState(host)
+                        Triple(Triple(configuredWorkspaces, remoteWorkspaces, workspaceSnapshot), Triple(configuredAgents, remoteAgents, agentsSnapshot), hostState)
                         }
-                    }.onSuccess { (workspaceState, agentState, _) ->
-                        val (configuredWorkspaces, remoteWorkspaces) = workspaceState
-                        val (configuredAgents, remoteAgents) = agentState
+                    }.onSuccess { (workspaceState, agentState, hostState) ->
+                        val (configuredWorkspaces, remoteWorkspaces, workspaceSnapshot) = workspaceState
+                        val (configuredAgents, remoteAgents, agentsSnapshot) = agentState
                         val localHost = hosts.firstOrNull { it.id == host.id } ?: host
                         if (host.id !in dirtyWorkspaces && (workspaceVersions[host.id] ?: 0) == workspaceVersion) {
-                            if (!configuredWorkspaces && localHost.directories.isNotEmpty()) syncWorkspaceList(localHost, localHost.directories)
-                            else if (localHost.directories != remoteWorkspaces) saveHosts(hosts.map { if (it.id == host.id) it.copy(directories = remoteWorkspaces) else it })
+                            val identity = SyncClient.hostIdentity(localHost)
+                            val revisionIdentity = "${store.loadSyncUsername().lowercase()}:$identity"
+                            val localRevision = store.loadWorkspaceRevision(revisionIdentity)
+                            val remoteRevision = workspaceSnapshot.optInt("revision", 0)
+                            if (localRevision < remoteRevision) {
+                                syncWorkspaceList(localHost, localHost.directories)
+                            } else if (!configuredWorkspaces && localHost.directories.isNotEmpty()) {
+                                syncWorkspaceList(localHost, localHost.directories)
+                            } else {
+                                if (localHost.directories != remoteWorkspaces)
+                                    saveHosts(hosts.map { if (it.id == host.id) it.copy(directories = remoteWorkspaces) else it })
+                                store.saveWorkspaceRevision(revisionIdentity, remoteRevision)
+                            }
                         }
-                        if (!configuredAgents && agents.isNotEmpty()) syncAgentList(localHost, agents.toList())
-                        else if (agents.toList() != remoteAgents) {
-                            agents.clear(); agents.addAll(remoteAgents); store.saveAgents(remoteAgents)
+                        val agentRevisionIdentity = SyncClient.agentRevisionIdentity(store.loadSyncUsername())
+                        val localAgentRevision = store.loadAgentRevision(agentRevisionIdentity)
+                        val remoteAgentRevision = agentsSnapshot.optInt("revision", 0)
+                        if ((!configuredAgents && agents.isNotEmpty()) || localAgentRevision < remoteAgentRevision) {
+                            syncAgentList(localHost, agents.toList())
+                        } else {
+                            if (agents.toList() != remoteAgents) {
+                                agents.clear(); agents.addAll(remoteAgents); store.saveAgents(remoteAgents)
+                            }
+                            store.saveAgentRevision(agentRevisionIdentity, remoteAgentRevision)
+                        }
+                        if (hostState.optBoolean("configured")) {
+                            val profile = hostState.optJSONObject("state") ?: JSONObject()
+                            val command = profile.optString("selected_agent_command")
+                            if (selectedHostId == host.id && command.isNotBlank()) {
+                                agents.firstOrNull { it.command == command }?.let { selectedAgentId = it.id }
+                            }
+                            if (localHost.name != profile.optString("name", localHost.name)
+                                || localHost.icon != profile.optString("icon", localHost.icon)) {
+                                val updated = localHost.copy(name = profile.optString("name", localHost.name), icon = profile.optString("icon", localHost.icon))
+                                saveHosts(hosts.map { if (it.id == host.id) updated else it })
+                            }
+                        } else if (selectedHostId == host.id) {
+                            agents.firstOrNull { it.id == selectedAgentId }?.let { agent ->
+                                runCatching { withContext(SyncClient.dispatcher) { SyncClient.updateHostProfile(localHost, agent.command) } }
+                            }
+                        }
+                    }.onFailure { error ->
+                        val message = error.message.orEmpty()
+                        if (message.contains("401") || message.contains("403")) {
+                            syncToken = ""
+                            store.saveSyncSettings(syncUrl, "")
+                            route = AppRoute.LOGIN
+                        } else {
+                            snackbars.showSnackbar("${host.name} 同步失败：$message")
                         }
                     }
                     runCatching { withContext(SyncClient.dispatcher) { SyncClient.list(host) } }
@@ -613,7 +707,10 @@ private fun RemoteTerminalApp(store: LocalStore) {
             when (route) {
                 AppRoute.HOME -> HomeScreen(
                     hosts = hosts, agents = agents, selectedHost = selectedHost, selectedAgent = selectedAgent,
-                    sessions = sessions, onSelectHost = { selectedHostId = it.id }, onSelectAgent = { selectedAgentId = it.id },
+                    sessions = sessions, onSelectHost = { selectedHostId = it.id }, onSelectAgent = { agent ->
+                        selectedAgentId = agent.id
+                        selectedHost?.let { host -> scope.launch { runCatching { withContext(SyncClient.dispatcher) { SyncClient.updateCurrentAgent(host, agent.command) } } } }
+                    },
                     syncLoading = syncLoading,
                     onManage = { route = AppRoute.MANAGE }, onAddHost = { addingHost = true },
                     onAddDirectory = { selectedHost?.let { editingDirectory = it.id to null } },
@@ -642,11 +739,14 @@ private fun RemoteTerminalApp(store: LocalStore) {
                     store = store,
                     syncUrl = syncUrl,
                     syncToken = syncToken,
+                    syncUsername = store.loadSyncUsername(),
                     onSyncSettingsChange = { url, token ->
+                        if (syncUrl != url) syncToken = ""
                         syncUrl = url
                         syncToken = token
                         store.saveSyncSettings(url, token)
                     },
+                    onLogin = { route = AppRoute.LOGIN },
                     enabled = autoEnterEnabled,
                     delaySeconds = autoEnterDelaySeconds,
                     onEnabledChange = { enabled ->
@@ -662,7 +762,19 @@ private fun RemoteTerminalApp(store: LocalStore) {
                         store.saveAutoEnterDelaySeconds(seconds)
                         if (autoEnterEnabled) sessions.forEach { it.resumeAutoEnter(seconds, autoEnterEnabled) }
                     },
+                    onBack = { route = if (syncUrl.isNotBlank() && syncToken.isBlank()) AppRoute.LOGIN else AppRoute.HOME },
+                )
+                AppRoute.LOGIN -> SyncLoginScreen(
+                    syncUrl = syncUrl,
+                    initialUsername = store.loadSyncUsername(),
+                    initialPassword = store.loadSyncPassword(),
                     onBack = { route = AppRoute.HOME },
+                    onSuccess = { username, password, token, remember ->
+                        syncToken = token
+                        store.saveSyncSettings(syncUrl, token)
+                        store.saveSyncCredentials(username, password, remember)
+                        route = AppRoute.HOME
+                    },
                 )
                 AppRoute.TERMINAL -> TerminalWorkspace(
                     sessions = sessions, initialIndex = activePage,
@@ -701,6 +813,9 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 val wasNew = hosts.none { it.id == host.id }
                 saveHosts(if (wasNew) hosts.toList() + host else hosts.map { if (it.id == host.id) host else it })
                 selectedHostId = host.id
+                agents.firstOrNull { it.id == selectedAgentId }?.let { agent ->
+                    scope.launch { runCatching { withContext(SyncClient.dispatcher) { SyncClient.updateHostProfile(host, agent.command) } } }
+                }
                 if (syncUrl.isNotBlank()) refreshShared(host)
                 addingHost = false; editingHost = null
             },
@@ -768,7 +883,13 @@ private fun RemoteTerminalApp(store: LocalStore) {
                         Text("${session.task.host.address}:${session.task.host.port}", color = White, fontWeight = FontWeight.Medium)
                         Text(fingerprint, color = Mint, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
                     } },
-                    confirmButton = { TextButton(onClick = { session.resolveHostKey?.invoke(true); session.hostFingerprint = null }) { Text("信任并连接", color = Mint) } },
+                    confirmButton = { TextButton(onClick = {
+                        val trustedHost = session.task.host.copy(syncFingerprint = fingerprint)
+                        saveHosts(hosts.map { if (it.id == trustedHost.id) trustedHost else it })
+                        session.task = session.task.copy(host = trustedHost)
+                        session.resolveHostKey?.invoke(true)
+                        session.hostFingerprint = null
+                    }) { Text("信任并连接", color = Mint) } },
                     dismissButton = { TextButton(onClick = { session.resolveHostKey?.invoke(false); session.hostFingerprint = null }) { Text("取消", color = Muted) } },
                 )
             }
@@ -868,6 +989,8 @@ private fun HomeScreen(
                     Surface(onClick = { onSelectHost(host) }, color = if (selected) Color(0xFF20342F) else Panel,
                         shape = RoundedCornerShape(15.dp), border = androidx.compose.foundation.BorderStroke(1.dp, if (selected) Mint.copy(alpha = .7f) else Edge)) {
                         Row(Modifier.width(160.dp).padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Text(if (selected) "◉" else "○", color = if (selected) Mint else Muted, fontSize = 17.sp)
+                            Spacer(Modifier.width(6.dp))
                             Text(host.icon, fontSize = 21.sp)
                             Spacer(Modifier.width(9.dp))
                             Column(Modifier.weight(1f)) {
@@ -983,6 +1106,8 @@ private fun ManageScreen(
                     Surface(onClick = { visibleHostId = host.id; onSelectHost(host) }, color = if (selected) Color(0xFF20342F) else Panel,
                         shape = RoundedCornerShape(14.dp), border = androidx.compose.foundation.BorderStroke(1.dp, if (selected) Mint.copy(alpha = .65f) else Edge)) {
                         Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 5.dp, top = 7.dp, bottom = 7.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Text(if (selected) "◉" else "○", color = if (selected) Mint else Muted, fontSize = 17.sp)
+                            Spacer(Modifier.width(6.dp))
                             Text(host.icon, fontSize = 20.sp, modifier = Modifier.padding(horizontal = 5.dp))
                             Column(Modifier.weight(1f).padding(start = 8.dp)) {
                                 Text(host.name, color = White, fontWeight = FontWeight.Medium, fontSize = 13.sp)
@@ -1665,11 +1790,53 @@ private fun statusTint(status: String): Color = when {
 }
 
 @Composable
+private fun SyncLoginScreen(
+    syncUrl: String,
+    initialUsername: String,
+    initialPassword: String,
+    onBack: () -> Unit,
+    onSuccess: (String, String, String, Boolean) -> Unit,
+) {
+    val scope = rememberCoroutineScope()
+    var username by rememberSaveable { mutableStateOf(initialUsername) }
+    var password by rememberSaveable { mutableStateOf(initialPassword) }
+    var rememberPassword by rememberSaveable { mutableStateOf(true) }
+    var busy by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf("") }
+    Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center) {
+        Text("同步账号登录", color = White, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
+        Text(syncUrl, color = Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp, bottom = 18.dp))
+        OutlinedTextField(username, { username = it }, label = { Text("账号") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(password, { password = it }, label = { Text("密码") }, singleLine = true,
+            visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth().padding(top = 10.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Checkbox(checked = rememberPassword, onCheckedChange = { rememberPassword = it })
+            Text("保持账号密码", color = White, fontSize = 13.sp)
+        }
+        if (error.isNotBlank()) Text(error, color = Coral, fontSize = 12.sp, modifier = Modifier.padding(vertical = 6.dp))
+        Button(enabled = !busy && syncUrl.isNotBlank(), onClick = {
+            busy = true; error = ""
+            scope.launch {
+                runCatching { withContext(Dispatchers.IO) { SyncClient.authenticate(syncUrl, "login", username.trim(), password) } }
+                    .onSuccess { response -> onSuccess(response.getString("username"), password, response.getString("access_token"), rememberPassword) }
+                    .onFailure { error = it.localizedMessage ?: "登录失败" }
+                busy = false
+            }
+        }, modifier = Modifier.fillMaxWidth()) {
+            if (busy) CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = White) else Text("登录")
+        }
+        TextButton(onClick = onBack, modifier = Modifier.align(Alignment.CenterHorizontally)) { Text("返回", color = Muted) }
+    }
+}
+
+@Composable
 private fun SettingsScreen(
     store: LocalStore,
     syncUrl: String,
     syncToken: String,
+    syncUsername: String,
     onSyncSettingsChange: (String, String) -> Unit,
+    onLogin: () -> Unit,
     enabled: Boolean,
     delaySeconds: Int,
     onEnabledChange: (Boolean) -> Unit,
@@ -1682,10 +1849,9 @@ private fun SettingsScreen(
     var generating by remember { mutableStateOf(false) }
     var keyMessage by remember { mutableStateOf("") }
     var draftSyncUrl by rememberSaveable(syncUrl) { mutableStateOf(syncUrl) }
-    var draftSyncToken by remember(syncToken) { mutableStateOf(syncToken) }
     var draftDelay by remember(delaySeconds) { mutableStateOf(delaySeconds.toFloat()) }
     fun finish() {
-        onSyncSettingsChange(draftSyncUrl.trim(), draftSyncToken)
+        onSyncSettingsChange(draftSyncUrl.trim(), syncToken)
         onBack()
     }
     BackHandler { finish() }
@@ -1723,7 +1889,8 @@ private fun SettingsScreen(
             Divider()
             Text("系统同步", color = White, fontWeight = FontWeight.SemiBold)
             OutlinedTextField(draftSyncUrl, { draftSyncUrl = it }, label = { Text("同步服务地址") }, placeholder = { Text("https://地址:端口") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-            OutlinedTextField(draftSyncToken, { draftSyncToken = it }, label = { Text("同步服务令牌") }, singleLine = true, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
+            Text(if (syncUsername.isBlank()) "未登录" else "当前账号：$syncUsername", color = Muted, fontSize = 12.sp)
+            FilledTonalButton(onClick = onLogin, modifier = Modifier.fillMaxWidth()) { Text("登录同步账号") }
             Text("自动回车", color = White, fontWeight = FontWeight.SemiBold)
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Column(Modifier.weight(1f)) {
@@ -1754,7 +1921,7 @@ private fun HostEditorDialog(initial: HostProfile?, onDismiss: () -> Unit, onSav
     var password by remember(initial?.id) { mutableStateOf(initial?.password.orEmpty()) }
     var icon by remember(initial?.id) { mutableStateOf(initial?.icon ?: "⌘") }
     EditorDialogFrame(if (initial == null) "添加主机" else "编辑主机", onDismiss, canSave = name.isNotBlank() && address.isNotBlank() && username.isNotBlank(), onConfirm = {
-        onSave(HostProfile(initial?.id ?: UUID.randomUUID().toString(), name.trim(), address.trim(), port.toIntOrNull()?.takeIf { it in 1..65535 } ?: 22, username.trim(), password, icon.ifBlank { "⌘" }, initial?.directories.orEmpty()))
+        onSave(HostProfile(initial?.id ?: UUID.randomUUID().toString(), name.trim(), address.trim(), port.toIntOrNull()?.takeIf { it in 1..65535 } ?: 22, username.trim(), password, icon.ifBlank { "⌘" }, initial?.directories.orEmpty(), initial?.syncFingerprint.orEmpty()))
     }) {
         OutlinedTextField(name, { name = it }, label = { Text("主机名称") }, placeholder = { Text("例如：Mac Studio") }, singleLine = true, modifier = Modifier.fillMaxWidth())
         IconPicker(icon, { icon = it }, listOf("⌘", "🖥️", "☁️", "🐧", "⚡", "🧪", "🏠", "💻", "🔧", "🌐"))

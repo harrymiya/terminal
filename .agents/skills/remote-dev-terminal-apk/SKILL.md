@@ -41,3 +41,4 @@ APK_RELEASE_UPDATE_LOG="Remote Dev Terminal <version>" bash scripts/upload-apk-t
 - Uploads use `force_update=false` and `min_supported_version_code=1`.
 - Upload creates a draft; publishing it remains a separate action in Wish Admin.
 - `APK_BUILD_OFFLINE=false` can be set for a build that needs Gradle dependency downloads.
+- Version name and version code are configured in `android/app/build.gradle.kts`.

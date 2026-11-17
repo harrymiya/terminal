@@ -15,7 +15,7 @@ description: 在 remote-dev-terminal 项目中构建 Android APK，并上传到 
 APK_RELEASE_UPDATE_LOG="Remote Dev Terminal 更新说明" bash scripts/release-test.sh
 ```
 
-脚本先离线构建 Android debug APK，再上传到 APP 测试管理端。默认版本信息来自 `app/build.gradle.kts`。构建产物路径为：
+脚本先离线构建 Android debug APK，再上传到 APP 测试管理端。默认版本信息来自 `android/app/build.gradle.kts`。构建产物路径为：
 
 ```text
 dist/RemoteDevTerminal-<versionName>-debug.apk
@@ -50,7 +50,7 @@ APK_RELEASE_UPDATE_LOG="Remote Dev Terminal 更新说明" bash scripts/upload-ap
 - 脚本使用 `force_update=false`，并将 `min_supported_version_code` 设为 `1`。
 - 上传成功会在管理端创建草稿；如需正式发布，之后仍须在 Wish Admin 中发布该草稿。
 - 上传脚本会检查接口返回的 version code 是否与项目版本一致。
-- 若管理端提示 version code 已存在，递增 `app/build.gradle.kts` 中的 `versionCode` 和 `versionName`，重新构建后再上传；不要重复提交同一版本号。
+- 若管理端提示 version code 已存在，递增 `android/app/build.gradle.kts` 中的 `versionCode` 和 `versionName`，重新构建后再上传；不要重复提交同一版本号。
 - 默认构建使用 Gradle 离线模式；确实需要下载依赖时可设置 `APK_BUILD_OFFLINE=false`。
 
 ## 完成后核对

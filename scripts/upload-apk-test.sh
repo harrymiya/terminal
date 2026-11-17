@@ -5,8 +5,8 @@ umask 077
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
 PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
-VERSION_CODE="$(awk '/^[[:space:]]*versionCode[[:space:]]*=/ { gsub(/[^0-9]/, "", $0); print; exit }' "$PROJECT_ROOT/app/build.gradle.kts")"
-VERSION_NAME="$(awk -F'"' '/^[[:space:]]*versionName[[:space:]]*=/ { print $2; exit }' "$PROJECT_ROOT/app/build.gradle.kts")"
+VERSION_CODE="$(awk '/^[[:space:]]*versionCode[[:space:]]*=/ { gsub(/[^0-9]/, "", $0); print; exit }' "$PROJECT_ROOT/android/app/build.gradle.kts")"
+VERSION_NAME="$(awk -F'"' '/^[[:space:]]*versionName[[:space:]]*=/ { print $2; exit }' "$PROJECT_ROOT/android/app/build.gradle.kts")"
 [[ -n "$VERSION_CODE" && -n "$VERSION_NAME" ]] || { printf '[terminal-apk] ERROR: cannot read app version\n' >&2; exit 1; }
 
 APK="${1:-$PROJECT_ROOT/dist/RemoteDevTerminal-${VERSION_NAME}-debug.apk}"
