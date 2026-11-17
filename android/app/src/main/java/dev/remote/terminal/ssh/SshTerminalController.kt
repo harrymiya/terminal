@@ -349,6 +349,7 @@ class SshTerminalController(
                     candidate.setServerAliveInterval(20_000)
                     candidate.setServerAliveCountMax(6)
                     sessionRef.set(candidate)
+                    currentAddress = address
                     try {
                         candidate.connect(12_000)
                         currentAddress = address
@@ -484,17 +485,17 @@ class SshTerminalController(
             val fingerprint = "SHA256:" + android.util.Base64.encodeToString(
                 MessageDigest.getInstance("SHA-256").digest(key), android.util.Base64.NO_WRAP or android.util.Base64.NO_PADDING,
             )
-            if (store.isHostKeyTrusted(host, task.host.port, fingerprint)) return HostKeyRepository.OK
+            if (store.isHostKeyTrusted(currentAddress, task.host.port, fingerprint)) return HostKeyRepository.OK
 
             val latch = CountDownLatch(1)
             var accepted = false
             val decide: (Boolean) -> Unit = { value -> accepted = value; latch.countDown() }
             hostKeyDecision = decide
-            onHostKey(host, fingerprint, decide)
+            onHostKey(currentAddress, fingerprint, decide)
             val answered = latch.await(2, TimeUnit.MINUTES)
             hostKeyDecision = null
             if (answered && accepted) {
-                store.trustHostKey(host, task.host.port, fingerprint)
+                store.trustHostKey(currentAddress, task.host.port, fingerprint)
                 return HostKeyRepository.OK
             }
             return HostKeyRepository.NOT_INCLUDED
