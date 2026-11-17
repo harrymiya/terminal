@@ -164,6 +164,12 @@ class LocalStore(context: Context) {
         preferences.edit().putStringSet("dirty_host_profiles", hostIds.toSet()).apply()
     }
 
+    fun loadHostSelectedAgent(hostId: String): String = preferences.getString("host_selected_agent_$hostId", "").orEmpty()
+
+    fun saveHostSelectedAgent(hostId: String, agentId: String) {
+        preferences.edit().putString("host_selected_agent_$hostId", agentId).apply()
+    }
+
     fun loadWorkspaceRevision(identity: String): Int = preferences.getInt("workspace_revision_$identity", -1)
     fun saveWorkspaceRevision(identity: String, revision: Int) {
         preferences.edit().putInt("workspace_revision_$identity", revision).apply()

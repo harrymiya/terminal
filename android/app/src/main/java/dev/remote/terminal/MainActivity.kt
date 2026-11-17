@@ -391,6 +391,21 @@ private fun RemoteTerminalApp(store: LocalStore) {
         val selectedAgent = agents.firstOrNull { it.id == selectedAgentId } ?: agents.firstOrNull()
         SideEffect { SyncClient.configure(syncUrl, syncToken) }
 
+        fun selectHost(host: HostProfile) {
+            selectedHostId = host.id
+            val savedAgentId = store.loadHostSelectedAgent(host.id)
+            if (savedAgentId.isNotBlank() && agents.any { it.id == savedAgentId }) {
+                selectedAgentId = savedAgentId
+            }
+        }
+
+        LaunchedEffect(selectedHostId) {
+            val savedAgentId = store.loadHostSelectedAgent(selectedHostId)
+            if (savedAgentId.isNotBlank() && agents.any { it.id == savedAgentId }) {
+                selectedAgentId = savedAgentId
+            }
+        }
+
         fun saveHosts(updated: List<HostProfile>) {
             hosts.clear(); hosts.addAll(updated); store.saveHosts(updated)
             if (selectedHostId !in updated.map { it.id }) selectedHostId = updated.firstOrNull()?.id.orEmpty()
@@ -758,8 +773,13 @@ private fun RemoteTerminalApp(store: LocalStore) {
                         if (hostState.optBoolean("configured")) {
                             val profile = hostState.optJSONObject("state") ?: JSONObject()
                             val command = profile.optString("selected_agent_command")
-                            if (selectedHostId == host.id && command.isNotBlank()) {
-                                agents.firstOrNull { it.command == command }?.let { selectedAgentId = it.id }
+                            if (command.isNotBlank()) {
+                                agents.firstOrNull { it.command == command }?.let { matched ->
+                                    store.saveHostSelectedAgent(host.id, matched.id)
+                                    if (selectedHostId == host.id) {
+                                        selectedAgentId = matched.id
+                                    }
+                                }
                             }
                             if (localHost.name != profile.optString("name", localHost.name)
                                 || localHost.icon != profile.optString("icon", localHost.icon)) {
@@ -808,9 +828,12 @@ private fun RemoteTerminalApp(store: LocalStore) {
             when (route) {
                 AppRoute.HOME -> HomeScreen(
                     hosts = hosts, agents = agents, selectedHost = selectedHost, selectedAgent = selectedAgent,
-                    sessions = sessions, onSelectHost = { selectedHostId = it.id }, onSelectAgent = { agent ->
+                    sessions = sessions, onSelectHost = { selectHost(it) }, onSelectAgent = { agent ->
                         selectedAgentId = agent.id
-                        selectedHost?.let { host -> scope.launch { runCatching { withContext(SyncClient.dispatcher) { SyncClient.updateCurrentAgent(host, agent.command) } } } }
+                        selectedHost?.let { host ->
+                            store.saveHostSelectedAgent(host.id, agent.id)
+                            scope.launch { runCatching { withContext(SyncClient.dispatcher) { SyncClient.updateCurrentAgent(host, agent.command) } } }
+                        }
                     },
                     syncLoading = syncLoading,
                     onManage = { route = AppRoute.MANAGE }, onAddHost = { addingHost = true },
@@ -826,7 +849,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 )
                 AppRoute.MANAGE -> ManageScreen(
                     hosts = hosts, selectedHost = selectedHost,
-                    onBack = { route = AppRoute.HOME }, onSelectHost = { selectedHostId = it.id }, onAddHost = { addingHost = true },
+                    onBack = { route = AppRoute.HOME }, onSelectHost = { selectHost(it) }, onAddHost = { addingHost = true },
                     onEditHost = { editingHost = it }, onDeleteHost = { deletingHost = it },
                     onAddDirectory = { selectedHost?.let { editingDirectory = it.id to null } },
                     onEditDirectory = { host, dir -> editingDirectory = host.id to dir },
@@ -1046,41 +1069,80 @@ private fun HomeScreen(
 
         if (syncLoading) Text("正在同步共享会话…", color = Muted, fontSize = 12.sp)
 
+        val hostSessions = remember(sessions.toList(), selectedHost?.id) {
+            if (selectedHost == null) sessions
+            else sessions.filter { it.task.host.id == selectedHost.id }
+        }
+        var filterByCurrentHost by remember { mutableStateOf(true) }
+        val displayedSessions = if (filterByCurrentHost && selectedHost != null) hostSessions else sessions
+
         if (sessions.isNotEmpty()) {
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(bottom = 10.dp)) {
                 Text("进行中的任务", color = White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                Spacer(Modifier.width(8.dp)); Text("${sessions.size}", color = Muted, fontSize = 12.sp)
-            }
-            Column(Modifier.fillMaxWidth().padding(bottom = 18.dp)) {
-                sessions.forEachIndexed { index, session ->
-                    Row(
-                        Modifier.fillMaxWidth().clickable { onResumeSession(index) }.padding(horizontal = 8.dp, vertical = 7.dp),
-                        verticalAlignment = Alignment.CenterVertically,
+                Spacer(Modifier.width(8.dp))
+                Text("${displayedSessions.size}", color = Mint, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                if (selectedHost != null && sessions.size > hostSessions.size) {
+                    Spacer(Modifier.weight(1f))
+                    Surface(
+                        onClick = { filterByCurrentHost = !filterByCurrentHost },
+                        color = if (filterByCurrentHost) PanelRaised else Color(0xFF20342F),
+                        shape = RoundedCornerShape(10.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, if (filterByCurrentHost) Edge else Mint.copy(alpha = 0.5f)),
                     ) {
-                        Text(session.task.agent.icon, fontSize = 15.sp)
-                        Spacer(Modifier.width(9.dp))
-                        Column(Modifier.weight(1f)) {
-                            Text(session.task.displayName, color = White, fontSize = 12.sp, fontWeight = FontWeight.Medium, maxLines = 1)
-                            Text(
-                                if (session.needsAction) "需要确认" else "${session.task.host.name} · ${session.task.directory.name}",
-                                color = if (session.needsAction) Coral else Muted, fontSize = 10.sp, maxLines = 1,
-                            )
-                        }
-                        when {
-                            session.needsAction -> Text("!", color = Coral, fontWeight = FontWeight.Bold)
-                            session.unread -> Box(Modifier.size(7.dp).background(Blue, CircleShape))
-                        }
-                        if (codexExecutable(session.task.agent.command) != null) {
-                            val quota = session.codexQuota
-                            Column(Modifier.padding(start = 10.dp), horizontalAlignment = Alignment.End) {
-                                if (quota == null) Text("额度 --", color = Muted, fontSize = 9.sp, lineHeight = 11.sp)
-                                else quota.take(2).forEach { (minutes, percent) ->
-                                    Text(quotaLabel(minutes, percent), color = if (percent <= 20) Coral else Muted, fontSize = 9.sp, lineHeight = 11.sp, maxLines = 1)
+                        Text(
+                            if (filterByCurrentHost) "当前主机 (${hostSessions.size}/${sessions.size})" else "全部主机 (${sessions.size})",
+                            color = if (filterByCurrentHost) Muted else Mint,
+                            fontSize = 11.sp,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                        )
+                    }
+                }
+            }
+            if (displayedSessions.isEmpty()) {
+                Surface(
+                    onClick = { filterByCurrentHost = false },
+                    color = Panel, shape = RoundedCornerShape(12.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Edge),
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 18.dp),
+                ) {
+                    Row(Modifier.padding(horizontal = 14.dp, vertical = 11.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text("当前主机暂无任务", color = Muted, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                        Text("查看其他 ${sessions.size} 个任务 →", color = Mint, fontSize = 11.sp)
+                    }
+                }
+            } else {
+                Column(Modifier.fillMaxWidth().padding(bottom = 18.dp)) {
+                    displayedSessions.forEachIndexed { dispIndex, session ->
+                        val originalIndex = sessions.indexOf(session).coerceAtLeast(0)
+                        Row(
+                            Modifier.fillMaxWidth().clickable { onResumeSession(originalIndex) }.padding(horizontal = 8.dp, vertical = 7.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(session.task.agent.icon, fontSize = 15.sp)
+                            Spacer(Modifier.width(9.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(session.task.displayName, color = White, fontSize = 12.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+                                Text(
+                                    if (session.needsAction) "需要确认" else "${session.task.host.name} · ${session.task.directory.name}",
+                                    color = if (session.needsAction) Coral else Muted, fontSize = 10.sp, maxLines = 1,
+                                )
+                            }
+                            when {
+                                session.needsAction -> Text("!", color = Coral, fontWeight = FontWeight.Bold)
+                                session.unread -> Box(Modifier.size(7.dp).background(Blue, CircleShape))
+                            }
+                            if (codexExecutable(session.task.agent.command) != null) {
+                                val quota = session.codexQuota
+                                Column(Modifier.padding(start = 10.dp), horizontalAlignment = Alignment.End) {
+                                    if (quota == null) Text("额度 --", color = Muted, fontSize = 9.sp, lineHeight = 11.sp)
+                                    else quota.take(2).forEach { (minutes, percent) ->
+                                        Text(quotaLabel(minutes, percent), color = if (percent <= 20) Coral else Muted, fontSize = 9.sp, lineHeight = 11.sp, maxLines = 1)
+                                    }
                                 }
                             }
                         }
+                        if (dispIndex < displayedSessions.lastIndex) Divider(color = Edge, thickness = 1.dp)
                     }
-                    if (index < sessions.lastIndex) Divider(color = Edge, thickness = 1.dp)
                 }
             }
         }
