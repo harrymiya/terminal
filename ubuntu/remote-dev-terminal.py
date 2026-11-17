@@ -45,6 +45,15 @@ class App(Gtk.Window):
         self.base_css = '''
             * { font-size: 13px; }
             window, dialog, messagedialog, filechooser { background-color: #0c1119; color: #e8eef6; }
+            window:backdrop { color: #e8eef6; }
+            label:backdrop { color: inherit; }
+            button:backdrop { color: #d0e1ed; }
+            .brand:backdrop { color: #a2e8cc; }
+            .subtitle:backdrop, .empty:backdrop { color: #8fa2b4; }
+            .section:backdrop { color: #9bb0c3; }
+            .primary:backdrop { color: #101c1a; }
+            .host-selected:backdrop, notebook tab:checked:backdrop { color: #d8fff0; }
+            notebook tab:checked:backdrop label { color: #86dbb8; }
             dialog > box, messagedialog > box, dialog .dialog-action-area, dialog headerbar {
                 background-image: none;
                 background-color: #101823;
@@ -764,14 +773,18 @@ class App(Gtk.Window):
     def rebuild_view(self, selected=None):
         if selected is None and not self.tiled:
             selected = self.tabs.get_nth_page(self.tabs.get_current_page())
-        # Keep each terminal alive while moving it between containers.
+        # Detach the reusable header before removing its notebook page: GTK
+        # otherwise destroys the tab label and all of its child widgets.
+        for session in self.sessions:
+            label = session["label"]
+            if label.get_parent():
+                label.get_parent().remove(label)
         while self.tabs.get_n_pages():
             self.tabs.remove_page(0)
         for session in self.sessions:
-            for widget in (session["terminal"], session["label"]):
-                parent = widget.get_parent()
-                if parent:
-                    parent.remove(widget)
+            terminal = session["terminal"]
+            if terminal.get_parent():
+                terminal.get_parent().remove(terminal)
         for child in self.grid.get_children():
             self.grid.remove(child)
         for session in self.sessions:

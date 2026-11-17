@@ -740,14 +740,18 @@ class App(Gtk.Window):
     def rebuild_view(self, selected=None):
         if selected is None and not self.tiled:
             selected = self.tabs.get_nth_page(self.tabs.get_current_page())
-        # Keep each terminal alive while moving it between containers.
+        # Detach the reusable header before removing its notebook page: GTK
+        # otherwise destroys the tab label and all of its child widgets.
+        for session in self.sessions:
+            label = session["label"]
+            if label.get_parent():
+                label.get_parent().remove(label)
         while self.tabs.get_n_pages():
             self.tabs.remove_page(0)
         for session in self.sessions:
-            for widget in (session["terminal"], session["label"]):
-                parent = widget.get_parent()
-                if parent:
-                    parent.remove(widget)
+            terminal = session["terminal"]
+            if terminal.get_parent():
+                terminal.get_parent().remove(terminal)
         for child in self.grid.get_children():
             self.grid.remove(child)
         for session in self.sessions:
