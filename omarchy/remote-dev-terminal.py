@@ -418,6 +418,18 @@ class App(Gtk.Window):
             buttons.hide()
             self.edit_actions.append(buttons)
             sidebar.pack_start(buttons, False, False, 0)
+            if attr == "hosts":
+                self.sync_status = Gtk.Label(xalign=0)
+                self.sync_status.set_line_wrap(True)
+                self.sync_status.get_style_context().add_class("subtitle")
+                sidebar.pack_start(self.sync_status, False, False, 0)
+                sync_buttons = Gtk.Box(spacing=4)
+                for label, callback in (("刷新同步", self.refresh_selected_shared),):
+                    button = Gtk.Button(label=label)
+                    button.get_style_context().add_class("manage-button")
+                    button.connect("clicked", callback)
+                    sync_buttons.pack_start(button, True, True, 0)
+                sidebar.pack_start(sync_buttons, False, False, 0)
         self.hosts.connect("changed", self.host_changed)
         self.agents.connect("changed", self.agent_changed)
         self.auto_enter = Gtk.CheckButton(label="自动回车")
@@ -991,10 +1003,12 @@ class App(Gtk.Window):
             self.hosts.set_active(min(max(selected, 0), len(self.data["hosts"]) - 1))
         self.refreshing = False
         self.refresh_host_content()
+        self.update_sync_status()
 
     def host_changed(self, *_):
         if not self.refreshing:
             self.refresh_host_content()
+            self.update_sync_status()
 
     def agent_changed(self, *_):
         host = self.current_host()
@@ -1487,6 +1501,24 @@ class App(Gtk.Window):
     def shared_host_key(host):
         return (host.get("address"), host.get("port"), host.get("username"))
 
+    def update_sync_status(self):
+        host = self.current_host()
+        if not host or not self.data.get("sync_url"):
+            text = "同步：未配置服务地址"
+        else:
+            result = self.shared_by_host.get(self.shared_host_key(host), "正在同步…")
+            text = f"同步：{len(result)} 个共享会话" if isinstance(result, list) else f"同步：{result}"
+        self.sync_status.set_text(text)
+
+    def refresh_selected_shared(self, _button):
+        host = self.current_host()
+        if not host or not self.data.get("sync_url"):
+            self.message("共享会话", "请先在系统设置中填写同步服务地址和令牌。")
+            return
+        self.shared_by_host[self.shared_host_key(host)] = "正在同步…"
+        self.update_sync_status()
+        self.refresh_host_shared(host)
+
     def refresh_host_shared(self, host):
         if not self.data.get("sync_url"):
             return
@@ -1505,8 +1537,8 @@ class App(Gtk.Window):
                 workspaces = sync_data_request(self.data, "GET", "/v1/workspaces/" + sync_host_key(snapshot))
                 agents = sync_data_request(self.data, "GET", "/v1/agents/global")
                 result = (result, workspaces, agents)
-            except Exception:
-                result = "同步失败，请检查地址和令牌"
+            except Exception as exc:
+                result = "同步失败：" + (str(exc) or type(exc).__name__)
             def finish():
                 self.sync_pending.discard(pending_key)
                 if any(self.shared_host_key(h) == key for h in self.data["hosts"]):
@@ -1541,6 +1573,7 @@ class App(Gtk.Window):
                         for item in sessions:
                             if len(self.sessions) < 8 and not any(session["id"] == item["id"] for session in self.sessions):
                                 self.open_terminal(None, snapshot, item, activate=False)
+                    self.update_sync_status()
                 return False
             GLib.idle_add(finish)
         self.sync_executor.submit(worker)
@@ -1573,6 +1606,7 @@ class App(Gtk.Window):
                     else:
                         self.workspace_dirty.discard(key)
                         self.workspace_sync_errors.discard(key)
+                    self.update_sync_status()
                 return False
             GLib.idle_add(finish)
         self.sync_executor.submit(worker)
@@ -1596,6 +1630,7 @@ class App(Gtk.Window):
             if self.data.get("sync_url"):
                 self.shared_by_host[self.shared_host_key(host)] = "正在同步…"
                 self.refresh_host_shared(host)
+        self.update_sync_status()
 
     def sync_async(self, host, method, session_id, item=None):
         if not self.data.get("sync_url"):

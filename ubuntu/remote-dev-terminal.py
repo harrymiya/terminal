@@ -87,6 +87,17 @@ class App(Gtk.Window):
         self.base_css = '''
             * { font-size: 13px; }
             window, dialog, messagedialog, filechooser { background-color: #0c1119; color: #e8eef6; }
+            window decoration { border-color: #243546; }
+            scrolledwindow, scrolledwindow > viewport, scrolledwindow > undershoot,
+            scrolledwindow > overshoot, frame > border {
+                background-image: none;
+                border-color: #243546;
+                box-shadow: none;
+            }
+            paned > separator { background-image: none; border: none; box-shadow: none; }
+            button:focus, entry:focus, spinbutton:focus, combobox:focus, notebook tab:focus {
+                outline-color: #86dbb8;
+            }
             window:backdrop { color: #e8eef6; }
             label:backdrop { color: inherit; }
             button:backdrop { color: #d0e1ed; }
@@ -445,10 +456,6 @@ class App(Gtk.Window):
                 refresh_sync.get_style_context().add_class("manage-button")
                 refresh_sync.connect("clicked", self.refresh_selected_shared)
                 sync_buttons.pack_start(refresh_sync, True, True, 0)
-                shared = Gtk.Button(label="共享会话")
-                shared.get_style_context().add_class("manage-button")
-                shared.connect("clicked", self.show_shared_sessions)
-                sync_buttons.pack_start(shared, True, True, 0)
                 sidebar.pack_start(sync_buttons, False, False, 0)
         self.hosts.connect("changed", self.host_changed)
         self.agents.connect("changed", self.agent_changed)
