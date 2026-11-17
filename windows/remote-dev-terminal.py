@@ -361,6 +361,12 @@ class App(Gtk.Window):
         brand = Gtk.Label(label="REMOTE DEV", xalign=0)
         brand.get_style_context().add_class("brand")
         brand_row.pack_start(brand, True, True, 0)
+        self.edit_mode = False
+        self.edit_actions = []
+        self.edit_toggle = Gtk.ToggleButton(label="编辑")
+        self.edit_toggle.set_tooltip_text("进入编辑模式，管理主机、Agent 和工作区")
+        self.edit_toggle.connect("toggled", self.toggle_sidebar_edit)
+        brand_row.pack_start(self.edit_toggle, False, False, 0)
         settings_button = Gtk.Button()
         settings_button.set_image(Gtk.Image.new_from_icon_name("emblem-system-symbolic", Gtk.IconSize.BUTTON))
         settings_button.set_tooltip_text("系统设置")
@@ -928,16 +934,17 @@ class App(Gtk.Window):
                 button.get_style_context().add_class("host-selected")
             button.connect("clicked", lambda _button, i=index: self.hosts.set_active(i))
             row.pack_start(button, True, True, 0)
-            for label, action in [("✎", "edit"), ("×", "delete")]:
-                edit = Gtk.Button(label=label)
-                edit.set_tooltip_text("编辑主机" if action == "edit" else "删除主机")
-                edit.get_style_context().add_class("manage-button")
-                edit.connect("clicked", self.manage_host, index, action)
-                row.pack_start(edit, False, False, 0)
+            if self.edit_mode:
+                for label, action in [("✎", "edit"), ("×", "delete")]:
+                    edit = Gtk.Button(label=label)
+                    edit.set_tooltip_text("编辑主机" if action == "edit" else "删除主机")
+                    edit.get_style_context().add_class("manage-button")
+                    edit.connect("clicked", self.manage_host, index, action)
+                    row.pack_start(edit, False, False, 0)
             self.hosts_list.pack_start(row, False, False, 0)
             self.scale_layout(row)
         if not self.data["hosts"]:
-            hint = Gtk.Label(label="请先点击下方添加主机", xalign=0)
+            hint = Gtk.Label(label="请点击顶部“编辑”后添加主机", xalign=0)
             hint.get_style_context().add_class("subtitle")
             self.hosts_list.pack_start(hint, False, False, 0)
         self.hosts_list.show_all()
@@ -950,6 +957,14 @@ class App(Gtk.Window):
             self.agents.set_active(min(max(host.get("selected_agent", 0), 0), len(agents) - 1))
         self.refreshing = False
         self.refresh_directories()
+
+    def toggle_sidebar_edit(self, button):
+        self.edit_mode = button.get_active()
+        button.set_label("完成" if self.edit_mode else "编辑")
+        button.set_tooltip_text("退出编辑模式" if self.edit_mode else "进入编辑模式，管理主机、Agent 和工作区")
+        for actions in self.edit_actions:
+            actions.set_visible(self.edit_mode)
+        self.refresh_host_content()
 
     def manage_host(self, button, index, action):
         self.hosts.set_active(index)
@@ -975,23 +990,24 @@ class App(Gtk.Window):
             button.get_style_context().add_class("project-button")
             button.connect("clicked", self.open_directory, index)
             row.pack_start(button, True, True, 0)
-            for symbol, offset, tooltip in (("↑", -1, "上移工作区"), ("↓", 1, "下移工作区")):
-                move = Gtk.Button(label=symbol)
-                move.set_tooltip_text(tooltip)
-                move.set_sensitive(0 <= index + offset < len(directories))
-                move.get_style_context().add_class("manage-button")
-                move.connect("clicked", self.move_directory, index, offset)
-                row.pack_start(move, False, False, 0)
-            for label, action in [("✎", "edit"), ("×", "delete")]:
-                edit = Gtk.Button(label=label)
-                edit.set_tooltip_text("编辑工作区" if action == "edit" else "删除工作区")
-                edit.get_style_context().add_class("manage-button")
-                edit.connect("clicked", self.manage_directory, index, action)
-                row.pack_start(edit, False, False, 0)
+            if self.edit_mode:
+                for symbol, offset, tooltip in (("↑", -1, "上移工作区"), ("↓", 1, "下移工作区")):
+                    move = Gtk.Button(label=symbol)
+                    move.set_tooltip_text(tooltip)
+                    move.set_sensitive(0 <= index + offset < len(directories))
+                    move.get_style_context().add_class("manage-button")
+                    move.connect("clicked", self.move_directory, index, offset)
+                    row.pack_start(move, False, False, 0)
+                for label, action in [("✎", "edit"), ("×", "delete")]:
+                    edit = Gtk.Button(label=label)
+                    edit.set_tooltip_text("编辑工作区" if action == "edit" else "删除工作区")
+                    edit.get_style_context().add_class("manage-button")
+                    edit.connect("clicked", self.manage_directory, index, action)
+                    row.pack_start(edit, False, False, 0)
             self.directories_list.pack_start(row, False, False, 0)
             self.scale_layout(row)
         if not directories:
-            hint = Gtk.Label(label="请先选择主机并添加工作区", xalign=0)
+            hint = Gtk.Label(label="请先选择主机，再点击顶部“编辑”添加工作区", xalign=0)
             hint.get_style_context().add_class("subtitle")
             self.directories_list.pack_start(hint, False, False, 0)
         self.directories_list.show_all()

@@ -63,12 +63,35 @@ class UbuntuWindowAndTabsTest(unittest.TestCase):
                 self.assertTrue(name.get_mapped(), 'tab name must actually be displayed')
                 self.assertTrue(quota.get_mapped(), 'tab quota must actually be displayed')
 
+    def test_sidebar_edit_mode_hides_and_restores_management_controls(self):
+        host = {'name': 'host', 'address': 'host', 'port': 22, 'username': 'user',
+                'directories': [{'name': 'A', 'path': '/a'}, {'name': 'B', 'path': '/b'}]}
+        self.app.data['hosts'] = [host]
+        self.app.refresh()
+        self.app.show_all()
+        self.assertFalse(self.app.edit_mode)
+        self.assertTrue(all(not box.get_visible() for box in self.app.edit_actions))
+        self.assertEqual(len(self.app.hosts_list.get_children()[0].get_children()), 1)
+        self.assertEqual(len(self.app.directories_list.get_children()[0].get_children()), 1)
+        self.app.edit_toggle.set_active(True)
+        self.assertEqual(self.app.edit_toggle.get_label(), '完成')
+        self.assertTrue(all(box.get_visible() for box in self.app.edit_actions))
+        self.assertTrue(all(child.get_visible() for box in self.app.edit_actions for child in box.get_children()))
+        self.assertEqual(len(self.app.hosts_list.get_children()[0].get_children()), 3)
+        self.assertEqual(len(self.app.directories_list.get_children()[0].get_children()), 5)
+        self.app.edit_toggle.set_active(False)
+        self.assertEqual(self.app.edit_toggle.get_label(), '编辑')
+        self.assertTrue(all(not box.get_visible() for box in self.app.edit_actions))
+        self.assertEqual(len(self.app.directories_list.get_children()[0].get_children()), 1)
+        self.assertEqual([item['name'] for item in host['directories']], ['A', 'B'])
+
     def test_workspace_move_buttons_save_order_and_respect_bounds(self):
         host = {'name': 'host', 'address': 'host', 'port': 22, 'username': 'user',
                 'directories': [{'name': 'A', 'path': '/a'}, {'name': 'B', 'path': '/b'}, {'name': 'C', 'path': '/c'}]}
         self.app.data['hosts'] = [host]
         with patch.object(self.app, 'persist') as persist, patch.object(self.app, 'push_workspace_list') as push:
             self.app.refresh()
+            self.app.edit_toggle.set_active(True)
             rows = self.app.directories_list.get_children()
             self.assertFalse(rows[0].get_children()[1].get_sensitive())
             self.assertFalse(rows[-1].get_children()[2].get_sensitive())
