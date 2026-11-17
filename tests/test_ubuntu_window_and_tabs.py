@@ -49,6 +49,7 @@ class UbuntuWindowAndTabsTest(unittest.TestCase):
         header.pack_start(name, True, True, 0)
         header.pack_start(quota, False, False, 0)
         self.app.sessions = [{'terminal': terminal, 'label': header, 'key': 'k', 'id': 'id', 'state': {}}]
+        self.app.show_all()
         for tiled in (True, False, True, False, True, False):
             self.app.tiled = tiled
             self.app.rebuild_view()
@@ -57,6 +58,22 @@ class UbuntuWindowAndTabsTest(unittest.TestCase):
             if not tiled:
                 self.assertEqual(self.app.tabs.get_n_pages(), 1)
                 self.assertIsNotNone(self.app.tabs.get_tab_label(terminal))
+                while Gtk.events_pending():
+                    Gtk.main_iteration()
+                self.assertTrue(name.get_mapped(), 'tab name must actually be displayed')
+                self.assertTrue(quota.get_mapped(), 'tab quota must actually be displayed')
+
+    def test_battery_indicator_shows_readable_text_and_levels(self):
+        Gtk = app_module.Gtk
+        indicator, update = app_module.make_quota_indicator()
+        battery, text = indicator.get_children()
+        level = battery.get_children()[0]
+        for pct, expected, style in ((None, '--', 'quota-unknown'), (3, '3%', 'quota-low'), (15, '15%', 'quota-warning'), (85, '85%', 'quota-ok')):
+            update(pct)
+            self.assertEqual(text.get_text(), expected)
+            self.assertEqual(level.get_value(), pct or 0)
+            self.assertTrue(level.get_style_context().has_class(style))
+        self.assertIsInstance(level, Gtk.LevelBar)
 
 
 if __name__ == '__main__':

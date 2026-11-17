@@ -22,6 +22,38 @@ from core import load_config, save_config, ssh_argv, auto_enter_signature, quota
 from version import VERSION
 
 
+def make_quota_indicator():
+    """Draw a compact battery using GTK widgets and readable percentage text."""
+    box = Gtk.Box(spacing=3)
+    battery = Gtk.Box(spacing=0)
+    battery.set_valign(Gtk.Align.CENTER)
+    level = Gtk.LevelBar.new_for_interval(0, 100)
+    level.set_size_request(30, 12)
+    level.set_valign(Gtk.Align.CENTER)
+    level.get_style_context().add_class("quota-battery")
+    cap = Gtk.Box()
+    cap.set_size_request(3, 6)
+    cap.set_valign(Gtk.Align.CENTER)
+    cap.get_style_context().add_class("quota-battery-cap")
+    battery.pack_start(level, False, False, 0)
+    battery.pack_start(cap, False, False, 0)
+    value = Gtk.Label(label="--")
+    value.get_style_context().add_class("quota-value")
+    box.pack_start(battery, False, False, 0)
+    box.pack_start(value, False, False, 0)
+
+    def update(pct):
+        pct = None if pct is None else max(0, min(100, pct))
+        level.set_value(pct if pct is not None else 0)
+        value.set_text("--" if pct is None else f"{round(pct)}%")
+        context = level.get_style_context()
+        for name in ("quota-unknown", "quota-low", "quota-warning", "quota-ok"):
+            context.remove_class(name)
+        context.add_class("quota-unknown" if pct is None else "quota-low" if pct < 5 else "quota-warning" if pct < 20 else "quota-ok")
+    update(None)
+    return box, update
+
+
 class App(Gtk.Window):
     def __init__(self):
         super().__init__(title="Remote Dev Terminal")
@@ -141,6 +173,15 @@ class App(Gtk.Window):
             checkbutton { min-height: 24px; padding: 2px 0; }
             checkbutton check { background-image: none; background-color: #16222f; border: 1px solid #2b3e51; border-radius: 4px; box-shadow: none; min-width: 16px; min-height: 16px; }
             checkbutton check:checked { background-image: none; background-color: #203e36; border-color: #86dbb8; color: #86dbb8; }
+            levelbar.quota-battery trough { background-image: none; background-color: #101823; border: 1px solid #8fa2b4; border-radius: 3px; padding: 1px; min-height: 8px; }
+            levelbar.quota-battery block { border: none; border-radius: 1px; min-height: 6px; }
+            levelbar.quota-battery block.empty { background-color: transparent; }
+            levelbar.quota-battery.quota-ok block.filled { background-color: #86dbb8; }
+            levelbar.quota-battery.quota-warning block.filled { background-color: #ff9e20; }
+            levelbar.quota-battery.quota-low block.filled { background-color: #ff4d4d; }
+            .quota-battery-cap { background-color: #8fa2b4; border-radius: 1px; }
+            .quota-value { color: #e8eef6; font-size: 12px; font-weight: bold; }
+            .quota-value:backdrop { color: #e8eef6; }
             notebook { background-color: #0c1119; border: none; }
             notebook > header { background-color: #101823; border-bottom: 1px solid #243546; padding: 2px 4px 0 4px; }
             notebook tab {
@@ -806,7 +847,7 @@ class App(Gtk.Window):
                 tab_glow.hide()
                 tab_box.pack_start(tab_glow, False, False, 0)
                 session["terminal"]._tab_glow_bar = tab_glow
-                session["label"].show_all()
+                tab_box.show_all()
                 self.tabs.append_page(session["terminal"], tab_box)
             self.tabs.show_all()
             self.views.set_visible_child_name("tabs")
@@ -1443,10 +1484,10 @@ class App(Gtk.Window):
         label.pack_start(Gtk.Label(label=directory["name"] + " · " + agent["name"]), True, True, 0)
         kind, quota_executable = quota_agent(agent["command"])
         quota_box = Gtk.Box(spacing=3)
-        hourly_img = Gtk.Image.new_from_pixbuf(render_battery_pixbuf(None))
+        hourly_img, update_hourly = make_quota_indicator()
         sep = Gtk.Label(label="·")
         sep.get_style_context().add_class("subtitle")
-        weekly_img = Gtk.Image.new_from_pixbuf(render_battery_pixbuf(None))
+        weekly_img, update_weekly = make_quota_indicator()
         days_label = Gtk.Label(label="")
         days_label.get_style_context().add_class("subtitle")
         quota_box.pack_start(hourly_img, False, False, 0)
@@ -1474,9 +1515,9 @@ class App(Gtk.Window):
                         weekly_pct = pct
                         if len(item) > 2 and item[2]:
                             days_val = item[2]
-            hourly_img.set_from_pixbuf(render_battery_pixbuf(hourly_pct))
+            update_hourly(hourly_pct)
             hourly_img.set_tooltip_text(f"小时余量: {hourly_pct}%" if hourly_pct is not None else "小时余量: --")
-            weekly_img.set_from_pixbuf(render_battery_pixbuf(weekly_pct))
+            update_weekly(weekly_pct)
             weekly_img.set_tooltip_text(f"周余量: {weekly_pct}%" if weekly_pct is not None else "周余量: --")
             if days_val:
                 days_label.set_text(days_val)
