@@ -61,6 +61,12 @@ class LocalStore(context: Context) {
 
     fun sshPublicKey(): String? = preferences.getString("ssh_public_key", null)
 
+    fun loadDirtyWorkspaces(): Set<String> = preferences.getStringSet("dirty_workspaces", emptySet())?.toSet().orEmpty()
+
+    fun saveDirtyWorkspaces(hostIds: Set<String>) {
+        preferences.edit().putStringSet("dirty_workspaces", hostIds.toSet()).apply()
+    }
+
     fun loadSyncUrl(): String {
         preferences.getString("sync_url", null)?.let { return it }
         val legacy = runCatching { JSONArray(preferences.getString("hosts", "[]")) }.getOrNull()

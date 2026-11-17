@@ -325,7 +325,7 @@ class App(Gtk.Window):
                 box-shadow: none;
                 min-height: 24px;
             }
-            .host-button:hover { background-image: none; background-color: #213548; border-color: #86dbb8; color: #ffffff; }
+            .host-button:hover, .host-button.agent-selected { background-image: none; background-color: #213548; border-color: #86dbb8; color: #ffffff; }
             .host-selected { background-image: none; background-color: #203c34; border-color: #86dbb8; color: #d8fff0; font-weight: bold; }
             .project-button {
                 background-image: none;
@@ -425,10 +425,6 @@ class App(Gtk.Window):
         self.auto_enter.connect("toggled", self.save_settings)
         self.delay = Gtk.SpinButton.new_with_range(1, 30, 1)
         self.delay.set_value(self.data.get("auto_enter_delay", 3))
-        hint = Gtk.Label(label="SSH 密码可保存在系统密钥环中。\n关闭标签会断开连接；tmux 会话保留在远端。", xalign=0)
-        hint.set_line_wrap(True)
-        hint.get_style_context().add_class("subtitle")
-        sidebar.pack_start(hint, False, False, 0)
         workspace = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         root.pack2(workspace, resize=True, shrink=False)
         root.set_position(self.sidebar_width)
@@ -1064,7 +1060,7 @@ class App(Gtk.Window):
             if button.get_child():
                 button.get_child().set_xalign(0.0)
             if index == self.agents.get_active():
-                button.get_style_context().add_class("host-selected")
+                button.get_style_context().add_class("agent-selected")
             button.connect("clicked", lambda _button, i=index: self.agents.set_active(i))
             row.pack_start(button, True, True, 0)
             if self.edit_mode:

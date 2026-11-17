@@ -370,6 +370,8 @@ private fun RemoteTerminalApp(store: LocalStore) {
         var syncLoading by remember { mutableStateOf(false) }
         val snackbars = remember { SnackbarHostState() }
         val scope = rememberCoroutineScope()
+        val dirtyWorkspaces = remember { store.loadDirtyWorkspaces().toMutableSet() }
+        val workspaceVersions = remember { mutableMapOf<String, Int>() }
         val mainHandler = remember { Handler(Looper.getMainLooper()) }
         val selectedHost = hosts.firstOrNull { it.id == selectedHostId } ?: hosts.firstOrNull()
         val selectedAgent = agents.firstOrNull { it.id == selectedAgentId } ?: agents.firstOrNull()
@@ -382,9 +384,19 @@ private fun RemoteTerminalApp(store: LocalStore) {
 
         fun syncWorkspaceList(host: HostProfile, directories: List<ProjectDirectory>) {
             if (syncUrl.isBlank()) return
+            val version = (workspaceVersions[host.id] ?: 0) + 1
+            workspaceVersions[host.id] = version
+            dirtyWorkspaces.add(host.id)
+            store.saveDirtyWorkspaces(dirtyWorkspaces)
             scope.launch {
                 runCatching { withContext(SyncClient.dispatcher) { SyncClient.saveWorkspaces(host, directories) } }
-                    .onFailure { snackbars.showSnackbar("工作区同步失败：${it.message}") }
+                    .onSuccess {
+                        if (workspaceVersions[host.id] == version) {
+                            dirtyWorkspaces.remove(host.id)
+                            store.saveDirtyWorkspaces(dirtyWorkspaces)
+                        }
+                    }
+                    .onFailure { snackbars.showSnackbar("工作区同步失败，将自动重试：${it.message}") }
             }
         }
 
@@ -545,6 +557,19 @@ private fun RemoteTerminalApp(store: LocalStore) {
             syncLoading = syncHosts.isNotEmpty()
             while (true) {
                 syncHosts.forEach { host ->
+                    val workspaceVersion = workspaceVersions[host.id] ?: 0
+                    if (host.id in dirtyWorkspaces) {
+                        val current = hosts.firstOrNull { it.id == host.id }
+                        if (current != null) {
+                            runCatching { withContext(SyncClient.dispatcher) { SyncClient.saveWorkspaces(current, current.directories) } }
+                                .onSuccess {
+                                    if ((workspaceVersions[host.id] ?: 0) == workspaceVersion) {
+                                        dirtyWorkspaces.remove(host.id)
+                                        store.saveDirtyWorkspaces(dirtyWorkspaces)
+                                    }
+                                }
+                        }
+                    }
                     runCatching {
                         withContext(SyncClient.dispatcher) {
                         val configuredWorkspaces = SyncClient.hasWorkspaces(host)
@@ -557,8 +582,10 @@ private fun RemoteTerminalApp(store: LocalStore) {
                         val (configuredWorkspaces, remoteWorkspaces) = workspaceState
                         val (configuredAgents, remoteAgents) = agentState
                         val localHost = hosts.firstOrNull { it.id == host.id } ?: host
-                        if (!configuredWorkspaces && localHost.directories.isNotEmpty()) syncWorkspaceList(localHost, localHost.directories)
-                        else if (localHost.directories != remoteWorkspaces) saveHosts(hosts.map { if (it.id == host.id) it.copy(directories = remoteWorkspaces) else it })
+                        if (host.id !in dirtyWorkspaces && (workspaceVersions[host.id] ?: 0) == workspaceVersion) {
+                            if (!configuredWorkspaces && localHost.directories.isNotEmpty()) syncWorkspaceList(localHost, localHost.directories)
+                            else if (localHost.directories != remoteWorkspaces) saveHosts(hosts.map { if (it.id == host.id) it.copy(directories = remoteWorkspaces) else it })
+                        }
                         if (!configuredAgents && agents.isNotEmpty()) syncAgentList(localHost, agents.toList())
                         else if (agents.toList() != remoteAgents) {
                             agents.clear(); agents.addAll(remoteAgents); store.saveAgents(remoteAgents)
