@@ -18,7 +18,7 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("Vte", "2.91")
 gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Gtk, Vte, GLib, Gdk, GdkPixbuf
-from core import load_config, save_config, ssh_argv, auto_enter_signature, quota_agent, quota_remote_command, quota_from_codex, quota_from_agy, format_quota, upload_image, MAX_IMAGE_BYTES, sync_request, sync_data_request, sync_host_key, render_battery_pixbuf, save_host_password, clear_host_password, ssh_auth_environment
+from core import load_config, save_config, ssh_argv, auto_enter_signature, AutoEnterController, quota_agent, quota_remote_command, quota_from_codex, quota_from_agy, format_quota, upload_image, MAX_IMAGE_BYTES, sync_request, sync_data_request, sync_host_key, render_battery_pixbuf, save_host_password, clear_host_password, ssh_auth_environment
 from version import VERSION
 
 
@@ -1670,13 +1670,7 @@ class App(Gtk.Window):
             "generation": 0,
             "retry": 0,
             "retry_source": None,
-            "timer": None,
-            "secondary_timer": None,
             "watchdog_timer": None,
-            "signature": None,
-            "prompt_detected_at": 0.0,
-            "confirm_attempts": 0,
-            "handled_signature": None,
             "quota_busy": False,
             "connected_at": 0,
             "last_output_at": 0.0
@@ -1685,12 +1679,6 @@ class App(Gtk.Window):
         def close_tab(*_):
             state["closed"] = True
             self.sync_async(host, "DELETE", session_id)
-            if state["timer"]:
-                GLib.source_remove(state["timer"])
-                state["timer"] = None
-            if state["secondary_timer"]:
-                GLib.source_remove(state["secondary_timer"])
-                state["secondary_timer"] = None
             if state["watchdog_timer"]:
                 GLib.source_remove(state["watchdog_timer"])
                 state["watchdog_timer"] = None
@@ -1779,122 +1767,31 @@ class App(Gtk.Window):
             threading.Thread(target=worker, daemon=True).start()
             return True
         GLib.timeout_add_seconds(60, read_quota)
-        def cancel_confirm_timers():
-            if state["timer"]:
-                GLib.source_remove(state["timer"])
-                state["timer"] = None
-            if state["secondary_timer"]:
-                GLib.source_remove(state["secondary_timer"])
-                state["secondary_timer"] = None
+        auto_confirm = AutoEnterController()
 
         def visible_signature():
             try:
-                _, row = terminal.get_cursor_position()
-                end_row = max(row, terminal.get_row_count() - 1)
-                text, _ = terminal.get_text_range_format(
-                    Vte.Format.TEXT, max(0, row - 99), 0, end_row, terminal.get_column_count() - 1
-                )
+                # Only inspect the visible screen, not old prompts in scrollback.
+                if hasattr(terminal, "get_text_format"):
+                    text = terminal.get_text_format(Vte.Format.TEXT)
+                else:
+                    _, row = terminal.get_cursor_position()
+                    text, _ = terminal.get_text_range_format(
+                        Vte.Format.TEXT, max(0, row - terminal.get_row_count() + 1), 0,
+                        row, terminal.get_column_count() - 1)
                 return auto_enter_signature(text or "")
-            except (TypeError, ValueError):
+            except (AttributeError, TypeError, ValueError):
                 return None
 
-        def schedule_secondary_check(target_sig):
-            if state["closed"] or not state["connected"]:
-                return
-            if state["secondary_timer"]:
-                GLib.source_remove(state["secondary_timer"])
-                state["secondary_timer"] = None
-
-            def secondary_check():
-                state["secondary_timer"] = None
-                if state["closed"] or not state["connected"] or not self.auto_enter.get_active():
-                    return False
-                latest_sig = visible_signature()
-                if not latest_sig:
-                    # 提示已顺利通过并消失
-                    state["signature"] = None
-                    state["confirm_attempts"] = 0
-                    state["handled_signature"] = None
-                    return False
-
-                # 提示依然存在（回车未生效或多步骤连续提示）：继续复核并尝试回车
-                if state["confirm_attempts"] < 3:
-                    state["confirm_attempts"] += 1
-                    terminal.feed_child(b"\r")
-                    sec_delay = max(2, min(5, self.delay.get_value_as_int()))
-                    state["secondary_timer"] = GLib.timeout_add_seconds(sec_delay, secondary_check)
-                else:
-                    # 达到最大重试次数（连续确认 3 次仍未清除），标记已处理避免死循环
-                    state["handled_signature"] = latest_sig
-                return False
-
-            sec_delay = max(2, min(5, self.delay.get_value_as_int()))
-            state["secondary_timer"] = GLib.timeout_add_seconds(sec_delay, secondary_check)
-
-        def do_primary_confirm(sig):
-            state["timer"] = None
-            if state["closed"] or not state["connected"] or not self.auto_enter.get_active():
-                return False
-            current_sig = visible_signature()
-            if not current_sig:
-                # 提示确实已消失
-                state["signature"] = None
-                state["confirm_attempts"] = 0
-                state["handled_signature"] = None
-                return False
-
-            # 屏幕上仍存在合法的确认提示，执行主确认回车
-            state["signature"] = current_sig
-            state["confirm_attempts"] = 1
-            terminal.feed_child(b"\r")
-            # 开启二次检测与复核排期
-            schedule_secondary_check(current_sig)
-            return False
-
         def check_prompt():
-            if not state["connected"] or not self.auto_enter.get_active() or state["closed"]:
-                return
-            sig = visible_signature()
-            if not sig:
-                if state["signature"]:
-                    cancel_confirm_timers()
-                    state["signature"] = None
-                    state["confirm_attempts"] = 0
-                    state["handled_signature"] = None
-                return
-
-            if sig == state["handled_signature"]:
-                return
-
-            now = time.monotonic()
-            delay_sec = max(1, self.delay.get_value_as_int())
-
-            if state["signature"] is None:
-                # 首次发现提示，启动倒计时
-                state["signature"] = sig
-                state["confirm_attempts"] = 0
-                state["handled_signature"] = None
-                state["prompt_detected_at"] = now
-                state["timer"] = GLib.timeout_add_seconds(delay_sec, lambda s=sig: do_primary_confirm(s))
-            else:
-                # 已经在等待确认或二次确认中：
-                # 如果正在等待二次确认，不干扰二次确认流程
-                if state["secondary_timer"] is not None:
-                    return
-                # 如果主定时器存在，允许它按原计划触发，不被频繁输出变动或轮询重复打断重置
-                if state["timer"] is not None:
-                    if now - state.get("prompt_detected_at", now) >= delay_sec:
-                        cancel_confirm_timers()
-                        do_primary_confirm(sig)
-                    return
-                # 如果未在重试且没有定时器，根据已过时间决定立即触发还是补足定时器
-                if state["confirm_attempts"] == 0:
-                    elapsed = now - state.get("prompt_detected_at", now)
-                    if elapsed >= delay_sec:
-                        do_primary_confirm(sig)
-                    else:
-                        remain = max(1, round(delay_sec - elapsed))
-                        state["timer"] = GLib.timeout_add_seconds(remain, lambda s=sig: do_primary_confirm(s))
+            enabled = state["connected"] and self.auto_enter.get_active() and not state["closed"]
+            signature = visible_signature() if enabled else None
+            if auto_confirm.observe(signature, time.monotonic(), self.delay.get_value_as_int(), enabled):
+                # A changed selection or prompt must start a fresh countdown.
+                if visible_signature() == signature:
+                    terminal.feed_child(b"\r")
+                else:
+                    auto_confirm.reset()
 
         def changed(*_):
             state["last_output_at"] = time.monotonic()
@@ -1902,20 +1799,19 @@ class App(Gtk.Window):
 
         terminal.connect("contents-changed", changed)
 
-        # 每个会话独享的防卡死轮询检测，确保在输出静止时也能及时响应
         def session_watchdog():
             if state["closed"]:
                 return False
-            if state["connected"] and self.auto_enter.get_active():
-                check_prompt()
+            check_prompt()
             return True
 
-        state["watchdog_timer"] = GLib.timeout_add_seconds(2, session_watchdog)
+        state["watchdog_timer"] = GLib.timeout_add(250, session_watchdog)
 
         def key_pressed(widget, event):
             modifiers = event.state & Gtk.accelerator_get_default_mod_mask()
             if (kind == "agy" and modifiers == Gdk.ModifierType.CONTROL_MASK
                     and event.keyval in (Gdk.KEY_v, Gdk.KEY_V)):
+                auto_confirm.cancel(visible_signature())
                 widget.paste_clipboard()
                 return True
             if modifiers == (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK):
@@ -1923,6 +1819,7 @@ class App(Gtk.Window):
                     copy_selection(widget)
                     return True
                 if event.keyval in (Gdk.KEY_v, Gdk.KEY_V):
+                    auto_confirm.cancel(visible_signature())
                     widget.paste_clipboard()
                     return True
             # 单纯按下修饰键（Shift、Ctrl、Alt等）不取消自动回车
@@ -1933,8 +1830,7 @@ class App(Gtk.Window):
                 Gdk.KEY_Super_L, Gdk.KEY_Super_R,
                 Gdk.KEY_Caps_Lock,
             ):
-                cancel_confirm_timers()
-                state["handled_signature"] = state["signature"]
+                auto_confirm.cancel(visible_signature())
             return False
         terminal.connect("key-press-event", key_pressed)
         def start(*_):
@@ -1943,10 +1839,7 @@ class App(Gtk.Window):
             if state["retry_source"]:
                 GLib.source_remove(state["retry_source"])
                 state["retry_source"] = None
-            cancel_confirm_timers()
-            state["signature"] = None
-            state["confirm_attempts"] = 0
-            state["handled_signature"] = None
+            auto_confirm.reset()
             state["last_output_at"] = time.monotonic()
             reconnect.hide()
             state["generation"] += 1
@@ -1958,10 +1851,7 @@ class App(Gtk.Window):
         def child_exited(_terminal, status):
             state["connected"] = False
             update_quota_display([])
-            cancel_confirm_timers()
-            state["signature"] = None
-            state["confirm_attempts"] = 0
-            state["handled_signature"] = None
+            auto_confirm.reset()
             if state["closed"]:
                 return
             code = os.waitstatus_to_exitcode(status)

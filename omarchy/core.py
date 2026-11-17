@@ -179,44 +179,71 @@ def _normalize_signature(sig):
 
 
 def auto_enter_signature(text):
+    """Identify a currently visible, explicitly affirmative Enter action."""
     if not text:
         return None
-    raw_lines = [line.strip() for line in text.splitlines()]
-    # 过滤掉末尾的空行以及 tmux 状态栏（例如: [rdt_7fa83d7d99994cec85] 0:bash* ...）
     lines = []
-    for line in raw_lines:
-        if not line:
-            continue
-        if re.match(r"^\[(?:rdt_[0-9a-fA-F]+|\d+)\]\s+\d+:\S+", line):
+    for raw in text.splitlines():
+        line = raw.strip().strip("│┃║| ").strip()
+        if not line or re.match(r"^\[(?:rdt_[0-9a-fA-F]+|\d+)\]\s+\d+:\S+", line):
             continue
         lines.append(line)
     if not lines:
         return None
 
-    # 1. 检查末尾附近的快捷确认/回车提示（大小写不敏感，如 [y/n], [y/N], (y/n), press enter to continue 等）
-    prompt_re = re.compile(
-        r"(?i)(?:\[(?:y/n|yes/no|y/N|Y/n)\]|\((?:y/n|yes/no|y/N|Y/n)\)|press\s+(?:enter|return)\s+to\s+(?:continue|confirm|approve)|按\s*(?:回车|enter)\s*(?:继续|确认|批准|同意))[:\s?]*$"
-    )
-    for idx in range(len(lines) - 1, max(-1, len(lines) - 6), -1):
-        if prompt_re.search(lines[idx]):
-            context = lines[max(0, idx - 1):idx + 1]
-            return _normalize_signature("\n".join(context))
-
-    # 2. 检查多选项式交互菜单（如 Codex / Agy CLI 的光标或标记选单）
-    option_re = re.compile(
-        r"(?i)^\s*(?:[›❯>➜→*]|●|◉|\[[x*]\]|\([x*]\))\s*(?:\d+[.)]\s*)?(?:yes\b|allow\b|approve\b|proceed\b|continue\b|always\b|允许|批准|同意|继续|确认|总是)"
-    )
-    request_re = re.compile(
-        r"(?i)(approve (this|the)? ?(command|action)?|allow (this|the)? ?(command|action)?|would you like to|do you want to|run this command\?|continue\? ?\[|\[(y/n|yes/no)\]|\((y/n|yes/no)\)|press\s+(enter|return)\s+to\s+(continue|confirm|approve)|按\s*(回车|enter)\s*(继续|确认|批准)|permission required|needs your approval|批准|是否允许|需要确认|是否继续)"
-    )
-
-    for i in range(len(lines) - 1, -1, -1):
-        if option_re.match(lines[i]):
-            for line in reversed(lines[max(0, i - 20):i]):
-                if request_re.search(line):
-                    return _normalize_signature(line + "\n" + lines[i])
+    # Only a capital Y indicates that Enter selects yes. A lowercase y/N or
+    # ambiguous y/n must not be silently answered with Enter.
+    enter_prompt = re.compile(r"(?i)(?:press\s+(?:enter|return)\s+to\s+(?:continue|confirm|approve)|按\s*(?:回车|enter)\s*(?:继续|确认|批准|同意))[:\s?.!]*$")
+    yes_default = re.compile(r"(?:\[Y/(?:n|no)\]|\(Y/(?:n|no)\)|\[Yes/no\]|\(Yes/no\))[:\s?.]*$")
+    option = re.compile(r"^\s*(?:[›❯>➜→*●◉]|\[[xX*]\]|\([xX*]\))\s*(?:\d+[.)]\s*)?(.*)$")
+    affirmative = re.compile(r"(?i)^(?:yes\b|allow\b|approve\b|proceed\b|continue\b|always\b|允许|批准|同意|继续|确认|总是)")
+    request = re.compile(r"(?i)(?:approv(?:e|al)|allow|would you like|do you want|proceed|continue|permission|授权|批准|是否允许|需要确认|是否继续|确认执行)")
+    # Recent selected option wins, including a selected rejection.
+    for index in range(len(lines) - 1, max(-1, len(lines) - 12), -1):
+        match = option.match(lines[index])
+        if not match:
+            continue
+        if not affirmative.match(match.group(1)):
             return None
+        for question in reversed(lines[max(0, index - 24):index]):
+            if request.search(question):
+                return _normalize_signature(question + "\n" + lines[index])
+        return None
+    for line in reversed(lines[-5:]):
+        if yes_default.search(line) or enter_prompt.search(line):
+            return _normalize_signature(line)
+
     return None
+
+
+class AutoEnterController:
+    """Track one visible prompt per terminal and send at most one Enter."""
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.signature = None
+        self.detected_at = 0.0
+        self.handled = False
+
+    def cancel(self, signature=None):
+        # Manual input cancels the currently displayed prompt until it changes.
+        self.signature = signature or self.signature
+        self.handled = True
+
+    def observe(self, signature, now, delay, enabled=True):
+        if not enabled or not signature:
+            self.reset()
+            return False
+        if signature != self.signature:
+            self.signature = signature
+            self.detected_at = now
+            self.handled = False
+            return False
+        if not self.handled and now - self.detected_at >= max(1, delay):
+            self.handled = True
+            return True
+        return False
 
 
 def quota_agent(command):
