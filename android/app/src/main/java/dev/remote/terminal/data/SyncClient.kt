@@ -36,7 +36,7 @@ object SyncClient {
         } finally { connection.disconnect() }
     }
 
-    private fun request(host: HostProfile, method: String, path: String, payload: JSONObject? = null): JSONObject {
+    private fun request(host: HostProfile?, method: String, path: String, payload: JSONObject? = null): JSONObject {
         val url = URL(syncUrl.trimEnd('/') + path)
         require(url.protocol == "http" || url.protocol == "https") { "同步地址必须以 http:// 或 https:// 开头" }
         val connection = url.openConnection() as HttpURLConnection
@@ -54,6 +54,45 @@ object SyncClient {
             check(connection.responseCode in 200..299) { "同步服务返回 ${connection.responseCode}" }
             return JSONObject(connection.inputStream.bufferedReader().use { it.readText() })
         } finally { connection.disconnect() }
+    }
+
+    private fun accountRequest(method: String, path: String, payload: JSONObject? = null): JSONObject = request(null, method, path, payload)
+
+    fun hostProfile(host: HostProfile, selectedAgentCommand: String): JSONObject {
+        val aliases = legacySyncKeys(host)
+        val legacy = JSONArray().apply { aliases.forEach { put(it) } }
+        return JSONObject().put("id", host.id).put("name", host.name)
+            .put("lan_address", host.lanAddress).put("external_address", host.externalAddress)
+            .put("port", host.port).put("username", host.username).put("icon", host.icon)
+            .put("selected_agent_command", selectedAgentCommand).put("legacy_keys", legacy)
+    }
+
+    fun listHosts(): List<JSONObject> {
+        val array = accountRequest("GET", "/v1/hosts").getJSONArray("hosts")
+        return (0 until array.length()).map { array.getJSONObject(it) }
+    }
+
+    fun saveHostProfile(host: HostProfile, selectedAgentCommand: String): JSONObject {
+        val payload = hostProfile(host, selectedAgentCommand)
+        return accountRequest("PUT", "/v1/hosts/${host.id}", payload)
+    }
+
+    fun deleteHostProfile(hostId: String) { accountRequest("DELETE", "/v1/hosts/$hostId") }
+
+    private fun legacySyncKeys(host: HostProfile): List<String> {
+        val sources = buildList {
+            if (host.syncId.isNotBlank()) add("manual:${host.syncId.trim()}")
+            if (host.syncFingerprint.isNotBlank()) add(host.syncFingerprint)
+            if (host.legacyAddress.isNotBlank()) add(host.legacyAddress.lowercase())
+            if (host.address.isNotBlank()) add(host.address.lowercase())
+        }
+        return sources.map { source -> MessageDigest.getInstance("SHA-256").digest(source.toByteArray()).joinToString("") { "%02x".format(it.toInt() and 0xff) } }.distinct()
+    }
+
+    fun matchesLegacyHost(host: HostProfile, profile: JSONObject): Boolean {
+        val aliases = profile.optJSONArray("legacy_keys") ?: return false
+        val remote = (0 until aliases.length()).map { aliases.optString(it) }.toSet()
+        return legacySyncKeys(host).any { it in remote }
     }
 
     fun list(host: HostProfile): List<JSONObject> {
@@ -74,9 +113,7 @@ object SyncClient {
     private fun sessionPath(host: HostProfile): String = "/v1/hosts/${workspaceKey(host)}/users/${URLEncoder.encode(host.username, "UTF-8").replace("+", "%20")}/sessions"
 
     private fun workspaceKey(host: HostProfile): String {
-        val manualId = host.syncId.trim()
-        val source = if (manualId.isNotBlank()) "manual:$manualId" else host.syncFingerprint.ifBlank { host.address.lowercase() }
-        return MessageDigest.getInstance("SHA-256").digest(source.toByteArray()).joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        return host.id
     }
     fun hostIdentity(host: HostProfile): String = workspaceKey(host)
 

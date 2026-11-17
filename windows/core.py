@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 import uuid
 import re
 import subprocess
+import socket
 import urllib.request
 from urllib.parse import quote
 
@@ -39,7 +40,7 @@ def upload_image(host, control_path, image):
         raise ValueError("图片为空或超过 20 MB")
     argv = ["ssh", "-S", control_path, "-o", "ControlMaster=no", "-o", "BatchMode=yes",
             "-o", "ConnectTimeout=5", "-p", str(host["port"]), "-l", host["username"],
-            "--", host["address"], image_upload_command()]
+            "--", ssh_address(host), image_upload_command()]
     result = subprocess.run(argv, input=image, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
     if result.returncode:
         raise RuntimeError(result.stderr.decode("utf-8", errors="replace").strip() or "图片上传失败")
@@ -67,10 +68,22 @@ def load_config(path=None):
         raise ValueError("配置文件格式无效")
     data.setdefault("sync_url", "")
     data.setdefault("sync_token", "")
+    migrated = False
     for host in data["hosts"]:
+        if not host.get("id"):
+            host["id"] = uuid.uuid4().hex
+            migrated = True
+        if "legacy_address" not in host: host["legacy_address"] = host.get("address", "")
+        if "external_address" not in host:
+            host["external_address"] = host.get("address", "")
+            migrated = True
+        if "lan_address" not in host:
+            host["lan_address"] = ""
+            migrated = True
         data["sync_url"] = data.get("sync_url") or host.get("sync_url", "")
         data["sync_token"] = data.get("sync_token") or host.get("sync_token", "")
         host.pop("sync_url", None); host.pop("sync_token", None)
+    if migrated: save_config(data, path)
     return data
 
 
@@ -198,6 +211,7 @@ def sync_data_request(config, method, path, item=None):
 
 
 def sync_host_key(host):
+    if host.get("id"): return str(host["id"])
     sync_id = str(host.get("sync_id", "")).strip()
     if sync_id: return hashlib.sha256(("manual:" + sync_id).encode("utf-8")).hexdigest()
     fingerprint = host.get("_sync_fingerprint", "")
@@ -205,19 +219,41 @@ def sync_host_key(host):
     return hashlib.sha256(host.get("address", "").lower().encode("utf-8")).hexdigest()
 
 
+def legacy_sync_keys(host):
+    values = []
+    sync_id = str(host.get("sync_id", "")).strip()
+    if sync_id: values.append(hashlib.sha256(("manual:" + sync_id).encode("utf-8")).hexdigest())
+    fingerprint = host.get("_sync_fingerprint", "")
+    if fingerprint: values.append(hashlib.sha256(fingerprint.encode("utf-8")).hexdigest())
+    for address in (host.get("legacy_address", ""), host.get("address", "")):
+        if address: values.append(hashlib.sha256(address.lower().encode("utf-8")).hexdigest())
+    return list(dict.fromkeys(values))
+
+
+def ssh_address(host):
+    candidates = list(dict.fromkeys(x.strip() for x in (host.get("lan_address", ""), host.get("external_address", ""), host.get("address", "")) if x and x.strip()))
+    for address in candidates:
+        try:
+            with socket.create_connection((address, int(host.get("port", 22))), timeout=1.2): return address
+        except (OSError, ValueError):
+            continue
+    return candidates[0] if candidates else ""
+
+
 def ssh_host_fingerprint(host):
     known_hosts = Path.home() / ".ssh" / "known_hosts"
     if not known_hosts.exists(): return ""
-    args = ["ssh-keygen", "-F", host.get("address", ""), "-f", str(known_hosts)]
-    if int(host.get("port", 22)) != 22: args += ["-p", str(host["port"])]
-    try: result = subprocess.run(args, capture_output=True, timeout=5)
-    except (OSError, subprocess.TimeoutExpired): return ""
     keys = []
-    for line in result.stdout.decode("utf-8", errors="ignore").splitlines():
-        fields = line.split()
-        if len(fields) >= 3 and not fields[0].startswith("#"):
-            try: keys.append(base64.b64decode(fields[2]))
-            except Exception: pass
+    for address in dict.fromkeys(item for item in (host.get("lan_address", ""), host.get("external_address", ""), host.get("address", "")) if item):
+        args = ["ssh-keygen", "-F", address, "-f", str(known_hosts)]
+        if int(host.get("port", 22)) != 22: args += ["-p", str(host["port"])]
+        try: result = subprocess.run(args, capture_output=True, timeout=5)
+        except (OSError, subprocess.TimeoutExpired): continue
+        for line in result.stdout.decode("utf-8", errors="ignore").splitlines():
+            fields = line.split()
+            if len(fields) >= 3 and not fields[0].startswith("#"):
+                try: keys.append(base64.b64decode(fields[2]))
+                except Exception: pass
     return "SHA256:" + base64.b64encode(hashlib.sha256(sorted(keys)[0]).digest()).decode("ascii").rstrip("=") if keys else ""
 
 
@@ -238,7 +274,7 @@ def ssh_argv(host, directory, agent, session_id=None, control_path=None, restore
         remote = (f"cd -- {directory} && if command -v tmux >/dev/null 2>&1 && tmux has-session -t {name} 2>/dev/null; then "
                   f"tmux attach-session -t {name}; else printf '\\n[会话已不存在，无法恢复]\\n'; exit 1; fi")
     options = ["-o", "ControlMaster=auto", "-o", "ControlPersist=60", "-o", "ControlPath=" + control_path] if control_path else []
-    return ["ssh", "-tt", "-o", "ServerAliveInterval=20", "-o", "ServerAliveCountMax=6", *options, "-p", str(host["port"]), "-l", host["username"], "--", host["address"], remote], session_id
+    return ["ssh", "-tt", "-o", "ServerAliveInterval=20", "-o", "ServerAliveCountMax=6", *options, "-p", str(host["port"]), "-l", host["username"], "--", ssh_address(host), remote], session_id
 
 
 def _normalize_signature(sig):

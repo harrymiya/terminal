@@ -33,6 +33,9 @@ data class HostProfile(
     val directories: List<ProjectDirectory> = emptyList(),
     val syncFingerprint: String = "",
     val syncId: String = "",
+    val lanAddress: String = "",
+    val externalAddress: String = address,
+    val legacyAddress: String = address,
 )
 
 data class AgentPreset(
@@ -58,6 +61,10 @@ data class TerminalTask(
 )
 
 class LocalStore(context: Context) {
+    companion object {
+        private const val DEFAULT_SYNC_URL = "http://114.55.232.229:8080"
+    }
+
     private val preferences = context.getSharedPreferences("remote_dev_terminal", Context.MODE_PRIVATE)
     private val vault = PasswordVault()
 
@@ -82,7 +89,8 @@ class LocalStore(context: Context) {
     fun loadSyncUrl(): String {
         preferences.getString("sync_url", null)?.let { return it }
         val legacy = runCatching { JSONArray(preferences.getString("hosts", "[]")) }.getOrNull()
-        val value = (0 until (legacy?.length() ?: 0)).asSequence().mapNotNull { legacy?.optJSONObject(it)?.optString("sync_url") }.firstOrNull { it.isNotBlank() }.orEmpty()
+        val value = (0 until (legacy?.length() ?: 0)).asSequence().mapNotNull { legacy?.optJSONObject(it)?.optString("sync_url") }.firstOrNull { it.isNotBlank() }
+            ?: DEFAULT_SYNC_URL
         preferences.edit().putString("sync_url", value).apply()
         return value
     }
@@ -140,12 +148,15 @@ class LocalStore(context: Context) {
                 dirs.getJSONObject(n).let { ProjectDirectory(it.getString("id"), it.getString("name"), it.getString("path"), it.optString("icon", "📁")) }
             }
             HostProfile(
-                id = item.getString("id"), name = item.getString("name"), address = item.getString("address"),
+                id = item.getString("id"), name = item.getString("name"), address = item.optString("external_address", item.getString("address")),
                 port = item.optInt("port", 22), username = item.getString("username"),
                 password = vault.decrypt(preferences.getString("password_${item.getString("id")}", null)),
                 icon = item.optString("icon", "⌘"), directories = directories,
                 syncFingerprint = item.optString("sync_fingerprint", ""),
                 syncId = item.optString("sync_id", ""),
+                lanAddress = item.optString("lan_address", ""),
+                externalAddress = item.optString("external_address", item.optString("address", "")),
+                legacyAddress = item.optString("legacy_address", item.optString("address", "")),
             )
         }
     }.getOrDefault(emptyList())
@@ -156,9 +167,10 @@ class LocalStore(context: Context) {
         hosts.forEach { host ->
             val dirs = JSONArray()
             host.directories.forEach { dirs.put(JSONObject().put("id", it.id).put("name", it.name).put("path", it.path).put("icon", it.icon)) }
-            root.put(JSONObject().put("id", host.id).put("name", host.name).put("address", host.address)
+            root.put(JSONObject().put("id", host.id).put("name", host.name).put("address", host.externalAddress.ifBlank { host.lanAddress })
                 .put("port", host.port).put("username", host.username).put("icon", host.icon).put("directories", dirs)
-                .put("sync_fingerprint", host.syncFingerprint).put("sync_id", host.syncId.trim()))
+                .put("sync_fingerprint", host.syncFingerprint).put("sync_id", host.syncId.trim())
+                .put("lan_address", host.lanAddress).put("external_address", host.externalAddress).put("legacy_address", host.legacyAddress))
             preferences.edit().putString("password_${host.id}", vault.encrypt(host.password)).apply()
         }
         (oldIds - hosts.map { it.id }.toSet()).forEach { preferences.edit().remove("password_$it").apply() }

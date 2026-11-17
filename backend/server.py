@@ -80,6 +80,7 @@ def create_server(address, database, token=None):
         db.execute("CREATE TABLE IF NOT EXISTS account_agents (user_id INTEGER NOT NULL, host_id TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(user_id, host_id))")
         db.execute("CREATE TABLE IF NOT EXISTS agent_history (user_id INTEGER NOT NULL, host_id TEXT NOT NULL, revision INTEGER NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(user_id, host_id, revision))")
         db.execute("CREATE TABLE IF NOT EXISTS account_host_state (user_id INTEGER NOT NULL, host_id TEXT NOT NULL, revision INTEGER NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(user_id, host_id))")
+        db.execute("CREATE TABLE IF NOT EXISTS account_hosts (user_id INTEGER NOT NULL, host_id TEXT NOT NULL, payload TEXT NOT NULL, deleted INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(user_id, host_id))")
         db.execute("UPDATE users SET must_change = 0 WHERE must_change != 0")
         if db.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
             username = os.environ.get("RDT_SYNC_BOOTSTRAP_USERNAME", "lirui").strip().lower()
@@ -182,6 +183,11 @@ def create_server(address, database, token=None):
                                    "is_admin": bool(account and account[0])})
 
         def do_GET(self):
+            if urlsplit(self.path).path == "/v1/hosts":
+                if not self.authorized(): return
+                with sqlite3.connect(database) as db:
+                    rows = db.execute("SELECT payload, deleted FROM account_hosts WHERE user_id = ? ORDER BY rowid", (self.user_id,)).fetchall()
+                return self.reply(200, {"hosts": [{**json.loads(payload), "deleted": bool(deleted)} for payload, deleted in rows]})
             if urlsplit(self.path).path == "/v1/admin/users":
                 if not self.admin_authorized(): return
                 with sqlite3.connect(database) as db:
@@ -306,6 +312,54 @@ def create_server(address, database, token=None):
             if not self.authorized():
                 return
             path = urlsplit(self.path).path
+            if path.startswith("/v1/hosts/") and path.count("/") == 3:
+                host_id = path.removeprefix("/v1/hosts/")
+                try:
+                    length = int(self.headers.get("Content-Length", "-1"))
+                    if not host_id or len(host_id) > 64 or length < 0 or length > MAX_BODY: raise ValueError()
+                    host = json.loads(self.rfile.read(length))
+                    fields = ("id", "name", "lan_address", "external_address", "username", "icon", "selected_agent_command")
+                    if not isinstance(host, dict) or host.get("id") != host_id: raise ValueError()
+                    if any(not isinstance(host.get(key, ""), str) or len(host.get(key, "")) > 4096 for key in fields): raise ValueError()
+                    port = host.get("port", 22)
+                    aliases = host.get("legacy_keys", [])
+                    if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535: raise ValueError()
+                    if not isinstance(aliases, list) or len(aliases) > 16 or any(not isinstance(key, str) or len(key) > 256 for key in aliases): raise ValueError()
+                    host = {key: host.get(key, "") for key in fields} | {"port": port, "legacy_keys": list(dict.fromkeys(aliases))}
+                    host["id"] = host_id
+                    payload = json.dumps(host, ensure_ascii=False)
+                except (ValueError, AttributeError, UnicodeDecodeError, json.JSONDecodeError):
+                    return self.reply(400, {"error": "invalid host profile"})
+                with sqlite3.connect(database) as db:
+                    db.execute("BEGIN IMMEDIATE")
+                    db.execute("INSERT INTO account_hosts(user_id, host_id, payload, deleted) VALUES (?, ?, ?, 0) ON CONFLICT(user_id, host_id) DO UPDATE SET payload=excluded.payload, deleted=0", (self.user_id, host_id, payload))
+                    legacy_ids = set(host["legacy_keys"])
+                    matched_names = []
+                    for old_id, state_payload in db.execute("SELECT host_id, payload FROM account_host_state WHERE user_id=?", (self.user_id,)):
+                        try: old_name = json.loads(state_payload).get("name", "")
+                        except (AttributeError, json.JSONDecodeError): old_name = ""
+                        if old_id in legacy_ids and old_name.casefold() == host["name"].casefold(): matched_names.append(old_id)
+                    other_named_profiles = [row[0] for row in db.execute("SELECT host_id, payload FROM account_hosts WHERE user_id=? AND host_id!=? AND deleted=0", (self.user_id, host_id))
+                                            if json.loads(row[1]).get("name", "").casefold() == host["name"].casefold()]
+                    if matched_names and not other_named_profiles:
+                        for old_id, state_payload in db.execute("SELECT host_id, payload FROM account_host_state WHERE user_id=?", (self.user_id,)):
+                            try: old_name = json.loads(state_payload).get("name", "")
+                            except (AttributeError, json.JSONDecodeError): old_name = ""
+                            if old_name.casefold() == host["name"].casefold(): legacy_ids.add(old_id)
+                    for old_id in legacy_ids:
+                        if old_id == host_id: continue
+                        old = db.execute("SELECT payload FROM account_workspaces WHERE user_id=? AND host_id=?", (self.user_id, old_id)).fetchone()
+                        current = db.execute("SELECT payload FROM account_workspaces WHERE user_id=? AND host_id=?", (self.user_id, host_id)).fetchone()
+                        if old:
+                            items = {item.get("id") or item.get("path"): item for item in json.loads(old[0]) + (json.loads(current[0]) if current else [])}
+                            merged = json.dumps(list(items.values()), ensure_ascii=False)
+                            db.execute("INSERT INTO account_workspaces VALUES (?, ?, ?) ON CONFLICT(user_id, host_id) DO UPDATE SET payload=excluded.payload", (self.user_id, host_id, merged))
+                            revision = db.execute("SELECT COALESCE(MAX(revision), 0) + 1 FROM workspace_history WHERE user_id=? AND host_id=?", (self.user_id, host_id)).fetchone()[0]
+                            db.execute("INSERT OR IGNORE INTO workspace_history VALUES (?, ?, ?, ?)", (self.user_id, host_id, revision, merged))
+                        old_state = db.execute("SELECT revision, payload FROM account_host_state WHERE user_id=? AND host_id=?", (self.user_id, old_id)).fetchone()
+                        if old_state: db.execute("INSERT OR IGNORE INTO account_host_state VALUES (?, ?, ?, ?)", (self.user_id, host_id, old_state[0], old_state[1]))
+                        db.execute("INSERT OR IGNORE INTO account_sessions(user_id, host_id, username, id, payload) SELECT user_id, ?, username, id, payload FROM account_sessions WHERE user_id=? AND host_id=?", (host_id, self.user_id, old_id))
+                return self.reply(200, {"host": host, "configured": True})
             if path.startswith("/v1/admin/users/"):
                 if not self.admin_authorized(): return
                 try:
@@ -515,11 +569,16 @@ def create_server(address, database, token=None):
                     if not row: return self.reply(404, {"error": "user not found"})
                     if row[0] and db.execute("SELECT COUNT(*) FROM users WHERE is_admin = 1").fetchone()[0] <= 1:
                         return self.reply(400, {"error": "at least one administrator is required"})
-                    for table in ("auth_tokens", "account_sessions", "account_workspaces", "workspace_history", "account_agents", "agent_history", "account_host_state"):
+                    for table in ("auth_tokens", "account_sessions", "account_workspaces", "workspace_history", "account_agents", "agent_history", "account_host_state", "account_hosts"):
                         db.execute(f"DELETE FROM {table} WHERE user_id = ?", (user_id,))
                     db.execute("DELETE FROM users WHERE id = ?", (user_id,))
                 return self.reply(200, {"deleted": user_id})
             if not self.authorized(): return
+            if path.startswith("/v1/hosts/") and path.count("/") == 3:
+                host_id = path.removeprefix("/v1/hosts/")
+                with sqlite3.connect(database) as db:
+                    db.execute("UPDATE account_hosts SET deleted=1 WHERE user_id=? AND host_id=?", (self.user_id, host_id))
+                return self.reply(200, {"deleted": True})
             parts = path.strip("/").split("/")
             if len(parts) == 7 and parts[:2] == ["v1", "hosts"] and parts[3] == "users" and parts[5] == "sessions":
                 host_id, username, session_id = parts[2], __import__("urllib.parse", fromlist=["unquote"]).unquote(parts[4]), parts[6]

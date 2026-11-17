@@ -260,6 +260,7 @@ private class TerminalSessionState(var task: TerminalTask, private val mainHandl
     var isStreaming by mutableStateOf(false)
     var codexQuota by mutableStateOf<List<Pair<Int, Int>>?>(null)
     var hostFingerprint by mutableStateOf<String?>(null)
+    var hostKeyAddress by mutableStateOf("")
     var resolveHostKey: ((Boolean) -> Unit)? = null
     private var autoEnterRunnable: Runnable? = null
     var autoEnterDeadline by mutableStateOf<Long?>(null)
@@ -446,6 +447,46 @@ private fun RemoteTerminalApp(store: LocalStore) {
             }
         }
 
+        suspend fun syncHostProfiles() {
+            val allRemote = SyncClient.listHosts()
+            val active = allRemote.filterNot { it.optBoolean("deleted") }
+            val deleted = allRemote.filter { it.optBoolean("deleted") }
+            val matched = mutableSetOf<String>()
+            val idRemaps = mutableMapOf<String, String>()
+            val result = hosts.toList().mapNotNull { local ->
+                if (deleted.any { it.optString("id") == local.id || SyncClient.matchesLegacyHost(local, it) }) return@mapNotNull null
+                val candidates = active.filter { it.optString("id") == local.id || SyncClient.matchesLegacyHost(local, it) }
+                val profile = candidates.firstOrNull() ?: active.filter {
+                    it.optString("name").equals(local.name, true) && it.optString("username").equals(local.username, true)
+                }.singleOrNull()
+                if (profile == null) {
+                    SyncClient.saveHostProfile(local, agents.firstOrNull()?.command.orEmpty())
+                    local
+                } else {
+                    matched.add(profile.optString("id"))
+                    idRemaps[local.id] = profile.optString("id", local.id)
+                    val lan = profile.optString("lan_address")
+                    val external = profile.optString("external_address")
+                    local.copy(id = profile.optString("id", local.id), name = profile.optString("name", local.name),
+                        address = external.ifBlank { lan }, lanAddress = lan, externalAddress = external,
+                        port = profile.optInt("port", local.port), username = profile.optString("username", local.username),
+                        icon = profile.optString("icon", local.icon))
+                }
+            }.toMutableList()
+            active.filterNot { it.optString("id") in matched }.forEach { profile ->
+                val lan = profile.optString("lan_address")
+                val external = profile.optString("external_address")
+                result.add(HostProfile(profile.optString("id"), profile.optString("name", "主机"), external.ifBlank { lan },
+                    profile.optInt("port", 22), profile.optString("username"), icon = profile.optString("icon", "⌘"),
+                    lanAddress = lan, externalAddress = external, legacyAddress = ""))
+            }
+            if (result != hosts.toList()) {
+                val oldSelected = selectedHostId
+                saveHosts(result)
+                idRemaps[oldSelected]?.let { selectedHostId = it }
+            }
+        }
+
         fun closeSession(session: TerminalSessionState) {
             val index = sessions.indexOf(session)
             if (index < 0) return
@@ -538,8 +579,8 @@ private fun RemoteTerminalApp(store: LocalStore) {
                         }
                     }
                 },
-                onHostKey = { fingerprint, resolver -> mainHandler.post {
-                    state.hostFingerprint = fingerprint; state.resolveHostKey = resolver
+                onHostKey = { address, fingerprint, resolver -> mainHandler.post {
+                    state.hostKeyAddress = address; state.hostFingerprint = fingerprint; state.resolveHostKey = resolver
                     alertConfirmation(appContext)
                 } },
             )
@@ -594,6 +635,10 @@ private fun RemoteTerminalApp(store: LocalStore) {
             startupShared = startupShared.filter { entry -> syncHosts.any { it.id == entry.first.id } }
             syncLoading = syncHosts.isNotEmpty()
             while (true) {
+                runCatching { withContext(SyncClient.dispatcher) { syncHostProfiles() } }
+                    .onFailure { error -> if (error.message.orEmpty().contains("401") || error.message.orEmpty().contains("403")) {
+                        syncToken = ""; store.saveSyncSettings(syncUrl, ""); route = AppRoute.LOGIN
+                    } }
                 syncHosts.forEach { host ->
                     val workspaceVersion = workspaceVersions[host.id] ?: 0
                     if (host.id in dirtyWorkspaces) {
@@ -811,21 +856,17 @@ private fun RemoteTerminalApp(store: LocalStore) {
             initial = editingHost,
             onDismiss = { addingHost = false; editingHost = null },
             onSave = { host ->
-                val duplicateSyncId = host.syncId.trim().isNotBlank() && hosts.any {
-                    it.id != host.id && it.syncId.trim() == host.syncId.trim()
+                val wasNew = hosts.none { it.id == host.id }
+                saveHosts(if (wasNew) hosts.toList() + host else hosts.map { if (it.id == host.id) host else it })
+                selectedHostId = host.id
+                agents.firstOrNull { it.id == selectedAgentId }?.let { agent ->
+                    if (syncUrl.isNotBlank()) scope.launch { runCatching { withContext(SyncClient.dispatcher) {
+                        SyncClient.saveHostProfile(host, agent.command)
+                        SyncClient.updateHostProfile(host, agent.command)
+                    } } }
                 }
-                if (duplicateSyncId) {
-                    scope.launch { snackbars.showSnackbar("多端同步标识已被另一台主机使用") }
-                } else {
-                    val wasNew = hosts.none { it.id == host.id }
-                    saveHosts(if (wasNew) hosts.toList() + host else hosts.map { if (it.id == host.id) host else it })
-                    selectedHostId = host.id
-                    agents.firstOrNull { it.id == selectedAgentId }?.let { agent ->
-                        scope.launch { runCatching { withContext(SyncClient.dispatcher) { SyncClient.updateHostProfile(host, agent.command) } } }
-                    }
-                    if (syncUrl.isNotBlank()) refreshShared(host)
-                    addingHost = false; editingHost = null
-                }
+                if (syncUrl.isNotBlank()) refreshShared(host)
+                addingHost = false; editingHost = null
             },
         )
         editingDirectory?.let { (hostId, initial) ->
@@ -850,7 +891,10 @@ private fun RemoteTerminalApp(store: LocalStore) {
         )
         deletingHost?.let { host -> ConfirmDeleteDialog(
             title = "删除主机？", detail = "${host.name} 及其目录配置将从本机移除。",
-            onConfirm = { saveHosts(hosts.filterNot { it.id == host.id }); deletingHost = null },
+            onConfirm = {
+                if (syncUrl.isNotBlank() && syncToken.isNotBlank()) scope.launch { runCatching { withContext(SyncClient.dispatcher) { SyncClient.deleteHostProfile(host.id) } } }
+                saveHosts(hosts.filterNot { it.id == host.id }); deletingHost = null
+            },
             onDismiss = { deletingHost = null },
         ) }
         deletingDirectory?.let { (hostId, dir) -> ConfirmDeleteDialog(
@@ -888,10 +932,11 @@ private fun RemoteTerminalApp(store: LocalStore) {
                     title = { Text("首次连接这台主机？", color = White, fontWeight = FontWeight.SemiBold) },
                     text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text("请核对 SSH 主机指纹。接受后会保存在本机，后续连接会自动校验。", color = Muted)
-                        Text("${session.task.host.address}:${session.task.host.port}", color = White, fontWeight = FontWeight.Medium)
+                        Text("${session.hostKeyAddress}:${session.task.host.port}", color = White, fontWeight = FontWeight.Medium)
                         Text(fingerprint, color = Mint, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
                     } },
                     confirmButton = { TextButton(onClick = {
+                        store.trustHostKey(session.hostKeyAddress, session.task.host.port, fingerprint)
                         val trustedHost = session.task.host.copy(syncFingerprint = fingerprint)
                         saveHosts(hosts.map { if (it.id == trustedHost.id) trustedHost else it })
                         session.task = session.task.copy(host = trustedHost)
@@ -1923,24 +1968,26 @@ private fun SettingsScreen(
 @Composable
 private fun HostEditorDialog(initial: HostProfile?, onDismiss: () -> Unit, onSave: (HostProfile) -> Unit) {
     var name by remember(initial?.id) { mutableStateOf(initial?.name.orEmpty()) }
-    var address by remember(initial?.id) { mutableStateOf(initial?.address.orEmpty()) }
+    var lanAddress by remember(initial?.id) { mutableStateOf(initial?.lanAddress.orEmpty()) }
+    var externalAddress by remember(initial?.id) { mutableStateOf(initial?.externalAddress.orEmpty()) }
     var port by remember(initial?.id) { mutableStateOf(initial?.port?.toString() ?: "22") }
     var username by remember(initial?.id) { mutableStateOf(initial?.username.orEmpty()) }
     var password by remember(initial?.id) { mutableStateOf(initial?.password.orEmpty()) }
     var icon by remember(initial?.id) { mutableStateOf(initial?.icon ?: "⌘") }
-    var syncId by remember(initial?.id) { mutableStateOf(initial?.syncId.orEmpty()) }
-    EditorDialogFrame(if (initial == null) "添加主机" else "编辑主机", onDismiss, canSave = name.isNotBlank() && address.isNotBlank() && username.isNotBlank(), onConfirm = {
-        onSave(HostProfile(initial?.id ?: UUID.randomUUID().toString(), name.trim(), address.trim(), port.toIntOrNull()?.takeIf { it in 1..65535 } ?: 22, username.trim(), password, icon.ifBlank { "⌘" }, initial?.directories.orEmpty(), initial?.syncFingerprint.orEmpty(), syncId.trim()))
+    EditorDialogFrame(if (initial == null) "添加主机" else "编辑主机", onDismiss, canSave = name.isNotBlank() && (lanAddress.isNotBlank() || externalAddress.isNotBlank()) && username.isNotBlank(), onConfirm = {
+        val lan = lanAddress.trim()
+        val external = externalAddress.trim()
+        onSave(HostProfile(initial?.id ?: UUID.randomUUID().toString(), name.trim(), external.ifBlank { lan }, port.toIntOrNull()?.takeIf { it in 1..65535 } ?: 22, username.trim(), password, icon.ifBlank { "⌘" }, initial?.directories.orEmpty(), initial?.syncFingerprint.orEmpty(), initial?.syncId.orEmpty(), lan, external, initial?.legacyAddress ?: initial?.address.orEmpty()))
     }) {
         OutlinedTextField(name, { name = it }, label = { Text("主机名称") }, placeholder = { Text("例如：Mac Studio") }, singleLine = true, modifier = Modifier.fillMaxWidth())
         IconPicker(icon, { icon = it }, listOf("⌘", "🖥️", "☁️", "🐧", "⚡", "🧪", "🏠", "💻", "🔧", "🌐"))
-        OutlinedTextField(address, { address = it }, label = { Text("主机地址") }, placeholder = { Text("dev.example.com 或 IP") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(lanAddress, { lanAddress = it }, label = { Text("内网地址（优先）") }, placeholder = { Text("例如：192.168.1.20") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(externalAddress, { externalAddress = it }, label = { Text("外网地址（备用）") }, placeholder = { Text("域名或公网 IP") }, singleLine = true, modifier = Modifier.fillMaxWidth())
         Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
             OutlinedTextField(port, { port = it.filter(Char::isDigit).take(5) }, label = { Text("SSH 端口") }, singleLine = true, modifier = Modifier.weight(0.65f))
             OutlinedTextField(username, { username = it }, label = { Text("用户名") }, singleLine = true, modifier = Modifier.weight(1f))
         }
-        OutlinedTextField(syncId, { syncId = it }, label = { Text("多端同步标识") }, placeholder = { Text("各设备为同一主机填写相同值") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-        Text("各设备需填写相同值；留空时按 SSH 指纹或地址识别。修改后会切换同步记录分组。", color = Muted, fontSize = 11.sp)
+        Text("优先连接内网地址；无法连接时自动切换外网地址。主机配置会按同步账号分发。", color = Muted, fontSize = 11.sp)
         OutlinedTextField(password, { password = it }, label = { Text("SSH 密码") }, placeholder = { Text("密码保存在本机加密区") }, singleLine = true,
             visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
     }
