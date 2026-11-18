@@ -146,6 +146,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.viewinterop.AndroidView
 import dev.remote.terminal.data.AgentPreset
 import dev.remote.terminal.data.HostProfile
+import dev.remote.terminal.data.hasValidConfiguredPorts
 import dev.remote.terminal.data.SessionStore
 import dev.remote.terminal.data.SyncClient
 import dev.remote.terminal.data.LocalStore
@@ -272,7 +273,7 @@ private class TerminalSessionState(
     var codexQuota by mutableStateOf<List<Pair<Int, Int>>?>(null)
     var hostFingerprint by mutableStateOf<String?>(null)
     var hostKeyAddress by mutableStateOf("")
-    var hostKeyPort by mutableStateOf(22)
+    var hostKeyPort by mutableStateOf(0)
     var resolveHostKey: ((Boolean) -> Unit)? = null
     var autoEnterDeadline by mutableStateOf<Long?>(null)
         private set
@@ -386,6 +387,8 @@ private fun RemoteTerminalApp(store: LocalStore) {
         AutoConfirmEngine.globalDelaySeconds = autoEnterDelaySeconds
         var syncUrl by remember { mutableStateOf(store.loadSyncUrl()) }
         var syncToken by remember { mutableStateOf(store.loadSyncToken()) }
+        var autoSyncEnabled by remember { mutableStateOf(store.loadAutoSyncEnabled()) }
+        var syncIntervalSeconds by remember { mutableIntStateOf(store.loadSyncIntervalSeconds()) }
         var editingHost by remember { mutableStateOf<HostProfile?>(null) }
         var addingHost by remember { mutableStateOf(false) }
         var editingDirectory by remember { mutableStateOf<Pair<String, ProjectDirectory?>?>(null) }
@@ -426,6 +429,16 @@ private fun RemoteTerminalApp(store: LocalStore) {
         }
 
         fun saveHosts(updated: List<HostProfile>) {
+            val previous = hosts.toList()
+            val updatedIds = updated.mapTo(mutableSetOf()) { it.id }
+            previous.filterNot { it.id in updatedIds }.forEach { HostRouteResolver.invalidate(it.id) }
+            updated.forEach { host ->
+                val oldHost = previous.firstOrNull { it.id == host.id }
+                if (oldHost == null || oldHost.endpoints() != host.endpoints()) {
+                    HostRouteResolver.invalidate(host.id)
+                    scope.launch(Dispatchers.IO) { HostRouteResolver.resolveHostRoute(host, force = true) }
+                }
+            }
             hosts.clear(); hosts.addAll(updated); store.saveHosts(updated)
             if (selectedHostId !in updated.map { it.id }) selectedHostId = updated.firstOrNull()?.id.orEmpty()
         }
@@ -439,12 +452,22 @@ private fun RemoteTerminalApp(store: LocalStore) {
             scope.launch {
                 runCatching {
                     withContext(SyncClient.dispatcher) {
-                        SyncClient.saveHostProfile(host, agentCommand)
-                        SyncClient.updateHostProfile(host, agentCommand)
+                        val response = SyncClient.saveHostProfile(host, agentCommand)
+                        val canonicalId = response.optJSONObject("host")?.optString("id", host.id) ?: host.id
+                        val canonicalHost = if (canonicalId == host.id) host else host.copy(id = canonicalId)
+                        SyncClient.updateHostProfile(canonicalHost, agentCommand)
+                        canonicalHost
                     }
-                }.onSuccess {
+                }.onSuccess { canonicalHost ->
                     dirtyHostProfiles.remove(host.id)
                     store.saveDirtyHostProfiles(dirtyHostProfiles)
+                    if (canonicalHost.id != host.id) {
+                        saveHosts(hosts.map { if (it.id == host.id) canonicalHost else it })
+                        sessions.filter { it.task.host.id == host.id }.forEach { session ->
+                            session.task = session.task.copy(host = canonicalHost)
+                            sessionStore.save(session.task)
+                        }
+                    }
                 }.onFailure { error ->
                     snackbars.showSnackbar("主机配置同步失败，将自动重试：${error.message}")
                 }
@@ -510,35 +533,64 @@ private fun RemoteTerminalApp(store: LocalStore) {
             }
         }
 
-        suspend fun syncHostProfiles() {
+        suspend fun syncHostProfiles(): List<HostProfile> {
+            val localHosts = withContext(Dispatchers.Main) { hosts.toList() }
+            val (localAgents, localSelectedAgentId) = withContext(Dispatchers.Main) { agents.toList() to selectedAgentId }
+            val dirtySnapshot = withContext(Dispatchers.Main) { dirtyHostProfiles.toSet() }
             val allRemote = SyncClient.listHosts()
             val active = allRemote.filterNot { it.optBoolean("deleted") }
             val deleted = allRemote.filter { it.optBoolean("deleted") }
             val matched = mutableSetOf<String>()
             val idRemaps = mutableMapOf<String, String>()
-            val agentCommand = agents.firstOrNull { it.id == selectedAgentId }?.command
-                ?: agents.firstOrNull()?.command.orEmpty()
-            val result = hosts.toList().mapNotNull { local ->
-                if (deleted.any { it.optString("id") == local.id || SyncClient.matchesLegacyHost(local, it) }) return@mapNotNull null
-                val candidates = active.filter { it.optString("id") == local.id || SyncClient.matchesLegacyHost(local, it) }
-                val profile = candidates.firstOrNull() ?: active.filter {
-                    it.optString("name").equals(local.name, true) && it.optString("username").equals(local.username, true)
-                }.singleOrNull()
-                if (local.id in dirtyHostProfiles) {
-                    runCatching {
-                        SyncClient.saveHostProfile(local, agentCommand)
-                        SyncClient.updateHostProfile(local, agentCommand)
-                        dirtyHostProfiles.remove(local.id)
-                        store.saveDirtyHostProfiles(dirtyHostProfiles)
-                    }
-                    if (profile != null) {
+            val successfullyUploadedIds = mutableSetOf<String>()
+            val agentCommand = localAgents.firstOrNull { it.id == localSelectedAgentId }?.command
+                ?: localAgents.firstOrNull()?.command.orEmpty()
+            val result = localHosts.mapNotNull { local ->
+                val deletedProfile = deleted.firstOrNull { it.optString("id") == local.id }
+                if (deletedProfile != null) {
+                    val canonicalId = deletedProfile.optString("canonical_id")
+                    if (canonicalId.isBlank() || active.none { it.optString("id") == canonicalId }) return@mapNotNull null
+                    matched.add(canonicalId)
+                    idRemaps[local.id] = canonicalId
+                    return@mapNotNull local.copy(id = canonicalId)
+                }
+                val aliasMatches = allRemote.filter { SyncClient.matchesLegacyHost(local, it) }
+                val deletedByUniqueAlias = aliasMatches.size == 1 && aliasMatches.single().optBoolean("deleted")
+                if (deletedByUniqueAlias) return@mapNotNull null
+                val profile = active.firstOrNull { it.optString("id") == local.id }
+                    ?: aliasMatches.filterNot { it.optBoolean("deleted") }.singleOrNull()
+                if (local.id in dirtySnapshot) {
+                    var canonicalLocal = if (profile == null) local else local.copy(id = profile.optString("id", local.id))
+                    if (canonicalLocal.hasValidConfiguredPorts()) {
+                        val upload = runCatching {
+                            withContext(SyncClient.dispatcher) {
+                                val response = SyncClient.saveHostProfile(canonicalLocal, agentCommand)
+                                val canonicalId = response.optJSONObject("host")?.optString("id", canonicalLocal.id) ?: canonicalLocal.id
+                                canonicalLocal = canonicalLocal.copy(id = canonicalId)
+                                runCatching { SyncClient.updateHostProfile(canonicalLocal, agentCommand) }
+                            }
+                        }
+                        if (upload.isSuccess) {
+                            matched.add(canonicalLocal.id)
+                            idRemaps[local.id] = canonicalLocal.id
+                            successfullyUploadedIds.add(local.id)
+                            successfullyUploadedIds.add(canonicalLocal.id)
+                        } else if (profile != null) {
+                            matched.add(profile.optString("id"))
+                            idRemaps[local.id] = profile.optString("id", local.id)
+                        }
+                    } else if (profile != null) {
                         matched.add(profile.optString("id"))
                         idRemaps[local.id] = profile.optString("id", local.id)
                     }
-                    local
+                    canonicalLocal
                 } else if (profile == null) {
-                    SyncClient.saveHostProfile(local, agentCommand)
-                    local
+                    if (!local.hasValidConfiguredPorts()) return@mapNotNull local
+                    val response = SyncClient.saveHostProfile(local, agentCommand)
+                    val canonicalId = response.optJSONObject("host")?.optString("id", local.id) ?: local.id
+                    matched.add(canonicalId)
+                    idRemaps[local.id] = canonicalId
+                    if (canonicalId == local.id) local else local.copy(id = canonicalId)
                 } else {
                     matched.add(profile.optString("id"))
                     idRemaps[local.id] = profile.optString("id", local.id)
@@ -556,26 +608,53 @@ private fun RemoteTerminalApp(store: LocalStore) {
             active.filterNot { it.optString("id") in matched }.forEach { profile ->
                 val lan = profile.optString("lan_address")
                 val external = profile.optString("external_address")
-                val port = profile.optInt("port", 22)
-                val lanPort = if (profile.has("lan_port") && !profile.isNull("lan_port")) profile.optInt("lan_port", port) else port
-                val externalPort = if (profile.has("external_port") && !profile.isNull("external_port")) profile.optInt("external_port", port) else port
+                val port = profile.getInt("port")
+                val lanPort = if (profile.has("lan_port") && !profile.isNull("lan_port")) profile.getInt("lan_port") else port
+                val externalPort = if (profile.has("external_port") && !profile.isNull("external_port")) profile.getInt("external_port") else port
                 result.add(HostProfile(profile.optString("id"), profile.optString("name", "主机"), external.ifBlank { lan },
                     port, profile.optString("username"), icon = profile.optString("icon", "⌘"),
                     lanAddress = lan, externalAddress = external, legacyAddress = "",
                     lanPort = lanPort, externalPort = externalPort))
             }
-            if (result != hosts.toList()) {
-                val oldSelected = selectedHostId
-                saveHosts(result)
-                idRemaps[oldSelected]?.let { selectedHostId = it }
+            val uniqueResult = result.distinctBy { it.id }
+            withContext(Dispatchers.Main) {
+                if (uniqueResult != hosts.toList()) {
+                    val oldSelected = selectedHostId
+                    saveHosts(uniqueResult)
+                    idRemaps[oldSelected]?.let { selectedHostId = it }
+                }
+                var dirtyProfilesChanged = false
+                idRemaps.forEach { (oldId, canonicalId) ->
+                    if (oldId != canonicalId) {
+                        HostRouteResolver.invalidate(oldId)
+                        HostRouteResolver.invalidate(canonicalId)
+                        if (dirtyHostProfiles.remove(oldId)) {
+                            dirtyHostProfiles.add(canonicalId)
+                            dirtyProfilesChanged = true
+                        }
+                    }
+                }
+                successfullyUploadedIds.forEach { if (dirtyHostProfiles.remove(it)) dirtyProfilesChanged = true }
+                if (dirtyProfilesChanged) store.saveDirtyHostProfiles(dirtyHostProfiles)
+                val canonicalById = uniqueResult.associateBy { it.id }
+                sessions.toList().forEach { session ->
+                    val oldId = session.task.host.id
+                    val canonicalId = idRemaps[oldId] ?: oldId
+                    val canonicalHost = canonicalById[canonicalId] ?: return@forEach
+                    if (session.task.host != canonicalHost) {
+                        session.task = session.task.copy(host = canonicalHost)
+                        sessionStore.save(session.task)
+                    }
+                }
             }
+            return uniqueResult
         }
 
         fun closeSession(session: TerminalSessionState) {
             val index = sessions.indexOf(session)
             if (index < 0) return
             sessionStore.remove(session.task.id)
-            if (syncUrl.isNotBlank()) scope.launch {
+            if (autoSyncEnabled && syncUrl.isNotBlank() && syncToken.isNotBlank()) scope.launch {
                 runCatching { withContext(SyncClient.dispatcher) { SyncClient.delete(session.task) } }
                     .onSuccess { startupShared = startupShared.filterNot { it.first.id == session.task.host.id && it.second.optString("id") == session.task.id.replace("-", "") } }
                     .onFailure { snackbars.showSnackbar("同步关闭失败：${it.message}") }
@@ -605,7 +684,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 if (same == 0) agent.name else "${agent.name} ${same + 1}")
             if (restoredTask == null) {
                 sessionStore.save(task)
-                if (syncUrl.isNotBlank()) scope.launch {
+                if (autoSyncEnabled && syncUrl.isNotBlank() && syncToken.isNotBlank()) scope.launch {
                     runCatching { withContext(SyncClient.dispatcher) { SyncClient.save(task) } }
                         .onFailure { snackbars.showSnackbar("会话同步失败：${it.message}") }
                 }
@@ -653,7 +732,8 @@ private fun RemoteTerminalApp(store: LocalStore) {
 
         fun openSharedSession(host: HostProfile, item: org.json.JSONObject, activate: Boolean = true) {
             val id = item.getString("id")
-            val existing = sessions.indexOfFirst { it.task.id.replace("-", "") == id && it.task.host.id == host.id }
+            // Session IDs are globally unique; a profile ID remap must not open a duplicate terminal.
+            val existing = sessions.indexOfFirst { it.task.id.replace("-", "") == id }
             if (existing >= 0) { if (activate) { activePage = existing; route = AppRoute.TERMINAL }; return }
             val currentHost = hosts.firstOrNull { it.id == host.id } ?: return
             val path = item.getString("directory_path")
@@ -671,6 +751,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
         }
 
         fun refreshShared(host: HostProfile) {
+            if (!autoSyncEnabled) return
             scope.launch {
                 runCatching { withContext(SyncClient.dispatcher) { SyncClient.list(host) } }
                     .onSuccess { items ->
@@ -682,22 +763,32 @@ private fun RemoteTerminalApp(store: LocalStore) {
 
         LaunchedEffect(Unit) {
             sessionStore.load(hosts, agents).forEach { task ->
-                if (syncUrl.isBlank()) openTask(task.host, task.directory, task.agent, task)
+                if (!autoSyncEnabled || syncUrl.isBlank() || syncToken.isBlank()) openTask(task.host, task.directory, task.agent, task)
             }
             activePage = activePage.coerceIn(0, (sessions.size - 1).coerceAtLeast(0))
             sessionsRestored = true
         }
 
-        val syncHosts = if (syncUrl.isNotBlank() && syncToken.isNotBlank()) hosts else emptyList()
-        LaunchedEffect(syncHosts, syncUrl, syncToken) {
-            startupShared = startupShared.filter { entry -> syncHosts.any { it.id == entry.first.id } }
-            syncLoading = syncHosts.isNotEmpty()
+        LaunchedEffect(syncUrl, syncToken, autoSyncEnabled, syncIntervalSeconds) {
+            val syncEnabled = autoSyncEnabled && syncUrl.isNotBlank() && syncToken.isNotBlank()
+            syncLoading = syncEnabled && hosts.isNotEmpty()
+            if (!syncEnabled) startupShared = emptyList()
             while (true) {
-                runCatching { withContext(SyncClient.dispatcher) { syncHostProfiles() } }
-                    .onFailure { error -> if (error.message.orEmpty().contains("401") || error.message.orEmpty().contains("403")) {
+                if (!syncEnabled) {
+                    syncLoading = false
+                    kotlinx.coroutines.delay(syncIntervalSeconds * 1_000L)
+                    continue
+                }
+                val resolvedHosts = if (syncEnabled) runCatching {
+                    withContext(SyncClient.dispatcher) { syncHostProfiles() }
+                }.getOrElse { error ->
+                    if (error.message.orEmpty().contains("401") || error.message.orEmpty().contains("403")) {
                         syncToken = ""; store.saveSyncSettings(syncUrl, ""); route = AppRoute.LOGIN
-                    } }
-                syncHosts.forEach { host ->
+                    }
+                    emptyList()
+                } else emptyList()
+                startupShared = startupShared.filter { entry -> resolvedHosts.any { it.id == entry.first.id } }
+                resolvedHosts.forEach { host ->
                     val workspaceVersion = workspaceVersions[host.id] ?: 0
                     if (host.id in dirtyWorkspaces) {
                         val current = hosts.firstOrNull { it.id == host.id }
@@ -809,7 +900,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
                         }
                 }
                 syncLoading = false
-                kotlinx.coroutines.delay(5_000)
+                kotlinx.coroutines.delay(syncIntervalSeconds * 1_000L)
             }
         }
 
@@ -856,6 +947,10 @@ private fun RemoteTerminalApp(store: LocalStore) {
                     store = store,
                     syncUrl = syncUrl,
                     syncToken = syncToken,
+                    autoSyncEnabled = autoSyncEnabled,
+                    syncIntervalSeconds = syncIntervalSeconds,
+                    onAutoSyncEnabledChange = { enabled -> autoSyncEnabled = enabled; store.saveAutoSyncEnabled(enabled) },
+                    onSyncIntervalSecondsChange = { seconds -> syncIntervalSeconds = seconds; store.saveSyncIntervalSeconds(seconds) },
                     syncUsername = store.loadSyncUsername(),
                     onSyncSettingsChange = { url, token ->
                         if (syncUrl != url) syncToken = ""
@@ -935,7 +1030,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 selectedHostId = host.id
                 syncHostProfile(host)
                 scope.launch(Dispatchers.IO) { HostRouteResolver.resolveHostRoute(host, force = true) }
-                if (syncUrl.isNotBlank() && syncToken.isNotBlank()) refreshShared(host)
+                if (autoSyncEnabled && syncUrl.isNotBlank() && syncToken.isNotBlank()) refreshShared(host)
                 addingHost = false; editingHost = null
             },
         )
@@ -1068,7 +1163,8 @@ private fun HomeScreen(
             if (selectedHost == null) sessions
             else sessions.filter { it.task.host.id == selectedHost.id }
         }
-        var filterByCurrentHost by remember { mutableStateOf(true) }
+        // Match desktop: list sessions from every synchronized host by default.
+        var filterByCurrentHost by remember { mutableStateOf(false) }
         val displayedSessions = if (filterByCurrentHost && selectedHost != null) hostSessions else sessions
 
         if (sessions.isNotEmpty()) {
@@ -2034,6 +2130,10 @@ private fun SettingsScreen(
     store: LocalStore,
     syncUrl: String,
     syncToken: String,
+    autoSyncEnabled: Boolean,
+    syncIntervalSeconds: Int,
+    onAutoSyncEnabledChange: (Boolean) -> Unit,
+    onSyncIntervalSecondsChange: (Int) -> Unit,
     syncUsername: String,
     onSyncSettingsChange: (String, String) -> Unit,
     onLogin: () -> Unit,
@@ -2049,6 +2149,7 @@ private fun SettingsScreen(
     var generating by remember { mutableStateOf(false) }
     var keyMessage by remember { mutableStateOf("") }
     var draftSyncUrl by rememberSaveable(syncUrl) { mutableStateOf(syncUrl) }
+    var draftSyncInterval by remember(syncIntervalSeconds) { mutableStateOf(syncIntervalSeconds.toFloat()) }
     var draftDelay by remember(delaySeconds) { mutableStateOf(delaySeconds.toFloat()) }
     fun finish() {
         onSyncSettingsChange(draftSyncUrl.trim(), syncToken)
@@ -2091,6 +2192,21 @@ private fun SettingsScreen(
             OutlinedTextField(draftSyncUrl, { draftSyncUrl = it }, label = { Text("同步服务地址") }, placeholder = { Text("https://地址:端口") }, singleLine = true, modifier = Modifier.fillMaxWidth())
             Text(if (syncUsername.isBlank()) "未登录" else "当前账号：$syncUsername", color = Muted, fontSize = 12.sp)
             FilledTonalButton(onClick = onLogin, modifier = Modifier.fillMaxWidth()) { Text("登录同步账号") }
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Column(Modifier.weight(1f)) {
+                    Text("跨设备自动同步", color = White, fontSize = 13.sp)
+                    Text("默认关闭，仅控制本机；主机配置手动保存仍会上传。", color = Muted, fontSize = 11.sp)
+                }
+                Switch(checked = autoSyncEnabled, onCheckedChange = onAutoSyncEnabledChange)
+            }
+            Text("自动同步周期：${((draftSyncInterval / 5f).roundToInt() * 5).coerceIn(5, 300)} 秒", color = White, fontSize = 13.sp)
+            Slider(
+                value = draftSyncInterval,
+                onValueChange = { draftSyncInterval = it },
+                onValueChangeFinished = { onSyncIntervalSecondsChange(((draftSyncInterval / 5f).roundToInt() * 5).coerceIn(5, 300)) },
+                valueRange = 5f..300f,
+                steps = 58,
+            )
             Text("自动回车", color = White, fontWeight = FontWeight.SemiBold)
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Column(Modifier.weight(1f)) {
@@ -2140,21 +2256,24 @@ private fun HostEditorDialog(initial: HostProfile?, onDismiss: () -> Unit, onSav
     val initialExt = initial?.externalAddress.orEmpty()
     val initialAddr = initial?.address.orEmpty()
     val defaultLan = if (initialLan.isBlank() && initialExt.isBlank()) initialAddr else initialLan
-    val defaultPort = initial?.port?.toString() ?: "22"
+    val defaultPort = initial?.port?.takeIf { it in 1..65535 }?.toString().orEmpty()
     var name by remember(initial) { mutableStateOf(initial?.name.orEmpty()) }
     var lanAddress by remember(initial) { mutableStateOf(defaultLan) }
-    var lanPort by remember(initial) { mutableStateOf(if (initialLan.isBlank() && initialExt.isBlank()) defaultPort else (initial?.lanPort?.toString() ?: "22")) }
+    var lanPort by remember(initial) { mutableStateOf(if (initialLan.isBlank() && initialExt.isBlank()) defaultPort else initial?.lanPort?.takeIf { it in 1..65535 }?.toString().orEmpty().ifBlank { defaultPort }) }
     var externalAddress by remember(initial) { mutableStateOf(initialExt) }
-    var externalPort by remember(initial) { mutableStateOf(initial?.externalPort?.toString() ?: "22") }
+    var externalPort by remember(initial) { mutableStateOf(initial?.externalPort?.takeIf { it in 1..65535 }?.toString().orEmpty().ifBlank { defaultPort }) }
     var username by remember(initial) { mutableStateOf(initial?.username.orEmpty()) }
     var password by remember(initial) { mutableStateOf(initial?.password.orEmpty()) }
     var icon by remember(initial) { mutableStateOf(initial?.icon ?: "⌘") }
     val primary = lanAddress.trim().ifBlank { externalAddress.trim() }
-    EditorDialogFrame(if (initial == null) "添加主机" else "编辑主机", onDismiss, canSave = name.isNotBlank() && primary.isNotBlank() && username.isNotBlank(), onConfirm = {
+    val parsedLanPort = lanPort.toIntOrNull()?.takeIf { it in 1..65535 }
+    val parsedExternalPort = externalPort.toIntOrNull()?.takeIf { it in 1..65535 }
+    val portsValid = (lanAddress.isBlank() || parsedLanPort != null) && (externalAddress.isBlank() || parsedExternalPort != null)
+    EditorDialogFrame(if (initial == null) "添加主机" else "编辑主机", onDismiss, canSave = name.isNotBlank() && primary.isNotBlank() && username.isNotBlank() && portsValid, onConfirm = {
         val lan = lanAddress.trim()
         val external = externalAddress.trim()
-        val lPort = lanPort.toIntOrNull()?.takeIf { it in 1..65535 } ?: 22
-        val ePort = externalPort.toIntOrNull()?.takeIf { it in 1..65535 } ?: 22
+        val lPort = parsedLanPort ?: parsedExternalPort ?: 0
+        val ePort = parsedExternalPort ?: parsedLanPort ?: 0
         val legacyPort = if (lan.isNotBlank()) lPort else ePort
         onSave(HostProfile(initial?.id ?: UUID.randomUUID().toString(), name.trim(), lan.ifBlank { external }, legacyPort, username.trim(), password, icon.ifBlank { "⌘" }, initial?.directories.orEmpty(), initial?.syncFingerprint.orEmpty(), initial?.syncId.orEmpty(), lan, external, initial?.legacyAddress ?: initial?.address.orEmpty(), lanPort = lPort, externalPort = ePort))
     }) {
@@ -2162,11 +2281,11 @@ private fun HostEditorDialog(initial: HostProfile?, onDismiss: () -> Unit, onSav
         IconPicker(icon, { icon = it }, listOf("⌘", "🖥️", "☁️", "🐧", "⚡", "🧪", "🏠", "💻", "🔧", "🌐"))
         Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
             OutlinedTextField(lanAddress, { lanAddress = it }, label = { Text("内网地址（优先）") }, placeholder = { Text("例如：192.168.1.20") }, singleLine = true, modifier = Modifier.weight(1f))
-            OutlinedTextField(lanPort, { lanPort = it.filter(Char::isDigit).take(5) }, label = { Text("内网端口") }, placeholder = { Text("22") }, singleLine = true, modifier = Modifier.width(96.dp))
+            OutlinedTextField(lanPort, { lanPort = it.filter(Char::isDigit).take(5) }, label = { Text("内网端口") }, placeholder = { Text("必填") }, singleLine = true, modifier = Modifier.width(96.dp))
         }
         Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
             OutlinedTextField(externalAddress, { externalAddress = it }, label = { Text("外网地址（备用）") }, placeholder = { Text("域名或公网 IP") }, singleLine = true, modifier = Modifier.weight(1f))
-            OutlinedTextField(externalPort, { externalPort = it.filter(Char::isDigit).take(5) }, label = { Text("外网端口") }, placeholder = { Text("22") }, singleLine = true, modifier = Modifier.width(96.dp))
+            OutlinedTextField(externalPort, { externalPort = it.filter(Char::isDigit).take(5) }, label = { Text("外网端口") }, placeholder = { Text("必填") }, singleLine = true, modifier = Modifier.width(96.dp))
         }
         OutlinedTextField(username, { username = it }, label = { Text("用户名") }, singleLine = true, modifier = Modifier.fillMaxWidth())
         Text("优先连接内网地址；无法连接时自动切换外网地址。主机配置会按同步账号分发。", color = Muted, fontSize = 11.sp)

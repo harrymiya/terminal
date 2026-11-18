@@ -55,14 +55,35 @@ class DesktopUIEnhancementsTest(unittest.TestCase):
     def test_host_list_ui_matches_workspace_management(self):
         for platform in ("omarchy", "ubuntu", "windows"):
             py_file = (Path(__file__).resolve().parents[1] / platform / "remote-dev-terminal.py").read_text(encoding="utf-8")
-            self.assertIn('actions = [("添加主机", "add")]', py_file)
+            self.assertIn('actions = [("＋主机", "add")]', py_file)
             self.assertIn('def manage_host(self, button, index, action):', py_file)
             self.assertIn('for label, action in [("✎", "edit"), ("×", "delete")]:', py_file)
 
     def test_left_alignments(self):
         for platform in ("omarchy", "ubuntu", "windows"):
             py_file = (Path(__file__).resolve().parents[1] / platform / "remote-dev-terminal.py").read_text(encoding="utf-8")
-            self.assertIn('button.get_child().set_xalign(0.0)', py_file)
+            self.assertIn('label.set_xalign(0.0)', py_file)
+
+    def test_omarchy_agent_edit_mode_shows_and_hides_row_actions(self):
+        app = self.app_mod.App()
+        try:
+            app.data["hosts"] = [{"id": "host", "name": "Host", "address": "127.0.0.1", "port": 2200, "username": "dev"}]
+            app.data["agents"] = [{"id": "codex", "name": "Codex", "command": "codex"}]
+            app.refresh()
+            app.show_all()
+            app.edit_toggle.set_active(True)
+            while self.app_mod.Gtk.events_pending():
+                self.app_mod.Gtk.main_iteration()
+            row = app.agents_list.get_children()[0]
+            children = row.get_children()
+            self.assertEqual(len(children), 2)
+            self.assertEqual([button.get_label() for button in children[1].get_children()], ["✎", "×"])
+            app.edit_toggle.set_active(False)
+            self.assertEqual(len(app.agents_list.get_children()[0].get_children()), 1)
+        finally:
+            app.sync_executor.shutdown(wait=True)
+            app.disconnect_by_func(self.app_mod.Gtk.main_quit)
+            app.destroy()
 
     def test_uniform_control_heights(self):
         for platform in ("omarchy", "ubuntu", "windows"):

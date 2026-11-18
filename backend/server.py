@@ -19,6 +19,86 @@ WORKSPACE_FIELDS = ("id", "name", "path", "icon")
 AGENT_FIELDS = ("id", "name", "command", "icon")
 
 
+def host_endpoint_keys(host):
+    pairs = set()
+    for address_key, port_key in (("lan_address", "lan_port"), ("external_address", "external_port")):
+        address = str(host.get(address_key, "")).strip().casefold()
+        if address:
+            raw_port = host.get(port_key, host.get("port"))
+            if raw_port is None:
+                continue
+            try:
+                port = int(raw_port)
+            except (TypeError, ValueError):
+                continue
+            if 1 <= port <= 65535:
+                pairs.add((address, port))
+    if not pairs and host.get("address") and host.get("port") is not None:
+        try:
+            port = int(host["port"])
+        except (TypeError, ValueError):
+            port = 0
+        if 1 <= port <= 65535:
+            pairs.add((str(host["address"]).strip().casefold(), port))
+    return pairs
+
+
+def merge_duplicate_host_profiles(db, user_id):
+    rows = db.execute("SELECT host_id, payload FROM account_hosts WHERE user_id=? AND deleted=0 ORDER BY rowid", (user_id,)).fetchall()
+    groups = {}
+    for host_id, payload in rows:
+        try:
+            host = json.loads(payload)
+            endpoints = tuple(sorted(host_endpoint_keys(host)))
+            username = str(host.get("username", "")).casefold()
+        except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if endpoints and username:
+            groups.setdefault((username, endpoints), []).append((host_id, host))
+    for profiles in groups.values():
+        if len(profiles) < 2:
+            continue
+        canonical_id, _ = profiles[0]
+        canonical = dict(profiles[-1][1])
+        canonical["id"] = canonical_id
+        legacy_keys = []
+        for _, profile in profiles:
+            for key in profile.get("legacy_keys", []):
+                if isinstance(key, str) and key not in legacy_keys:
+                    legacy_keys.append(key)
+        canonical["legacy_keys"] = legacy_keys[:16]
+        db.execute("UPDATE account_hosts SET payload=? WHERE user_id=? AND host_id=?", (json.dumps(canonical, ensure_ascii=False), user_id, canonical_id))
+        for duplicate_id, duplicate in profiles[1:]:
+            old_workspace = db.execute("SELECT payload FROM account_workspaces WHERE user_id=? AND host_id=?", (user_id, duplicate_id)).fetchone()
+            current_workspace = db.execute("SELECT payload FROM account_workspaces WHERE user_id=? AND host_id=?", (user_id, canonical_id)).fetchone()
+            if old_workspace:
+                items = {}
+                for item in (json.loads(current_workspace[0]) if current_workspace else []) + json.loads(old_workspace[0]):
+                    items[item.get("id") or item.get("path")] = item
+                merged = json.dumps(list(items.values()), ensure_ascii=False)
+                db.execute("INSERT INTO account_workspaces VALUES (?, ?, ?) ON CONFLICT(user_id, host_id) DO UPDATE SET payload=excluded.payload", (user_id, canonical_id, merged))
+                for revision, history_payload in db.execute("SELECT revision, payload FROM workspace_history WHERE user_id=? AND host_id=?", (user_id, duplicate_id)).fetchall():
+                    db.execute("INSERT OR IGNORE INTO workspace_history VALUES (?, ?, ?, ?)", (user_id, canonical_id, revision, history_payload))
+                next_revision = db.execute("SELECT COALESCE(MAX(revision), 0) + 1 FROM workspace_history WHERE user_id=? AND host_id=?", (user_id, canonical_id)).fetchone()[0]
+                db.execute("INSERT OR IGNORE INTO workspace_history VALUES (?, ?, ?, ?)", (user_id, canonical_id, next_revision, merged))
+            old_state = db.execute("SELECT revision, payload FROM account_host_state WHERE user_id=? AND host_id=?", (user_id, duplicate_id)).fetchone()
+            if old_state:
+                current_state = db.execute("SELECT revision FROM account_host_state WHERE user_id=? AND host_id=?", (user_id, canonical_id)).fetchone()
+                if current_state is None:
+                    db.execute("INSERT INTO account_host_state VALUES (?, ?, ?, ?)", (user_id, canonical_id, old_state[0], old_state[1]))
+                elif old_state[0] > current_state[0]:
+                    db.execute("UPDATE account_host_state SET revision=?, payload=? WHERE user_id=? AND host_id=?", (old_state[0], old_state[1], user_id, canonical_id))
+            db.execute("INSERT OR IGNORE INTO account_sessions(user_id, host_id, username, id, payload) SELECT user_id, ?, username, id, payload FROM account_sessions WHERE user_id=? AND host_id=?", (canonical_id, user_id, duplicate_id))
+            old_agents = db.execute("SELECT payload FROM account_agents WHERE user_id=? AND host_id=?", (user_id, duplicate_id)).fetchone()
+            current_agents = db.execute("SELECT payload FROM account_agents WHERE user_id=? AND host_id=?", (user_id, canonical_id)).fetchone()
+            if old_agents and not current_agents:
+                db.execute("INSERT INTO account_agents VALUES (?, ?, ?)", (user_id, canonical_id, old_agents[0]))
+            for revision, agent_payload in db.execute("SELECT revision, payload FROM agent_history WHERE user_id=? AND host_id=?", (user_id, duplicate_id)).fetchall():
+                db.execute("INSERT OR IGNORE INTO agent_history VALUES (?, ?, ?, ?)", (user_id, canonical_id, revision, agent_payload))
+            duplicate["canonical_id"] = canonical_id
+            db.execute("UPDATE account_hosts SET payload=?, deleted=1 WHERE user_id=? AND host_id=?", (json.dumps(duplicate, ensure_ascii=False), user_id, duplicate_id))
+
+
 def workspace_revision(payload):
     return hashlib.sha256((payload if payload is not None else "").encode("utf-8")).hexdigest()
 
@@ -186,6 +266,8 @@ def create_server(address, database, token=None):
             if urlsplit(self.path).path == "/v1/hosts":
                 if not self.authorized(): return
                 with sqlite3.connect(database) as db:
+                    db.execute("BEGIN IMMEDIATE")
+                    merge_duplicate_host_profiles(db, self.user_id)
                     rows = db.execute("SELECT payload, deleted FROM account_hosts WHERE user_id = ? ORDER BY rowid", (self.user_id,)).fetchall()
                 return self.reply(200, {"hosts": [{**json.loads(payload), "deleted": bool(deleted)} for payload, deleted in rows]})
             if urlsplit(self.path).path == "/v1/admin/users":
@@ -321,7 +403,7 @@ def create_server(address, database, token=None):
                     fields = ("id", "name", "lan_address", "external_address", "username", "icon", "selected_agent_command")
                     if not isinstance(host, dict) or host.get("id") != host_id: raise ValueError()
                     if any(not isinstance(host.get(key, ""), str) or len(host.get(key, "")) > 4096 for key in fields): raise ValueError()
-                    port = host.get("port", 22)
+                    port = host.get("port")
                     lan_port = host.get("lan_port", port)
                     external_port = host.get("external_port", port)
                     aliases = host.get("legacy_keys", [])
@@ -334,8 +416,44 @@ def create_server(address, database, token=None):
                     return self.reply(400, {"error": "invalid host profile"})
                 with sqlite3.connect(database) as db:
                     db.execute("BEGIN IMMEDIATE")
+                    requested_host_id = host_id
+                    duplicate_host_ids = []
+                    existing = db.execute("SELECT deleted, payload FROM account_hosts WHERE user_id=? AND host_id=?", (self.user_id, host_id)).fetchone()
+                    if existing and existing[0]:
+                        try:
+                            canonical_id = json.loads(existing[1]).get("canonical_id")
+                        except (AttributeError, TypeError, json.JSONDecodeError):
+                            canonical_id = None
+                        canonical_exists = db.execute("SELECT 1 FROM account_hosts WHERE user_id=? AND host_id=? AND deleted=0", (self.user_id, canonical_id)).fetchone() if canonical_id else None
+                        if canonical_exists:
+                            host_id = canonical_id
+                            duplicate_host_ids = [requested_host_id]
+                            host["id"] = host_id
+                            payload = json.dumps(host, ensure_ascii=False)
+                    if existing is None:
+                        incoming_aliases = set(host["legacy_keys"])
+                        incoming_endpoints = host_endpoint_keys(host)
+                        candidates = []
+                        for candidate_id, candidate_payload in db.execute("SELECT host_id, payload FROM account_hosts WHERE user_id=? AND deleted=0 ORDER BY rowid", (self.user_id,)):
+                            candidate = json.loads(candidate_payload)
+                            if candidate.get("username", "").casefold() != host.get("username", "").casefold():
+                                continue
+                            candidates.append((candidate_id, candidate, host_endpoint_keys(candidate)))
+                        exact_routes = [item for item in candidates if incoming_endpoints and incoming_endpoints == item[2]]
+                        alias_matches = [item for item in candidates if incoming_aliases.intersection(item[1].get("legacy_keys", []))]
+                        alias_signatures = {tuple(sorted(item[2])) for item in alias_matches}
+                        match = exact_routes[0] if exact_routes else alias_matches[0] if len(alias_matches) == 1 or (alias_matches and len(alias_signatures) == 1) else None
+                        if match:
+                            host_id = match[0]
+                            equivalent = exact_routes if exact_routes else [item for item in alias_matches if item[2] == match[2]]
+                            duplicate_host_ids = [item[0] for item in equivalent if item[0] != host_id]
+                            host["legacy_keys"] = list(dict.fromkeys(host["legacy_keys"] + [key for item in equivalent for key in item[1].get("legacy_keys", [])]))[:16]
+                            host["id"] = host_id
+                            payload = json.dumps(host, ensure_ascii=False)
                     db.execute("INSERT INTO account_hosts(user_id, host_id, payload, deleted) VALUES (?, ?, ?, 0) ON CONFLICT(user_id, host_id) DO UPDATE SET payload=excluded.payload, deleted=0", (self.user_id, host_id, payload))
                     legacy_ids = set(host["legacy_keys"])
+                    if requested_host_id != host_id: legacy_ids.add(requested_host_id)
+                    legacy_ids.update(duplicate_host_ids)
                     matched_names = []
                     for old_id, state_payload in db.execute("SELECT host_id, payload FROM account_host_state WHERE user_id=?", (self.user_id,)):
                         try: old_name = json.loads(state_payload).get("name", "")
@@ -361,6 +479,12 @@ def create_server(address, database, token=None):
                         old_state = db.execute("SELECT revision, payload FROM account_host_state WHERE user_id=? AND host_id=?", (self.user_id, old_id)).fetchone()
                         if old_state: db.execute("INSERT OR IGNORE INTO account_host_state VALUES (?, ?, ?, ?)", (self.user_id, host_id, old_state[0], old_state[1]))
                         db.execute("INSERT OR IGNORE INTO account_sessions(user_id, host_id, username, id, payload) SELECT user_id, ?, username, id, payload FROM account_sessions WHERE user_id=? AND host_id=?", (host_id, self.user_id, old_id))
+                    for duplicate_id in duplicate_host_ids:
+                        row = db.execute("SELECT payload FROM account_hosts WHERE user_id=? AND host_id=?", (self.user_id, duplicate_id)).fetchone()
+                        if row:
+                            duplicate_profile = json.loads(row[0])
+                            duplicate_profile["canonical_id"] = host_id
+                            db.execute("UPDATE account_hosts SET payload=?, deleted=1 WHERE user_id=? AND host_id=?", (json.dumps(duplicate_profile, ensure_ascii=False), self.user_id, duplicate_id))
                 return self.reply(200, {"host": host, "configured": True})
             if path.startswith("/v1/admin/users/"):
                 if not self.admin_authorized(): return

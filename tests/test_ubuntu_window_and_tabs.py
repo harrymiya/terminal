@@ -36,7 +36,7 @@ class UbuntuWindowAndTabsTest(unittest.TestCase):
                 for child in widget.get_children():
                     yield from labels(child)
         by_text = {label.get_text(): label for label in labels(self.app)}
-        for text in ('REMOTE DEV', '添加主机', '刷新同步'):
+        for text in ('REMOTE DEV', '＋主机', '自动同步：已关闭（本机设置）'):
             color = by_text[text].get_style_context().get_color(Gtk.StateFlags.BACKDROP)
             self.assertGreater(min(color.red, color.green, color.blue), 0.45, text)
 
@@ -103,8 +103,10 @@ class UbuntuWindowAndTabsTest(unittest.TestCase):
         self.assertEqual(self.app.edit_toggle.get_label(), '完成')
         self.assertTrue(all(box.get_visible() for box in self.app.edit_actions))
         self.assertTrue(all(child.get_visible() for box in self.app.edit_actions for child in box.get_children()))
-        self.assertEqual(len(self.app.hosts_list.get_children()[0].get_children()), 3)
-        self.assertEqual(len(self.app.directories_list.get_children()[0].get_children()), 5)
+        host_actions = self.app.hosts_list.get_children()[0].get_children()[1].get_children()
+        self.assertEqual([button.get_label() for button in host_actions], ['✎', '×'])
+        directory_actions = self.app.directories_list.get_children()[0].get_children()[1].get_children()
+        self.assertEqual([button.get_label() for button in directory_actions], ['↑', '↓', '✎', '×'])
         self.app.edit_toggle.set_active(False)
         self.assertEqual(self.app.edit_toggle.get_label(), '编辑')
         self.assertTrue(all(not box.get_visible() for box in self.app.edit_actions))
@@ -119,9 +121,10 @@ class UbuntuWindowAndTabsTest(unittest.TestCase):
             self.app.refresh()
             self.app.edit_toggle.set_active(True)
             rows = self.app.directories_list.get_children()
-            self.assertFalse(rows[0].get_children()[1].get_sensitive())
-            self.assertFalse(rows[-1].get_children()[2].get_sensitive())
-            rows[1].get_children()[1].clicked()
+            actions = [row.get_children()[1].get_children() for row in rows]
+            self.assertFalse(actions[0][0].get_sensitive())
+            self.assertFalse(actions[-1][1].get_sensitive())
+            actions[1][0].clicked()
             self.assertEqual([d['name'] for d in host['directories']], ['B', 'A', 'C'])
             self.assertEqual(self.app.directories.get_active(), 0)
             persist.assert_called_once()
@@ -133,7 +136,7 @@ class UbuntuWindowAndTabsTest(unittest.TestCase):
         from unittest.mock import Mock
         host = {'name': 'host', 'address': 'host', 'port': 22, 'username': 'user',
                 'directories': [{'name': 'A', 'path': '/a'}, {'name': 'B', 'path': '/b'}]}
-        self.app.data.update(hosts=[host], sync_url='http://example', sync_token='token')
+        self.app.data.update(hosts=[host], sync_url='http://example', sync_token='token', auto_sync_enabled=True)
         self.app.sync_executor.shutdown(wait=True)
         jobs, callbacks = [], []
         self.app.sync_executor = Mock()

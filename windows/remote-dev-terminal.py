@@ -74,12 +74,16 @@ class App(Gtk.Window):
         self.workspace_dirty = set()
         self.dirty_host_profiles = set()
         self.host_profile_sync_pending = False
+        self.refresh_sessions_after_host_profiles = False
         self.sync_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="session-sync")
         try:
             self.data = load_config()
         except (OSError, ValueError) as exc:
             self.message("无法读取配置", str(exc))
             raise SystemExit(1)
+        self.data.setdefault("auto_sync_enabled", False)
+        self.data.setdefault("sync_interval_seconds", 5)
+        self.dirty_host_profiles = set(self.data.get("dirty_host_profiles", []))
         self.tiled = self.data.get("tiled", True)
         self.scale = self.data.get("ui_scale", 100)
         if not isinstance(self.scale, int) or isinstance(self.scale, bool) or not 50 <= self.scale <= 200:
@@ -217,6 +221,13 @@ class App(Gtk.Window):
                 box-shadow: none;
             }
             notebook tab:checked label { font-weight: bold; color: #86dbb8; }
+            notebook tab:focus,
+            notebook tab button:focus {
+                outline-style: none;
+                outline-width: 0;
+                outline-color: transparent;
+                box-shadow: none;
+            }
             notebook tab button {
                 background-image: none;
                 background-color: transparent;
@@ -518,7 +529,8 @@ class App(Gtk.Window):
         self.views.set_visible_child_name("empty")
         self.refresh()
         self.refresh_all_shared()
-        GLib.timeout_add_seconds(60, self.poll_shared)
+        self.sync_poll_source = None
+        self.configure_sync_polling()
         GLib.timeout_add(50, self._animate_running_headers)
         self.scale_layout(self)
         self.connect("destroy", Gtk.main_quit)
@@ -1083,17 +1095,27 @@ class App(Gtk.Window):
         url = Gtk.Entry(text=self.data.get("sync_url", ""))
         grid.attach(Gtk.Label(label="同步服务地址", xalign=0), 0, 0, 1, 1); grid.attach(url, 1, 0, 1, 1)
         grid.attach(Gtk.Label(label="同步账号", xalign=0), 0, 1, 1, 1); grid.attach(Gtk.Label(label=self.data.get("sync_username", "未登录"), xalign=0), 1, 1, 1, 1)
-        grid.attach(self.auto_enter, 0, 2, 2, 1)
+        auto_sync = Gtk.CheckButton(label="启用跨设备自动同步（本机设置）")
+        auto_sync.set_active(bool(self.data.get("auto_sync_enabled", False)))
+        grid.attach(auto_sync, 0, 2, 2, 1)
+        sync_interval = Gtk.SpinButton.new_with_range(5, 300, 5)
+        sync_interval.set_value(min(max(int(self.data.get("sync_interval_seconds", 5)), 5), 300))
+        sync_interval_row = Gtk.Box(spacing=6); sync_interval_row.pack_start(Gtk.Label(label="自动同步周期"), False, False, 0)
+        sync_interval_row.pack_start(sync_interval, False, False, 0); sync_interval_row.pack_start(Gtk.Label(label="秒（5–300）"), False, False, 0)
+        grid.attach(sync_interval_row, 0, 3, 2, 1)
+        grid.attach(self.auto_enter, 0, 4, 2, 1)
         delay_row = Gtk.Box(spacing=6); delay_row.pack_start(Gtk.Label(label="自动回车延迟"), False, False, 0)
         delay_row.pack_start(self.delay, False, False, 0); delay_row.pack_start(Gtk.Label(label="秒"), False, False, 0)
-        grid.attach(delay_row, 0, 3, 2, 1)
+        grid.attach(delay_row, 0, 5, 2, 1)
         if self.data.get("sync_is_admin"):
-            grid.attach(self.manage_sync_users(dialog), 0, 4, 2, 1)
+            grid.attach(self.manage_sync_users(dialog), 0, 6, 2, 1)
         self.scale_layout(dialog); dialog.show_all()
         if dialog.run() == Gtk.ResponseType.OK:
             if self.data.get("sync_url") != url.get_text().strip(): self.data["sync_token"] = ""
             self.data["sync_url"] = url.get_text().strip()
-            self.save_settings(); self.refresh_all_shared()
+            self.data["auto_sync_enabled"] = auto_sync.get_active()
+            self.data["sync_interval_seconds"] = sync_interval.get_value_as_int()
+            self.save_settings(); self.configure_sync_polling(); self.refresh_all_shared()
         delay_row.remove(self.delay); grid.remove(self.auto_enter); dialog.destroy()
 
     def message(self, title, detail):
@@ -1140,7 +1162,7 @@ class App(Gtk.Window):
             row = Gtk.Box(spacing=4)
             row.set_hexpand(True)
             active_address = ssh_address(item)
-            active_port = item.get("_active_port", item.get("port", 22))
+            active_port = item.get("_active_port", item.get("port", 0))
             has_lan = bool(item.get("lan_address"))
             has_ext = bool(item.get("external_address"))
             is_single = not has_lan or not has_ext or item.get("lan_address") == item.get("external_address")
@@ -1403,12 +1425,13 @@ class App(Gtk.Window):
                 if kind == "hosts":
                     self.refresh_all_shared()
             return
-        old = dict(items[index]) if action == "edit" else {"port": 22}
+        old = dict(items[index]) if action == "edit" else {}
         if kind == "hosts":
             if not old.get("lan_address") and not old.get("external_address") and old.get("address"):
                 old["lan_address"] = old.get("address", "")
-            old.setdefault("lan_port", old.get("port", 22)); old.setdefault("external_port", old.get("port", 22))
-        fields = {"hosts": [("name", "名称"), ("lan_address", "内网地址"), ("lan_port", "内网端口"), ("external_address", "外网地址"), ("external_port", "外网端口"), ("username", "用户名")], "directories": [("name", "名称"), ("path", "远端绝对路径")], "agents": [("name", "名称"), ("command", "启动命令")]}[kind]
+            old["lan_port"] = old.get("lan_port") or old.get("port", "")
+            old["external_port"] = old.get("external_port") or old.get("port", "")
+        fields = {"hosts": [("name", "名称"), ("lan_address", "内网地址"), ("lan_port", "内网端口（必填）"), ("external_address", "外网地址"), ("external_port", "外网端口（必填）"), ("username", "用户名")], "directories": [("name", "名称"), ("path", "远端绝对路径")], "agents": [("name", "名称"), ("command", "启动命令")]}[kind]
         dialog = Gtk.Dialog(title="编辑" if action == "edit" else "添加", transient_for=self, modal=True)
         dialog.add_buttons("取消", Gtk.ResponseType.CANCEL, "保存", Gtk.ResponseType.OK)
         parent_width, parent_height = self.get_size()
@@ -1429,6 +1452,8 @@ class App(Gtk.Window):
         for row, (key, label) in enumerate(fields):
             grid.attach(Gtk.Label(label=label, xalign=0), 0, row, 1, 1)
             entry = Gtk.Entry(text=str(old.get(key, "")))
+            if key in ("lan_port", "external_port"):
+                entry.set_placeholder_text("端口号")
             entry.set_hexpand(True)
             grid.attach(entry, 1, row, 1, 1)
             entries[key] = entry
@@ -1461,12 +1486,24 @@ class App(Gtk.Window):
                     raise ValueError("请填写所有必填字段")
                 if kind == "hosts":
                     primary = values.get("lan_address") or values.get("external_address")
-                    values["lan_port"] = int(values["lan_port"] or old.get("port", 22))
-                    values["external_port"] = int(values["external_port"] or old.get("port", 22))
-                    values["port"] = int(values["external_port"] if (values.get("external_address") and not values.get("lan_address")) else values["lan_port"])
+                    parsed_ports = {}
+                    for address_key, port_key in (("lan_address", "lan_port"), ("external_address", "external_port")):
+                        if values.get(address_key):
+                            try:
+                                port = int(values[port_key])
+                            except (TypeError, ValueError):
+                                raise ValueError("每个已填写的主机地址都必须配置端口")
+                            if not 1 <= port <= 65535:
+                                raise ValueError("主机端口必须在 1 到 65535 之间")
+                            parsed_ports[port_key] = port
+                    if not parsed_ports:
+                        raise ValueError("请至少配置一个有效的主机地址和端口")
+                    values["lan_port"] = parsed_ports.get("lan_port", next(iter(parsed_ports.values())))
+                    values["external_port"] = parsed_ports.get("external_port", next(iter(parsed_ports.values())))
+                    values["port"] = values["lan_port"] if values.get("lan_address") else values["external_port"]
                     values["address"] = primary or ""
-                    if any(not 1 <= values[key] <= 65535 for key in ("lan_port", "external_port")) or any(v.startswith("-") for v in (values["lan_address"], values["external_address"])):
-                        raise ValueError("主机地址或端口无效")
+                    if any(v.startswith("-") for v in (values["lan_address"], values["external_address"])):
+                        raise ValueError("主机地址无效")
                     values["id"] = old.get("id") or uuid.uuid4().hex
                     values["legacy_address"] = old.get("legacy_address", old.get("address", ""))
                     values["sync_id"] = old.get("sync_id", "")
@@ -1733,9 +1770,20 @@ class App(Gtk.Window):
             return ("manual", sync_id)
         return host.get("id") or (host.get("address"), host.get("port"), host.get("username"))
 
+    def canonical_session_host(self, host):
+        if not host:
+            return host
+        current = next((item for item in self.data.get("hosts", []) if item.get("id") == host.get("id")), None)
+        if current:
+            return current
+        aliases = set(legacy_sync_keys(host))
+        matches = [item for item in self.data.get("hosts", []) if aliases.intersection(legacy_sync_keys(item))]
+        return matches[0] if len(matches) == 1 else host
+
     def refresh_host_shared(self, host):
-        if not self.data.get("sync_url"):
+        if not self.data.get("sync_url") or not self.data.get("auto_sync_enabled", False):
             return
+        host = self.canonical_session_host(host)
         key = self.shared_host_key(host)
         fingerprint = ssh_host_fingerprint(host)
         if fingerprint: host["_sync_fingerprint"] = fingerprint
@@ -1811,12 +1859,13 @@ class App(Gtk.Window):
                             self.persist(); self.refresh()
                         self.shared_by_host[key] = sessions
                     else:
-                        sessions = []
+                        sessions = None
                         self.shared_by_host[key] = result
                     if isinstance(sessions, list):
                         remote_ids = {item.get("id") for item in sessions}
                         for session in list(self.sessions):
-                            if session.get("key", (None,))[0] == key and session.get("id") not in remote_ids and time.monotonic() - session.get("started_at", 0) > 15:
+                            session_host = self.canonical_session_host(session.get("host", {}))
+                            if self.shared_host_key(session_host) == key and session.get("id") not in remote_ids and time.monotonic() - session.get("started_at", 0) > 15:
                                 session.get("close_button").clicked()
                         for item in sessions:
                             if len(self.sessions) < 8 and not any(session["id"] == item["id"] for session in self.sessions):
@@ -1867,7 +1916,6 @@ class App(Gtk.Window):
                             self.persist(); self.refresh()
                         else:
                             self.persist()
-                    self.update_sync_status()
                 return False
             GLib.idle_add(finish)
         self.sync_executor.submit(worker)
@@ -1926,31 +1974,90 @@ class App(Gtk.Window):
         self.sync_executor.submit(worker)
 
     def poll_shared(self):
-        self.sync_host_profiles()
-        for host in self.data["hosts"]:
-            self.refresh_host_shared(host)
+        if not self.data.get("auto_sync_enabled", False):
+            return True
+        self.refresh_all_shared()
         return True
+
+    def configure_sync_polling(self):
+        if self.sync_poll_source:
+            GLib.source_remove(self.sync_poll_source)
+            self.sync_poll_source = None
+        if self.data.get("auto_sync_enabled", False):
+            interval = min(max(int(self.data.get("sync_interval_seconds", 5)), 5), 300)
+            self.sync_poll_source = GLib.timeout_add_seconds(interval, self.poll_shared)
 
     def host_profile_payload(self, host):
         agents = self.host_agents(host)
         selected = min(max(int(host.get("selected_agent", 0)), 0), max(0, len(agents) - 1))
+        shared_port = host.get("port")
+        lan_port = host.get("lan_port") or shared_port or (host.get("external_port") if not host.get("lan_address") else None)
+        external_port = host.get("external_port") or shared_port or (host.get("lan_port") if not host.get("external_address", host.get("address")) else None)
+        try:
+            lan_port, external_port = int(lan_port), int(external_port)
+        except (TypeError, ValueError):
+            raise ValueError("主机缺少有效端口，编辑主机并填写端口后才能同步")
+        if any(not 1 <= port <= 65535 for port in (lan_port, external_port)):
+            raise ValueError("主机端口必须在 1 到 65535 之间")
+        try:
+            primary_port = int(host.get("port"))
+        except (TypeError, ValueError):
+            primary_port = lan_port if host.get("lan_address") else external_port
+        if not 1 <= primary_port <= 65535:
+            primary_port = lan_port if host.get("lan_address") else external_port
         return {"id": str(host.get("id") or uuid.uuid4().hex), "name": host.get("name", "主机"),
                 "lan_address": host.get("lan_address", ""), "external_address": host.get("external_address", host.get("address", "")),
-                "lan_port": int(host.get("lan_port", host.get("port", 22))), "external_port": int(host.get("external_port", host.get("port", 22))), "port": int(host.get("port", 22)), "username": host.get("username", ""), "icon": host.get("icon", "⌘"),
+                "lan_port": lan_port, "external_port": external_port, "port": primary_port, "username": host.get("username", ""), "icon": host.get("icon", "⌘"),
                 "selected_agent_command": agents[selected].get("command", "") if agents else "",
                 "legacy_keys": legacy_sync_keys(host)}
 
     def push_host_profile(self, host):
         if not self.data.get("sync_url") or not self.data.get("sync_token"): return
-        payload = self.host_profile_payload(host)
+        try:
+            payload = self.host_profile_payload(host)
+        except ValueError:
+            return
         host_id = payload["id"]
         self.dirty_host_profiles.add(host_id)
+        self.persist_dirty_host_profiles()
         def worker():
             try:
-                sync_data_request(self.data, "PUT", "/v1/hosts/" + host_id, payload)
+                response = sync_data_request(self.data, "PUT", "/v1/hosts/" + host_id, payload)
+                canonical_id = response.get("host", {}).get("id", host_id)
                 self.dirty_host_profiles.discard(host_id)
+                GLib.idle_add(self.persist_dirty_host_profiles)
+                if canonical_id != host_id:
+                    GLib.idle_add(self.remap_host_id, host_id, canonical_id)
             except Exception: pass
         self.sync_executor.submit(worker)
+
+    def persist_dirty_host_profiles(self):
+        self.data["dirty_host_profiles"] = sorted(self.dirty_host_profiles)
+        self.persist()
+        return False
+
+    def remap_host_id(self, old_id, canonical_id):
+        if not old_id or not canonical_id or old_id == canonical_id:
+            return False
+        old_host = next((host for host in self.data.get("hosts", []) if host.get("id") == old_id), None)
+        canonical_host = next((host for host in self.data.get("hosts", []) if host.get("id") == canonical_id), None)
+        if old_host is None:
+            return False
+        if canonical_host is None:
+            old_host["id"] = canonical_id
+            canonical_host = old_host
+        else:
+            self.data["hosts"] = [host for host in self.data["hosts"] if host.get("id") != old_id]
+        for session in self.sessions:
+            if session.get("key", (None,))[0] == old_id:
+                session["key"] = (canonical_id, *session["key"][1:])
+                session["host"] = canonical_host
+        if old_id in self.dirty_host_profiles:
+            self.dirty_host_profiles.discard(old_id)
+            self.dirty_host_profiles.add(canonical_id)
+        self.persist()
+        self.refresh()
+        return False
 
     def delete_host_profile(self, host_id):
         if not self.data.get("sync_url") or not self.data.get("sync_token"): return
@@ -1963,6 +2070,7 @@ class App(Gtk.Window):
         local_hosts = [dict(host) for host in self.data["hosts"]]
         config = dict(self.data)
         def worker():
+            remapped_ids = {}
             try:
                 remote = sync_data_request(config, "GET", "/v1/hosts").get("hosts", [])
                 active = [item for item in remote if not item.get("deleted")]
@@ -1970,48 +2078,102 @@ class App(Gtk.Window):
                 matched = set(); result = []
                 for host in local_hosts:
                     aliases = set(legacy_sync_keys(host))
-                    tombstone = next((item for item in deleted if item.get("id") == host.get("id") or aliases.intersection(item.get("legacy_keys", []))), None)
+                    alias_matches = [item for item in remote if aliases.intersection(item.get("legacy_keys", []))]
+                    tombstone = next((item for item in deleted if item.get("id") == host.get("id")), None)
                     if tombstone:
-                        matched.add(tombstone.get("id")); continue
-                    candidates = [item for item in active if item.get("id") == host.get("id") or aliases.intersection(item.get("legacy_keys", []))]
-                    if not candidates:
-                        named = [item for item in active if item.get("name", "").casefold() == host.get("name", "").casefold() and item.get("username", "").casefold() == host.get("username", "").casefold()]
-                        if len(named) == 1: candidates = named
-                    if candidates:
-                        profile = candidates[0]; matched.add(profile.get("id"))
+                        canonical_id = tombstone.get("canonical_id")
+                        if canonical_id and any(item.get("id") == canonical_id for item in active):
+                            matched.add(canonical_id)
+                            remapped_ids[host.get("id")] = canonical_id
+                            result.append(dict(host, id=canonical_id))
+                        else:
+                            matched.add(tombstone.get("id")); continue
+                        continue
+                    if len(alias_matches) == 1 and alias_matches[0].get("deleted"):
+                        matched.add(alias_matches[0].get("id")); continue
+                    candidates = [item for item in active if aliases.intersection(item.get("legacy_keys", []))]
+                    profile = next((item for item in active if item.get("id") == host.get("id")), None)
+                    if profile is None and len(candidates) == 1:
+                        profile = candidates[0]
+                    if profile:
+                        matched.add(profile.get("id"))
+                        remapped_ids[host.get("id")] = profile.get("id")
                         if host.get("id") in self.dirty_host_profiles:
-                            payload = self.host_profile_payload(host)
+                            canonical_host = dict(host, id=profile.get("id"))
                             try:
+                                payload = self.host_profile_payload(canonical_host)
                                 sync_data_request(config, "PUT", "/v1/hosts/" + payload["id"], payload)
                                 self.dirty_host_profiles.discard(host.get("id"))
                             except Exception: pass
-                            result.append(host)
+                            result.append(canonical_host)
                             continue
                         merged = dict(host)
+                        old_route = tuple(host.get(key) for key in ("lan_address", "lan_port", "external_address", "external_port", "address", "port"))
                         merged.update({key: profile.get(key, merged.get(key, "")) for key in ("id", "name", "lan_address", "external_address", "lan_port", "external_port", "port", "username", "icon")})
                         merged["address"] = merged.get("external_address") or merged.get("lan_address") or ""
+                        new_route = tuple(merged.get(key) for key in ("lan_address", "lan_port", "external_address", "external_port", "address", "port"))
+                        if old_route != new_route:
+                            for key in ("_resolved", "_active_address", "_active_port"):
+                                merged.pop(key, None)
                         if profile.get("selected_agent_command"):
                             selected = next((i for i, item in enumerate(self.data.get("agents", [])) if item.get("command") == profile["selected_agent_command"]), None)
                             if selected is not None and host.get("selected_agent") is None:
                                 merged["selected_agent"] = selected
                         result.append(merged)
                     else:
-                        payload = self.host_profile_payload(host)
-                        sync_data_request(config, "PUT", "/v1/hosts/" + payload["id"], payload)
-                        result.append(host)
+                        try:
+                            payload = self.host_profile_payload(host)
+                        except ValueError:
+                            result.append(host)
+                            continue
+                        response = sync_data_request(config, "PUT", "/v1/hosts/" + payload["id"], payload)
+                        canonical_id = response.get("host", {}).get("id", payload["id"])
+                        matched.add(canonical_id)
+                        remapped_ids[host.get("id")] = canonical_id
+                        result.append(dict(host, id=canonical_id))
                 for profile in active:
                     if profile.get("id") in matched: continue
                     result.append({"id": profile.get("id"), "name": profile.get("name", "主机"), "lan_address": profile.get("lan_address", ""),
                                    "external_address": profile.get("external_address", ""), "address": profile.get("external_address") or profile.get("lan_address", ""),
-                                   "port": profile.get("port", 22), "lan_port": profile.get("lan_port", profile.get("port", 22)), "external_port": profile.get("external_port", profile.get("port", 22)), "username": profile.get("username", ""), "icon": profile.get("icon", "⌘"),
+                                   "port": profile["port"], "lan_port": profile.get("lan_port", profile["port"]), "external_port": profile.get("external_port", profile["port"]), "username": profile.get("username", ""), "icon": profile.get("icon", "⌘"),
                                    "selected_agent": next((i for i, item in enumerate(self.data.get("agents", [])) if item.get("command") == profile.get("selected_agent_command")), 0),
                                    "directories": [], "agents": [dict(item) for item in self.data.get("agents", [])]})
+                unique = []
+                seen_ids = set()
+                for host in result:
+                    if host.get("id") in seen_ids: continue
+                    seen_ids.add(host.get("id"))
+                    unique.append(host)
+                result = unique
             except Exception:
                 result = None
             def finish():
                 self.host_profile_sync_pending = False
-                if result is not None and result != self.data["hosts"]:
-                    self.data["hosts"] = result; self.persist(); self.refresh(); self.refresh_all_shared()
+                if result is not None:
+                    self.data["dirty_host_profiles"] = sorted(self.dirty_host_profiles)
+                    if result != self.data["hosts"]:
+                        self.data["hosts"] = result
+                        self.refresh()
+                    self.persist()
+                    current_by_id = {host.get("id"): host for host in self.data["hosts"]}
+                    for session in self.sessions:
+                        old_id = session.get("key", (None,))[0]
+                        canonical_id = remapped_ids.get(old_id, old_id)
+                        if canonical_id in current_by_id:
+                            if canonical_id != old_id:
+                                session["key"] = (canonical_id, *session["key"][1:])
+                            session["host"] = current_by_id[canonical_id]
+                    if self.refresh_sessions_after_host_profiles:
+                        self.refresh_sessions_after_host_profiles = False
+                        self.shared_by_host = {}
+                        for host in self.data["hosts"]:
+                            key = self.shared_host_key(host)
+                            self.shared_by_host[key] = "正在同步…"
+                            self.refresh_host_shared(host)
+                elif self.refresh_sessions_after_host_profiles:
+                    self.refresh_sessions_after_host_profiles = False
+                    for host in self.data["hosts"]:
+                        self.shared_by_host[self.shared_host_key(host)] = "主机身份同步失败"
                 return False
             GLib.idle_add(finish)
         self.sync_executor.submit(worker)
@@ -2077,18 +2239,24 @@ class App(Gtk.Window):
         return False
 
     def refresh_all_shared(self):
-        self.sync_host_profiles()
         self.shared_by_host = {}
+        if not self.data.get("auto_sync_enabled", False):
+            self.refresh_sessions_after_host_profiles = False
+            return
         if self.data.get("sync_url") and not self.ensure_sync_login():
             return
-        for host in self.data["hosts"]:
-            if self.data.get("sync_url"):
-                self.shared_by_host[self.shared_host_key(host)] = "正在同步…"
-                self.refresh_host_shared(host)
-
-    def sync_async(self, host, method, session_id, item=None):
         if not self.data.get("sync_url"):
             return
+        self.refresh_sessions_after_host_profiles = True
+        self.sync_host_profiles()
+        for host in self.data["hosts"]:
+            self.shared_by_host[self.shared_host_key(host)] = "正在同步…"
+
+    def sync_async(self, host, method, session_id, item=None):
+        if not self.data.get("sync_url") or not self.data.get("auto_sync_enabled", False):
+            return
+        session = next((item for item in self.sessions if item.get("id") == session_id), None)
+        host = session.get("host") if session else self.canonical_session_host(host)
         def worker():
             try:
                 sync_request(self.data, method, session_id, item, host=host)
@@ -2098,6 +2266,9 @@ class App(Gtk.Window):
         self.sync_executor.submit(worker)
 
     def show_shared_sessions(self, _button):
+        if not self.data.get("auto_sync_enabled", False):
+            self.message("自动同步已关闭", "请先在系统设置中启用本机的跨设备自动同步。")
+            return
         host = self.current_host()
         if not host or not self.data.get("sync_url"):
             self.message("共享会话", "请先在系统设置中填写同步服务地址并登录账号。")
@@ -2265,7 +2436,7 @@ class App(Gtk.Window):
             subprocess.Popen(["ssh", "-S", socket_path, "-O", "exit", "-p", str(ssh_port(host)), "-l", host["username"], "--", address], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             shutil.rmtree(socket_dir, ignore_errors=True)
         close.connect("clicked", close_tab)
-        self.sessions.append({"terminal": terminal, "label": label, "key": key, "id": session_id, "state": state,
+        self.sessions.append({"terminal": terminal, "label": label, "key": key, "id": session_id, "host": host, "state": state,
                               "close_button": close, "started_at": time.monotonic(),
                               "quota_indicators": (hourly_img, weekly_img)})
         self.rebuild_view(selected=terminal if activate else None)

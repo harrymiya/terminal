@@ -48,16 +48,23 @@ data class HostEndpoint(
 
 fun HostProfile.endpoints(): List<HostEndpoint> {
     val list = mutableListOf<HostEndpoint>()
-    if (lanAddress.isNotBlank()) {
+    if (lanAddress.isNotBlank() && lanPort in 1..65535) {
         list.add(HostEndpoint(lanAddress.trim(), lanPort, isLan = true))
     }
-    if (externalAddress.isNotBlank()) {
+    if (externalAddress.isNotBlank() && externalPort in 1..65535) {
         list.add(HostEndpoint(externalAddress.trim(), externalPort, isLan = false))
     }
-    if (list.isEmpty() && address.isNotBlank()) {
+    if (list.isEmpty() && lanAddress.isBlank() && externalAddress.isBlank() && address.isNotBlank() && port in 1..65535) {
         list.add(HostEndpoint(address.trim(), port, isLan = false))
     }
     return list.distinctBy { it.address to it.port }
+}
+
+fun HostProfile.hasValidConfiguredPorts(): Boolean {
+    val hasLan = lanAddress.isNotBlank()
+    val hasExternal = externalAddress.isNotBlank()
+    if (!hasLan && !hasExternal) return address.isNotBlank() && port in 1..65535
+    return (!hasLan || lanPort in 1..65535) && (!hasExternal || externalPort in 1..65535)
 }
 
 data class HostRoute(
@@ -110,7 +117,7 @@ object HostRouteResolver {
                 return@withContext route
             }
         }
-        val fallback = candidates.firstOrNull() ?: HostEndpoint(host.address, host.port, false)
+        val fallback = candidates.firstOrNull() ?: HostEndpoint("", 0, false)
         val route = HostRoute(fallback.address, fallback.port, fallback.isLan, reachable = false)
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
             activeRoutes[host.id] = route
@@ -200,6 +207,16 @@ class LocalStore(context: Context) {
         preferences.edit().putString("sync_url", url.trim()).putString("sync_token", vault.encrypt(token)).apply()
     }
 
+    fun loadAutoSyncEnabled(): Boolean = preferences.getBoolean("auto_sync_enabled", false)
+    fun saveAutoSyncEnabled(enabled: Boolean) {
+        preferences.edit().putBoolean("auto_sync_enabled", enabled).apply()
+    }
+
+    fun loadSyncIntervalSeconds(): Int = preferences.getInt("sync_interval_seconds", 5).coerceIn(5, 300)
+    fun saveSyncIntervalSeconds(seconds: Int) {
+        preferences.edit().putInt("sync_interval_seconds", seconds.coerceIn(5, 300)).apply()
+    }
+
     fun loadSyncUsername(): String = preferences.getString("sync_username", "").orEmpty()
     fun loadSyncPassword(): String = vault.decrypt(preferences.getString("sync_password", null))
     fun saveSyncCredentials(username: String, password: String, remember: Boolean) {
@@ -241,7 +258,7 @@ class LocalStore(context: Context) {
             val directories = (0 until dirs.length()).map { n ->
                 dirs.getJSONObject(n).let { ProjectDirectory(it.getString("id"), it.getString("name"), it.getString("path"), it.optString("icon", "📁")) }
             }
-            val port = item.optInt("port", 22)
+            val port = item.optInt("port", 0)
             val lanPort = if (item.has("lan_port") && !item.isNull("lan_port")) item.optInt("lan_port", port) else port
             val externalPort = if (item.has("external_port") && !item.isNull("external_port")) item.optInt("external_port", port) else port
             HostProfile(

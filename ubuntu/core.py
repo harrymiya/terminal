@@ -239,11 +239,22 @@ def legacy_sync_keys(host):
 def ssh_address(host, force=False):
     if not force and host.get("_resolved") and host.get("_active_address") is not None:
         return host.get("_active_address", "")
-    candidates = [(host.get("lan_address", ""), host.get("lan_port", host.get("port", 22))),
-                  (host.get("external_address", ""), host.get("external_port", host.get("port", 22)))]
+    configured_port = host.get("port")
+    candidates = [(host.get("lan_address", ""), host.get("lan_port") or configured_port),
+                  (host.get("external_address", ""), host.get("external_port") or configured_port)]
     if not any(address for address, _port in candidates) and host.get("address"):
-        candidates.append((host["address"], host.get("port", 22)))
-    candidates = list(dict.fromkeys((address.strip(), int(port or 22)) for address, port in candidates if address and address.strip()))
+        candidates.append((host["address"], configured_port))
+    normalized = []
+    for address, raw_port in candidates:
+        if not address or not str(address).strip():
+            continue
+        try:
+            port = int(raw_port)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= port <= 65535:
+            normalized.append((str(address).strip(), port))
+    candidates = list(dict.fromkeys(normalized))
     for address, port in candidates:
         try:
             with socket.create_connection((address, port), timeout=1.2):
@@ -256,7 +267,11 @@ def ssh_address(host, force=False):
         host["_active_address"], host["_active_port"] = candidates[0]
         host["_resolved"] = True
         return candidates[0][0]
-    host["_active_address"], host["_active_port"] = "", int(host.get("port", 22))
+    try:
+        fallback_port = int(configured_port)
+    except (TypeError, ValueError):
+        fallback_port = 0
+    host["_active_address"], host["_active_port"] = "", fallback_port
     host["_resolved"] = True
     return ""
 
@@ -264,20 +279,32 @@ def ssh_address(host, force=False):
 def ssh_port(host):
     if not host.get("_active_address"):
         ssh_address(host)
-    return int(host.get("_active_port", host.get("port", 22)))
+    try:
+        port = int(host.get("_active_port", host.get("port", 0)))
+    except (TypeError, ValueError):
+        return 0
+    return port if 1 <= port <= 65535 else 0
 
 
 def ssh_host_fingerprint(host):
     known_hosts = Path.home() / ".ssh" / "known_hosts"
     if not known_hosts.exists(): return ""
     keys = []
-    candidates = [(host.get("lan_address", ""), host.get("lan_port", host.get("port", 22))),
-                  (host.get("external_address", ""), host.get("external_port", host.get("port", 22)))]
+    configured_port = host.get("port")
+    candidates = [(host.get("lan_address", ""), host.get("lan_port") or configured_port),
+                  (host.get("external_address", ""), host.get("external_port") or configured_port)]
     if not any(address for address, _port in candidates) and host.get("address"):
-        candidates.append((host["address"], host.get("port", 22)))
-    for address, port in dict.fromkeys((item, int(port or 22)) for item, port in candidates if item):
-        args = ["ssh-keygen", "-F", address, "-f", str(known_hosts)]
-        if port != 22: args += ["-p", str(port)]
+        candidates.append((host["address"], configured_port))
+    normalized = []
+    for address, raw_port in candidates:
+        try:
+            port = int(raw_port)
+        except (TypeError, ValueError):
+            continue
+        if address and 1 <= port <= 65535:
+            normalized.append(f"[{address}]:{port}")
+    for lookup in dict.fromkeys(normalized):
+        args = ["ssh-keygen", "-F", lookup, "-f", str(known_hosts)]
         try: result = subprocess.run(args, capture_output=True, timeout=5)
         except (OSError, subprocess.TimeoutExpired): continue
         for line in result.stdout.decode("utf-8", errors="ignore").splitlines():
@@ -306,7 +333,10 @@ def ssh_argv(host, directory, agent, session_id=None, control_path=None, restore
                   f"tmux set-option -t {name} mouse on && tmux attach-session -t {name}; else printf '\\n[会话已不存在，无法恢复]\\n'; exit 1; fi")
     options = ["-o", "ControlMaster=auto", "-o", "ControlPersist=60", "-o", "ControlPath=" + control_path] if control_path else []
     address = ssh_address(host)
-    return ["ssh", "-tt", "-o", "ServerAliveInterval=20", "-o", "ServerAliveCountMax=6", *options, "-p", str(ssh_port(host)), "-l", host["username"], "--", address, remote], session_id
+    port = ssh_port(host)
+    if not address or not port:
+        raise ValueError("请先在主机设置中填写有效的 SSH 地址和端口")
+    return ["ssh", "-tt", "-o", "ServerAliveInterval=20", "-o", "ServerAliveCountMax=6", *options, "-p", str(port), "-l", host["username"], "--", address, remote], session_id
 
 
 def _normalize_signature(sig):
