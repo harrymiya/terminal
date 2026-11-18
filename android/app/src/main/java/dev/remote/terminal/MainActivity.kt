@@ -277,9 +277,10 @@ private class TerminalSessionState(
     var resolveHostKey: ((Boolean) -> Unit)? = null
     var autoEnterDeadline by mutableStateOf<Long?>(null)
         private set
+    @Volatile var isSessionConnected = false
     lateinit var controller: SshTerminalController
 
-    override fun isConnected(): Boolean = status.startsWith("已连接") && controller.isConnected()
+    override fun isConnected(): Boolean = isSessionConnected && controller.isConnected()
     override fun isClosed(): Boolean = controller.isClosed()
     override fun getVisibleTail(): String = buffer.visibleTextTail(100)
     override fun sendInput(text: String): Boolean = controller.sendIfConnected(text)
@@ -385,6 +386,16 @@ private fun RemoteTerminalApp(store: LocalStore) {
         AutoConfirmEngine.init(appContext)
         AutoConfirmEngine.globalEnabled = autoEnterEnabled
         AutoConfirmEngine.globalDelaySeconds = autoEnterDelaySeconds
+        val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+        androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
+            val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+                if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME && sessions.isNotEmpty()) {
+                    runCatching { TerminalKeepAliveService.start(appContext) }
+                }
+            }
+            lifecycleOwner.lifecycle.addObserver(observer)
+            onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+        }
         var syncUrl by remember { mutableStateOf(store.loadSyncUrl()) }
         var syncToken by remember { mutableStateOf(store.loadSyncToken()) }
         var autoSyncEnabled by remember { mutableStateOf(store.loadAutoSyncEnabled()) }
@@ -697,14 +708,17 @@ private fun RemoteTerminalApp(store: LocalStore) {
             val state = TerminalSessionState(task, mainHandler, appContext)
             state.controller = SshTerminalController(
                 task = task, store = store, restoreOnly = restoredTask != null,
-                onStatus = { value -> mainHandler.post {
-                    state.status = value
-                    if (!value.startsWith("已连接")) state.codexQuota = null
-                    if (value.contains("重连") || value.contains("恢复 SSH") || value == "已断开" || value.startsWith("远端终端已结束")) {
-                        state.onConnectionUnavailable()
+                onStatus = { value ->
+                    state.isSessionConnected = value.startsWith("已连接")
+                    mainHandler.post {
+                        state.status = value
+                        if (!value.startsWith("已连接")) state.codexQuota = null
+                        if (value.contains("重连") || value.contains("恢复 SSH") || value == "已断开" || value.startsWith("远端终端已结束")) {
+                            state.onConnectionUnavailable()
+                        }
+                        if (value.startsWith("已连接")) state.resumeAutoEnter(autoEnterDelaySeconds, autoEnterEnabled)
                     }
-                    if (value.startsWith("已连接")) state.resumeAutoEnter(autoEnterDelaySeconds, autoEnterEnabled)
-                } },
+                },
                 onQuota = { quota -> mainHandler.post { state.codexQuota = quota } },
                 onBytes = { bytes ->
                     state.buffer.feed(bytes)
@@ -1584,7 +1598,7 @@ private fun SessionTab(session: TerminalSessionState, selected: Boolean, onClick
     var remainingSeconds by remember(session, deadline) { mutableIntStateOf(0) }
     LaunchedEffect(deadline) {
         while (deadline != null) {
-            val remaining = deadline - android.os.SystemClock.uptimeMillis()
+            val remaining = deadline - android.os.SystemClock.elapsedRealtime()
             if (remaining <= 0) { remainingSeconds = 0; break }
             remainingSeconds = ((remaining + 999) / 1000).toInt()
             kotlinx.coroutines.delay((remaining - (remainingSeconds - 1) * 1000L).coerceAtLeast(1))

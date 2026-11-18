@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
 import android.net.Network
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -37,6 +38,7 @@ object TerminalConnectionRegistry {
 /** Keeps the app process and CPU alive while its in-memory SSH terminal sessions are active. */
 class TerminalKeepAliveService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
     private var connectivityManager: ConnectivityManager? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
     @Volatile private var defaultNetwork: Network? = null
@@ -78,6 +80,21 @@ class TerminalKeepAliveService : Service() {
                     acquire()
                 }
         }
+        if (wifiLock?.isHeld != true) {
+            runCatching {
+                val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+                val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+                } else {
+                    @Suppress("DEPRECATION")
+                    WifiManager.WIFI_MODE_FULL_HIGH_PERF
+                }
+                wifiLock = wifiManager?.createWifiLock(mode, "$packageName:ssh-wifi")?.apply {
+                    setReferenceCounted(false)
+                    acquire()
+                }
+            }
+        }
         return START_NOT_STICKY
     }
 
@@ -91,6 +108,8 @@ class TerminalKeepAliveService : Service() {
         connectivityManager = null
         wakeLock?.let { lock -> if (lock.isHeld) lock.release() }
         wakeLock = null
+        wifiLock?.let { lock -> runCatching { if (lock.isHeld) lock.release() } }
+        wifiLock = null
         super.onDestroy()
     }
 

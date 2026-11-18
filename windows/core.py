@@ -386,22 +386,26 @@ def auto_enter_signature(text):
     enter_prompt = re.compile(r"(?i)(?:press\s+(?:enter|return)\s+to\s+(?:continue|confirm|approve)|按\s*(?:回车|enter)\s*(?:继续|确认|批准|同意))[:\s?.!]*$")
     yes_default = re.compile(r"(?:\[Y/(?:n|no)\]|\(Y/(?:n|no)\)|\[Yes/no\]|\(Yes/no\))[:\s?.]*$")
     option = re.compile(r"^\s*(?:[›❯>➜→*●◉]|\[[xX*]\]|\([xX*]\))\s*(?:\d+[.)]\s*)?(.*)$")
+    explicit_cursor = re.compile(r"^\s*(?:[›❯●◉]|\[[xX*]\]|\([xX*]\))")
     affirmative = re.compile(r"(?i)^(?:yes\b|allow\b|approve\b|proceed\b|continue\b|always\b|允许|批准|同意|继续|确认|总是)")
-    request = re.compile(r"(?i)(?:approv(?:e|al)|allow|would you like|do you want|proceed|continue|permission|授权|批准|是否允许|需要确认|是否继续|确认执行)")
+    request = re.compile(r"(?i)(?:approv(?:e|al)|allow|would you like|do you want|proceed|continue|permission|confirm|execute|apply|install|run|resume|recover|restore|授权|批准|是否允许|需要确认|是否继续|确认执行|\?|？)")
     # Recent selected option wins, including a selected rejection.
-    for index in range(len(lines) - 1, max(-1, len(lines) - 12), -1):
+    for index in range(len(lines) - 1, max(-1, len(lines) - 45), -1):
         match = option.match(lines[index])
         if not match:
             continue
         if not affirmative.match(match.group(1)):
             return None
-        for question_index in range(index - 1, max(-1, index - 25), -1):
+        for question_index in range(index - 1, max(-1, index - 150), -1):
             question = lines[question_index]
             if request.search(question):
                 start = max(0, question_index - 4)
                 return _normalize_signature("\n".join(lines[start:index + 1]))
+        if explicit_cursor.match(lines[index]):
+            start = max(0, index - 4)
+            return _normalize_signature("\n".join(lines[start:index + 1]))
         return None
-    for index in range(len(lines) - 1, max(-1, len(lines) - 6), -1):
+    for index in range(len(lines) - 1, max(-1, len(lines) - 20), -1):
         if yes_default.search(lines[index]) or enter_prompt.search(lines[index]):
             start = max(0, index - 4)
             return _normalize_signature("\n".join(lines[start:index + 1]))

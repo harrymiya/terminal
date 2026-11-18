@@ -393,8 +393,8 @@ class SshTerminalController(
                     candidate.setPassword(task.host.password)
                     candidate.setConfig("StrictHostKeyChecking", "yes")
                     candidate.setConfig("PreferredAuthentications", "publickey,keyboard-interactive,password")
-                    candidate.setServerAliveInterval(20_000)
-                    candidate.setServerAliveCountMax(6)
+                    candidate.setServerAliveInterval(10_000)
+                    candidate.setServerAliveCountMax(3)
                     sessionRef.set(candidate)
                     currentAddress = endpoint.address
                     currentPort = endpoint.port

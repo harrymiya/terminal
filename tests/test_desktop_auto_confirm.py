@@ -87,6 +87,21 @@ class DesktopAutoConfirmTest(unittest.TestCase):
             self.assertIsNotNone(load_core(platform).auto_enter_signature(screen))
         window.destroy()
 
+    def test_long_confirmation_requests_are_detected(self):
+        long_diff = "\n".join(f"  + line {i}" for i in range(60))
+        long_footer = "\n".join(f"  option/hint line {i}" for i in range(25))
+        cases = (
+            f"Would you like to run this command?\n{long_diff}\n❯ 1. Yes, proceed\n  2. No",
+            f"Do you want to make this edit?\n❯ 1. Yes\n  2. Yes, allow all\n{long_footer}",
+            f"{long_diff}\n❯ 1. Yes, proceed\n  2. No",
+            f"Continue with deployment? [Y/n]\n{long_footer[:200]}",
+        )
+        for platform in ('omarchy', 'ubuntu', 'windows'):
+            with self.subTest(platform=platform):
+                detect = load_core(platform).auto_enter_signature
+                for text in cases:
+                    self.assertIsNotNone(detect(text), text[:80])
+
 
 if __name__ == '__main__':
     unittest.main()

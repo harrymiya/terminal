@@ -47,6 +47,10 @@ object AutoConfirmEngine {
         """^\s*(?:[›❯>➜→*●◉]|\[[xX*]\]|\([xX*]\))\s*(?:\d+[.)]\s*)?(.*)$"""
     )
 
+    private val ExplicitCursorRegex = Regex(
+        """^\s*(?:[›❯●◉]|\[[xX*]\]|\([xX*]\))"""
+    )
+
     // 积极肯定的选项文字（包含 Yes, Allow, Approve, Proceed, Continue, Resume, Restore, 允许, 确认, 恢复 等）
     private val AffirmativeRegex = Regex(
         "(?i)^(?:yes\b|allow\b|approve\b|proceed\b|continue\b|resume\b|restore\b|confirm\b|always\b|accept\b|apply\b|run\b|execute\b|ok\b|允许|批准|同意|继续|确认|总是|恢复|执行|确定|应用)"
@@ -99,26 +103,32 @@ object AutoConfirmEngine {
             .toList()
         if (rawLines.isEmpty()) return null
 
-        // 1. 优先匹配后 8 行内的 [Y/n] 或 Press enter to continue/confirm/resume
-        for (i in (rawLines.size - 1) downTo maxOf(0, rawLines.size - 8)) {
+        // 1. 优先匹配交互式多选菜单（必须在单行 Enter 提示前检查，避免选中 "❯ No" 时误触发下方的 "Press enter to confirm"）
+        val optionWindowStart = maxOf(0, rawLines.size - 45)
+        for (i in (rawLines.size - 1) downTo optionWindowStart) {
             val line = rawLines[i]
-            if (YesDefaultRegex.containsMatchIn(line) || EnterPromptRegex.containsMatchIn(line)) {
-                val start = maxOf(0, i - 4)
-                return normalizeSignature(rawLines.subList(start, i + 1).joinToString("\n"))
-            }
-        }
-
-        // 2. 匹配交互式多选菜单：当前选中了明确的积极选项 (Yes/允许/批准/继续/恢复)
-        for (i in (rawLines.size - 1) downTo maxOf(0, rawLines.size - 15)) {
-            val match = OptionRegex.find(rawLines[i]) ?: continue
+            val match = OptionRegex.find(line) ?: continue
             val optionText = match.groupValues.getOrNull(1)?.trim().orEmpty()
             if (AffirmativeRegex.containsMatchIn(optionText)) {
-                for (q in (i - 1) downTo maxOf(0, i - 25)) {
+                for (q in (i - 1) downTo maxOf(0, i - 100)) {
                     if (ActionRequestRegex.containsMatchIn(rawLines[q]) || rawLines[q].contains('?') || rawLines[q].contains('？')) {
                         val start = maxOf(0, q - 4)
                         return normalizeSignature(rawLines.subList(start, i + 1).joinToString("\n"))
                     }
                 }
+                val start = maxOf(0, i - 4)
+                return normalizeSignature(rawLines.subList(start, i + 1).joinToString("\n"))
+            }
+            // 若明确的光标选中了否定/非积极选项（如 "❯ No, cancel"），立即停止以免误匹配上方的列表项
+            if (ExplicitCursorRegex.containsMatchIn(line)) {
+                return null
+            }
+        }
+
+        // 2. 匹配后 20 行内的 [Y/n] 或 Press enter to continue/confirm/resume
+        for (i in (rawLines.size - 1) downTo maxOf(0, rawLines.size - 20)) {
+            val line = rawLines[i]
+            if (YesDefaultRegex.containsMatchIn(line) || EnterPromptRegex.containsMatchIn(line)) {
                 val start = maxOf(0, i - 4)
                 return normalizeSignature(rawLines.subList(start, i + 1).joinToString("\n"))
             }
@@ -250,7 +260,7 @@ object AutoConfirmEngine {
             return
         }
 
-        val now = SystemClock.uptimeMillis()
+        val now = SystemClock.elapsedRealtime()
         val delayMillis = globalDelaySeconds.coerceIn(1, 30) * 1_000L
 
         if (state.signature != detectedSig) {
