@@ -65,7 +65,6 @@ def make_quota_indicator():
 class App(Gtk.Window):
     def __init__(self):
         super().__init__(title="Remote Dev Terminal")
-        Gtk.Settings.get_default().set_property("gtk-application-prefer-dark-theme", True)
         self.set_default_size(1200, 760)
         self.set_size_request(700, 450)
         self.sessions = []
@@ -93,7 +92,6 @@ class App(Gtk.Window):
         self.base_css = '''
             * { font-size: 13px; }
             window, dialog, messagedialog, filechooser { background-color: #0c1119; color: #e8eef6; }
-            window decoration { border-color: #243546; }
             scrolledwindow, scrolledwindow > viewport, scrolledwindow > undershoot,
             scrolledwindow > overshoot, frame > border {
                 background-image: none;
@@ -101,12 +99,12 @@ class App(Gtk.Window):
                 box-shadow: none;
             }
             paned > separator { background-image: none; border: none; box-shadow: none; }
-            button:focus, entry:focus, spinbutton:focus, combobox:focus, notebook tab:focus {
+            button:not(.titlebutton):focus, entry:focus, spinbutton:focus, combobox:focus, notebook tab:focus {
                 outline-color: #86dbb8;
             }
             window:backdrop { color: #e8eef6; }
             label:backdrop { color: inherit; }
-            button:backdrop { color: #d0e1ed; }
+            button:not(.titlebutton):backdrop { color: #d0e1ed; }
             .brand:backdrop { color: #a2e8cc; }
             .subtitle:backdrop, .empty:backdrop { color: #8fa2b4; }
             .section:backdrop { color: #9bb0c3; }
@@ -125,11 +123,11 @@ class App(Gtk.Window):
                 border: none; border-bottom: 1px solid #2b3e51; border-radius: 0;
                 padding: 7px 10px; box-shadow: none; font-weight: bold;
             }
-            button, entry, spinbutton, combobox, combobox button, .menu-toggle, .host-button, .project-button, .manage-button {
+            button:not(.titlebutton), entry, spinbutton, combobox, combobox button, .menu-toggle, .host-button, .project-button, .manage-button {
                 min-height: 24px;
                 padding: 2px 8px;
             }
-            button {
+            button:not(.titlebutton) {
                 background-image: none;
                 background-color: #16222f;
                 color: #d0e1ed;
@@ -139,8 +137,8 @@ class App(Gtk.Window):
                 box-shadow: none;
                 min-height: 24px;
             }
-            button:hover { background-image: none; background-color: #213548; border-color: #86dbb8; color: #ffffff; box-shadow: none; }
-            button:active { background-image: none; background-color: #203e36; border-color: #86dbb8; color: #d8fff0; box-shadow: none; }
+            button:not(.titlebutton):hover { background-image: none; background-color: #213548; border-color: #86dbb8; color: #ffffff; box-shadow: none; }
+            button:not(.titlebutton):active { background-image: none; background-color: #203e36; border-color: #86dbb8; color: #d8fff0; box-shadow: none; }
             entry {
                 background-color: #16222f;
                 color: #e8eef6;
@@ -2388,9 +2386,7 @@ class App(Gtk.Window):
         return False
 
     def sync_async(self, host, method, session_id, item=None):
-        session = next((item for item in self.sessions if item.get("id") == session_id), None)
-        host = session.get("host") if session else self.canonical_session_host(host)
-        self.queue_session_sync(host, method, session_id, item)
+        self.queue_session_sync(self.canonical_session_host(host), method, session_id, item)
 
     def show_shared_sessions(self, _button):
         if not self.data.get("auto_sync_enabled", False):

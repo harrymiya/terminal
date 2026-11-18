@@ -2425,9 +2425,7 @@ class App(Gtk.Window):
         return False
 
     def sync_async(self, host, method, session_id, item=None):
-        session = next((item for item in self.sessions if item.get("id") == session_id), None)
-        host = session.get("host") if session else self.canonical_session_host(host)
-        self.queue_session_sync(host, method, session_id, item)
+        self.queue_session_sync(self.canonical_session_host(host), method, session_id, item)
 
     def show_shared_sessions(self, _button):
         if not self.data.get("auto_sync_enabled", False):

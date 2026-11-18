@@ -89,6 +89,7 @@ def merge_duplicate_host_profiles(db, user_id):
                 elif old_state[0] > current_state[0]:
                     db.execute("UPDATE account_host_state SET revision=?, payload=? WHERE user_id=? AND host_id=?", (old_state[0], old_state[1], user_id, canonical_id))
             db.execute("INSERT OR IGNORE INTO account_sessions(user_id, host_id, username, id, payload) SELECT user_id, ?, username, id, payload FROM account_sessions WHERE user_id=? AND host_id=?", (canonical_id, user_id, duplicate_id))
+            db.execute("DELETE FROM account_sessions WHERE user_id=? AND host_id=?", (user_id, duplicate_id))
             old_agents = db.execute("SELECT payload FROM account_agents WHERE user_id=? AND host_id=?", (user_id, duplicate_id)).fetchone()
             current_agents = db.execute("SELECT payload FROM account_agents WHERE user_id=? AND host_id=?", (user_id, canonical_id)).fetchone()
             if old_agents and not current_agents:
@@ -479,6 +480,7 @@ def create_server(address, database, token=None):
                         old_state = db.execute("SELECT revision, payload FROM account_host_state WHERE user_id=? AND host_id=?", (self.user_id, old_id)).fetchone()
                         if old_state: db.execute("INSERT OR IGNORE INTO account_host_state VALUES (?, ?, ?, ?)", (self.user_id, host_id, old_state[0], old_state[1]))
                         db.execute("INSERT OR IGNORE INTO account_sessions(user_id, host_id, username, id, payload) SELECT user_id, ?, username, id, payload FROM account_sessions WHERE user_id=? AND host_id=?", (host_id, self.user_id, old_id))
+                        db.execute("DELETE FROM account_sessions WHERE user_id=? AND host_id=?", (self.user_id, old_id))
                     for duplicate_id in duplicate_host_ids:
                         row = db.execute("SELECT payload FROM account_hosts WHERE user_id=? AND host_id=?", (self.user_id, duplicate_id)).fetchone()
                         if row:
@@ -711,7 +713,22 @@ def create_server(address, database, token=None):
                 if not host_id or len(host_id) > 256 or not username or len(username) > 256 or len(session_id) != 32 or any(c not in "0123456789abcdef" for c in session_id):
                     return self.reply(404, {"error": "invalid host session"})
                 with sqlite3.connect(database) as db:
-                    db.execute("DELETE FROM account_sessions WHERE user_id = ? AND host_id = ? AND username = ? AND id = ?", (self.user_id, host_id, username, session_id))
+                    alias_host_ids = set()
+                    canonical_profile = db.execute("SELECT payload FROM account_hosts WHERE user_id=? AND host_id=?", (self.user_id, host_id)).fetchone()
+                    if canonical_profile:
+                        try:
+                            alias_host_ids.update(json.loads(canonical_profile[0]).get("legacy_keys", []))
+                        except (TypeError, json.JSONDecodeError):
+                            pass
+                    for alias_id, payload in db.execute("SELECT host_id, payload FROM account_hosts WHERE user_id=? AND deleted=1 AND host_id!=?", (self.user_id, host_id)):
+                        try:
+                            alias = json.loads(payload)
+                        except (TypeError, json.JSONDecodeError):
+                            continue
+                        if alias.get("canonical_id") == host_id:
+                            alias_host_ids.add(alias_id)
+                    for target_host_id in [host_id, *alias_host_ids]:
+                        db.execute("DELETE FROM account_sessions WHERE user_id = ? AND host_id = ? AND username = ? AND id = ?", (self.user_id, target_host_id, username, session_id))
                 return self.reply(200, {"deleted": session_id})
             session_id = path.removeprefix("/v1/sessions/")
             if not path.startswith("/v1/sessions/") or len(session_id) != 32 or any(c not in "0123456789abcdef" for c in session_id):
