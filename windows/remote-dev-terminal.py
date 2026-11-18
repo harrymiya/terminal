@@ -488,7 +488,6 @@ class App(Gtk.Window):
         self.refresh_all_shared()
         self.sync_poll_source = None
         self.configure_sync_polling()
-        self._running_highlight_on = False
         GLib.timeout_add(500, self._animate_running_headers)
         self.scale_layout(self)
         self.connect("destroy", Gtk.main_quit)
@@ -795,7 +794,6 @@ class App(Gtk.Window):
 
     def _animate_running_headers(self):
         now = time.monotonic()
-        self._running_highlight_on = not self._running_highlight_on
         for session in self.sessions:
             outline = getattr(session.get("terminal"), "_running_outline", None)
             state = session.get("state")
@@ -803,10 +801,9 @@ class App(Gtk.Window):
             if state:
                 is_active = (now - state.get("last_output_at", 0.0) < 2.5) or state.get("quota_busy", False)
             if outline:
-                visible = is_active and self._running_highlight_on
-                if visible and not outline.get_visible():
+                if is_active and not outline.get_visible():
                     outline.show()
-                elif not visible and outline.get_visible():
+                elif not is_active and outline.get_visible():
                     outline.hide()
         return True
 
