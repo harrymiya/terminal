@@ -9,7 +9,6 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * 后台独立的自动确认（Auto-Confirm）引擎。
@@ -28,25 +27,29 @@ object AutoConfirmEngine {
     @Volatile private var appContext: Context? = null
     @Volatile private var wakeLock: PowerManager.WakeLock? = null
 
-    // 匹配提示的正则表达式，对齐 PC 桌面端
+    // 匹配请求提示意图（包含 resume / recover / restore 等会话恢复意图）
     val ActionRequestRegex = Regex(
-        "(?i)(?:approv(?:e|al)|allow|would you like|do you want|proceed|continue|permission|needs your approval|run this command\\?|授权|批准|是否允许|需要确认|是否继续|确认执行)"
+        "(?i)(?:approv(?:e|al)?|allow|would you like|do you want|proceed|continue|resume|recover|restore|permission|needs your approval|run this command\\?|run the following|confirm|execute|apply|install|是否|授权|批准|允许|确认|继续|恢复|执行)"
     )
 
+    // 明确提示按回车（包含各种形式的 Press enter to continue / confirm / resume 及中文“按回车继续/恢复”）
     private val EnterPromptRegex = Regex(
-        "(?i)(?:press\\s+(?:enter|return)\\s+to\\s+(?:continue|confirm|approve)|按\\s*(?:回车|enter)\\s*(?:继续|确认|批准|同意))[:\\s?.!]*$"
+        """(?i)(?:press|hit)\s+(?:<enter>|\[enter\]|enter|return)\b.*?(?:continue|confirm|approve|resume|proceed|accept|apply|run|execute|继续|确认|批准|同意|恢复|执行)|按\s*(?:<回车>|\[回车\]|回车|enter)\s*(?:键)?.*?(?:继续|确认|批准|同意|恢复|执行)|\[enter\]\s*(?:continue|confirm|approve|resume|proceed|继续|确认|恢复)"""
     )
 
+    // 默认回车选择 Yes 的形式（支持 [Y/n], (Y/n), [Yes/no], [Y]/n 以及末尾带标点或光标符号）
     private val YesDefaultRegex = Regex(
-        "(?i)(?:\\[Y/(?:n|no)\\]|\\(Y/(?:n|no)\\)|\\[Yes/no\\]|\\(Yes/no\\))[:\\s?.]*$"
+        """(?i)(?:\[Y/(?:n|no)\]|\(Y/(?:n|no)\)|\[Yes/no\]|\(Yes/no\)|\[Y\]/n)\s*[:?？>›❯.!]*\s*$"""
     )
 
+    // 多选菜单的光标选项
     private val OptionRegex = Regex(
         """^\s*(?:[›❯>➜→*●◉]|\[[xX*]\]|\([xX*]\))\s*(?:\d+[.)]\s*)?(.*)$"""
     )
 
+    // 积极肯定的选项文字（包含 Yes, Allow, Approve, Proceed, Continue, Resume, Restore, 允许, 确认, 恢复 等）
     private val AffirmativeRegex = Regex(
-        "(?i)^(?:yes\\b|allow\\b|approve\\b|proceed\\b|continue\\b|always\\b|允许|批准|同意|继续|确认|总是)"
+        "(?i)^(?:yes\b|allow\b|approve\b|proceed\b|continue\b|resume\b|restore\b|confirm\b|always\b|accept\b|apply\b|run\b|execute\b|ok\b|允许|批准|同意|继续|确认|总是|恢复|执行|确定|应用)"
     )
 
     fun init(context: Context) {
@@ -96,8 +99,8 @@ object AutoConfirmEngine {
             .toList()
         if (rawLines.isEmpty()) return null
 
-        // 1. 优先匹配后 6 行内的 [Y/n] 或 Press enter to continue
-        for (i in (rawLines.size - 1) downTo maxOf(0, rawLines.size - 6)) {
+        // 1. 优先匹配后 8 行内的 [Y/n] 或 Press enter to continue/confirm/resume
+        for (i in (rawLines.size - 1) downTo maxOf(0, rawLines.size - 8)) {
             val line = rawLines[i]
             if (YesDefaultRegex.containsMatchIn(line) || EnterPromptRegex.containsMatchIn(line)) {
                 val start = maxOf(0, i - 4)
@@ -105,19 +108,20 @@ object AutoConfirmEngine {
             }
         }
 
-        // 2. 匹配交互式多选菜单：当前选中了明确的积极选项 (Yes/允许/批准/继续) 且前文存在审批诉求
-        for (i in (rawLines.size - 1) downTo maxOf(0, rawLines.size - 12)) {
+        // 2. 匹配交互式多选菜单：当前选中了明确的积极选项 (Yes/允许/批准/继续/恢复)
+        for (i in (rawLines.size - 1) downTo maxOf(0, rawLines.size - 15)) {
             val match = OptionRegex.find(rawLines[i]) ?: continue
             val optionText = match.groupValues.getOrNull(1)?.trim().orEmpty()
-            if (!AffirmativeRegex.containsMatchIn(optionText)) return null
-
-            for (q in (i - 1) downTo maxOf(0, i - 25)) {
-                if (ActionRequestRegex.containsMatchIn(rawLines[q])) {
-                    val start = maxOf(0, q - 4)
-                    return normalizeSignature(rawLines.subList(start, i + 1).joinToString("\n"))
+            if (AffirmativeRegex.containsMatchIn(optionText)) {
+                for (q in (i - 1) downTo maxOf(0, i - 25)) {
+                    if (ActionRequestRegex.containsMatchIn(rawLines[q]) || rawLines[q].contains('?') || rawLines[q].contains('？')) {
+                        val start = maxOf(0, q - 4)
+                        return normalizeSignature(rawLines.subList(start, i + 1).joinToString("\n"))
+                    }
                 }
+                val start = maxOf(0, i - 4)
+                return normalizeSignature(rawLines.subList(start, i + 1).joinToString("\n"))
             }
-            return null
         }
 
         return null
@@ -134,60 +138,66 @@ object AutoConfirmEngine {
         fun onNeedsActionChanged(needsAction: Boolean)
     }
 
-    private class ScheduledTask(
-        val sessionId: String,
-        val promptSignature: String,
-        val future: ScheduledFuture<*>,
-        val deadlineUptimeMillis: Long,
+    private class SessionState(
+        var signature: String? = null,
+        var detectedAtUptime: Long = 0L,
+        var handledSignature: String? = null,
+        var awaitingResponse: Boolean = false,
+        var deadlineUptime: Long? = null,
     )
 
     private val sessions = ConcurrentHashMap<String, SessionCallback>()
-    private val activeTasks = ConcurrentHashMap<String, ScheduledTask>()
-    private val handledSignatures = ConcurrentHashMap<String, String>()
-    private val awaitingResponses = ConcurrentHashMap<String, Boolean>()
+    private val sessionStates = ConcurrentHashMap<String, SessionState>()
+
+    @Volatile var globalEnabled: Boolean = true
+    @Volatile var globalDelaySeconds: Int = 3
 
     init {
-        // 后台看门狗，每 500ms 扫描一次已连接会话，防止在息屏或极端休眠状态下漏掉未触发的确认
+        // 后台看门狗，每 300ms 扫描一次已连接会话，确保即便在熄屏或休眠下也不漏掉任何确认
         scheduler.scheduleWithFixedDelay({
             runCatching {
                 sessions.forEach { (id, callback) ->
                     if (callback.isConnected() && !callback.isClosed()) {
-                        checkSessionPrompt(id, callback, fromWatchdog = true)
+                        processSession(id, callback)
                     }
                 }
             }
-        }, 1_000L, 500L, TimeUnit.MILLISECONDS)
+        }, 500L, 300L, TimeUnit.MILLISECONDS)
     }
 
     fun registerSession(sessionId: String, callback: SessionCallback) {
         sessions[sessionId] = callback
+        sessionStates.putIfAbsent(sessionId, SessionState())
     }
 
     fun unregisterSession(sessionId: String) {
         sessions.remove(sessionId)
-        cancel(sessionId)
-        handledSignatures.remove(sessionId)
-        awaitingResponses.remove(sessionId)
+        sessionStates.remove(sessionId)
+        releaseWakeLock()
     }
 
     fun onOutputReceived(sessionId: String) {
         val callback = sessions[sessionId] ?: return
         scheduler.execute {
-            checkSessionPrompt(sessionId, callback, fromWatchdog = false)
+            processSession(sessionId, callback)
         }
     }
 
     fun markHandled(sessionId: String, signature: String?) {
-        if (signature != null) {
-            handledSignatures[sessionId] = signature
+        val state = sessionStates[sessionId] ?: return
+        state.handledSignature = signature ?: state.signature
+        state.deadlineUptime = null
+        state.awaitingResponse = false
+        releaseWakeLock()
+        sessions[sessionId]?.let { callback ->
+            mainHandler.post { callback.onAutoEnterCancelled() }
         }
-        cancel(sessionId)
     }
 
     fun cancel(sessionId: String) {
-        val task = activeTasks.remove(sessionId)
-        task?.future?.cancel(false)
-        awaitingResponses.remove(sessionId)
+        val state = sessionStates[sessionId] ?: return
+        state.deadlineUptime = null
+        state.awaitingResponse = false
         releaseWakeLock()
         sessions[sessionId]?.let { callback ->
             mainHandler.post { callback.onAutoEnterCancelled() }
@@ -196,103 +206,87 @@ object AutoConfirmEngine {
 
     fun pause(sessionId: String) {
         cancel(sessionId)
-        handledSignatures.remove(sessionId)
+        val state = sessionStates[sessionId] ?: return
+        state.handledSignature = null
+        state.signature = null
     }
 
-    @Volatile var globalEnabled: Boolean = true
-    @Volatile var globalDelaySeconds: Int = 3
-
-    private fun checkSessionPrompt(sessionId: String, callback: SessionCallback, fromWatchdog: Boolean) {
+    private fun processSession(sessionId: String, callback: SessionCallback) {
         if (!globalEnabled || !callback.isConnected() || callback.isClosed()) {
-            if (activeTasks.containsKey(sessionId)) cancel(sessionId)
+            val state = sessionStates[sessionId]
+            if (state?.deadlineUptime != null) {
+                state.deadlineUptime = null
+                mainHandler.post { callback.onAutoEnterCancelled() }
+            }
             return
         }
 
+        val state = sessionStates.getOrPut(sessionId) { SessionState() }
         val tail = callback.getVisibleTail()
-        val hasRequest = ActionRequestRegex.containsMatchIn(tail)
+        val detectedSig = detectPromptSignature(tail)
+        val hasRequest = detectedSig != null || ActionRequestRegex.containsMatchIn(tail)
+
         mainHandler.post { callback.onNeedsActionChanged(hasRequest) }
 
-        val signature = if (hasRequest) detectPromptSignature(tail) else null
-        val currentTask = activeTasks[sessionId]
-        val handled = handledSignatures[sessionId]
-
-        if (signature == null) {
-            if (currentTask != null) cancel(sessionId)
-            handledSignatures.remove(sessionId)
-            awaitingResponses.remove(sessionId)
+        if (detectedSig == null) {
+            // 终端提示已消失（例如上一条命令已继续执行或已被清屏）
+            if (state.deadlineUptime != null || state.signature != null) {
+                state.signature = null
+                state.handledSignature = null
+                state.awaitingResponse = false
+                state.deadlineUptime = null
+                mainHandler.post { callback.onAutoEnterCancelled() }
+            }
             return
         }
 
-        if (signature == handled) {
-            // 该 prompt 已处理或已被用户手动操作取消，等待 prompt 发生改变
+        if (detectedSig == state.handledSignature) {
+            // 该 prompt 已处理完毕或已被用户主动操作忽略
             return
         }
 
-        if (awaitingResponses[sessionId] == true) {
+        if (state.awaitingResponse) {
             // 已发送回车，等待远端响应变动
             return
         }
 
-        if (currentTask != null) {
-            if (currentTask.promptSignature != signature) {
-                // 提示内容发生变化，取消原任务并重新倒计时
-                cancel(sessionId)
-            } else {
-                // 签名一致且倒计时任务已在运行中，继续保持
-                return
+        val now = SystemClock.uptimeMillis()
+        val delayMillis = globalDelaySeconds.coerceIn(1, 30) * 1_000L
+
+        if (state.signature != detectedSig) {
+            // 首次检测到该提示或提示内容发生变化，开始倒计时
+            state.signature = detectedSig
+            state.detectedAtUptime = now
+            val deadline = now + delayMillis
+            state.deadlineUptime = deadline
+
+            // 持有 CPU WakeLock，防止手机在倒数期间进入 Deep Sleep
+            acquireWakeLock(delayMillis + 3_000L)
+
+            mainHandler.post {
+                callback.onAutoEnterScheduled(deadline, detectedSig)
             }
+            return
         }
 
-        // 启动后台倒计时调度
-        val delaySec = globalDelaySeconds.coerceIn(1, 30)
-        val delayMillis = delaySec * 1_000L
-        val deadline = SystemClock.uptimeMillis() + delayMillis
-
-        // 倒计时期间持有 CPU WakeLock，防止手机在倒数期间进入 Deep Sleep
-        acquireWakeLock(delayMillis + 3_000L)
-
-        val scheduledFuture = scheduler.schedule({
-            executeAutoEnter(sessionId, signature, callback)
-        }, delayMillis, TimeUnit.MILLISECONDS)
-
-        activeTasks[sessionId] = ScheduledTask(sessionId, signature, scheduledFuture, deadline)
-        mainHandler.post {
-            callback.onAutoEnterScheduled(deadline, signature)
-        }
-    }
-
-    private fun executeAutoEnter(sessionId: String, expectedSignature: String, callback: SessionCallback) {
-        try {
-            // 确保执行时持有 WakeLock 唤醒 CPU
-            acquireWakeLock(5_000L)
-            val currentTask = activeTasks[sessionId]
-            if (currentTask == null || currentTask.promptSignature != expectedSignature) return
-
-            if (!globalEnabled || !callback.isConnected() || callback.isClosed()) {
-                cancel(sessionId)
-                return
-            }
-
-            // 再次校验当前的终端提示是否仍然有效
-            val currentTail = callback.getVisibleTail()
-            val currentSignature = detectPromptSignature(currentTail)
-            if (currentSignature != expectedSignature) {
-                cancel(sessionId)
-                return
-            }
-
-            // 核心步骤：直接在后台向 SSH 发送回车字符！
-            val sent = callback.sendInput("\r")
-            activeTasks.remove(sessionId)
-            if (sent) {
-                awaitingResponses[sessionId] = true
-                handledSignatures[sessionId] = expectedSignature
-                mainHandler.post {
-                    callback.onAutoEnterTriggered(expectedSignature)
+        // signature 一致，检查倒计时是否到达
+        val elapsed = now - state.detectedAtUptime
+        if (elapsed >= delayMillis) {
+            // 倒计时已满，直接在后台发送回车！
+            try {
+                acquireWakeLock(5_000L)
+                val sent = callback.sendInput("\r")
+                if (sent) {
+                    state.handledSignature = detectedSig
+                    state.awaitingResponse = true
+                    state.deadlineUptime = null
+                    mainHandler.post {
+                        callback.onAutoEnterTriggered(detectedSig)
+                    }
                 }
+            } finally {
+                releaseWakeLock()
             }
-        } finally {
-            releaseWakeLock()
         }
     }
 }
