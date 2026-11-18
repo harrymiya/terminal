@@ -2161,9 +2161,24 @@ class App(Gtk.Window):
             def finish():
                 self.host_profile_sync_pending = False
                 if result is not None:
+                    current_hosts = self.data["hosts"]
+                    current_by_id = {host.get("id"): host for host in current_hosts}
+                    snapshot_ids = {host.get("id") for host in local_hosts}
+                    # The profile request used an older snapshot; retain directory edits made while it was running.
+                    reconciled = []
+                    for synced in result:
+                        source_id = next((old_id for old_id, new_id in remapped_ids.items() if new_id == synced.get("id")), synced.get("id"))
+                        latest = current_by_id.get(synced.get("id")) or current_by_id.get(source_id)
+                        merged = dict(synced)
+                        if latest is not None:
+                            merged["directories"] = latest.get("directories", merged.get("directories", []))
+                        reconciled.append(merged)
+                    reconciled_ids = {host.get("id") for host in reconciled}
+                    reconciled.extend(dict(host) for host in current_hosts
+                                      if host.get("id") not in snapshot_ids and host.get("id") not in reconciled_ids)
                     self.data["dirty_host_profiles"] = sorted(self.dirty_host_profiles)
-                    if result != self.data["hosts"]:
-                        self.data["hosts"] = result
+                    if reconciled != current_hosts:
+                        self.data["hosts"] = reconciled
                         self.refresh()
                     self.persist()
                     current_by_id = {host.get("id"): host for host in self.data["hosts"]}

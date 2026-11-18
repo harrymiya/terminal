@@ -617,10 +617,21 @@ private fun RemoteTerminalApp(store: LocalStore) {
                     lanPort = lanPort, externalPort = externalPort))
             }
             val uniqueResult = result.distinctBy { it.id }
+            val snapshotIds = localHosts.mapTo(mutableSetOf()) { it.id }
             withContext(Dispatchers.Main) {
-                if (uniqueResult != hosts.toList()) {
+                val latestHosts = hosts.toList()
+                val latestById = latestHosts.associateBy { it.id }
+                // A host profile poll may finish after the user edits directories; keep the live local list.
+                val reconciled = uniqueResult.map { synced ->
+                    val sourceId = idRemaps.entries.firstOrNull { it.value == synced.id }?.key ?: synced.id
+                    val current = latestById[synced.id] ?: latestById[sourceId]
+                    if (current != null) synced.copy(directories = current.directories) else synced
+                }.toMutableList()
+                val reconciledIds = reconciled.mapTo(mutableSetOf()) { it.id }
+                latestHosts.filter { it.id !in snapshotIds && it.id !in reconciledIds }.forEach { reconciled.add(it) }
+                if (reconciled != latestHosts) {
                     val oldSelected = selectedHostId
-                    saveHosts(uniqueResult)
+                    saveHosts(reconciled)
                     idRemaps[oldSelected]?.let { selectedHostId = it }
                 }
                 var dirtyProfilesChanged = false
@@ -636,7 +647,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 }
                 successfullyUploadedIds.forEach { if (dirtyHostProfiles.remove(it)) dirtyProfilesChanged = true }
                 if (dirtyProfilesChanged) store.saveDirtyHostProfiles(dirtyHostProfiles)
-                val canonicalById = uniqueResult.associateBy { it.id }
+                val canonicalById = reconciled.associateBy { it.id }
                 sessions.toList().forEach { session ->
                     val oldId = session.task.host.id
                     val canonicalId = idRemaps[oldId] ?: oldId
@@ -647,7 +658,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
                     }
                 }
             }
-            return uniqueResult
+            return withContext(Dispatchers.Main) { hosts.toList() }
         }
 
         fun closeSession(session: TerminalSessionState, syncDeletion: Boolean = true) {
