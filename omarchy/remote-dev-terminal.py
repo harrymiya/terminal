@@ -200,7 +200,7 @@ class App(Gtk.Window):
             .quota-value { color: #e8eef6; font-size: 12px; font-weight: bold; }
             .quota-value:backdrop { color: #e8eef6; }
             notebook { background-color: #0c1119; border: none; }
-            notebook > header { background-color: #101823; border-bottom: 1px solid #243546; min-height: 30px; padding: 0 4px; }
+            notebook > header { background-color: #101823; border-bottom: 1px solid #243546; min-height: 25px; padding: 0 4px; }
             notebook tab {
                 background-image: none;
                 background-color: #16222f;
@@ -211,7 +211,7 @@ class App(Gtk.Window):
                 padding: 0 12px;
                 margin: 0 2px;
                 box-shadow: none;
-                min-height: 30px;
+                min-height: 25px;
             }
             notebook tab:hover { background-image: none; background-color: #213548; color: #ffffff; }
             notebook tab:checked {
@@ -234,6 +234,7 @@ class App(Gtk.Window):
                 background-color: transparent;
                 border: none;
                 box-shadow: none;
+                min-height: 0;
                 padding: 1px 3px;
                 color: #8fa2b4;
             }
@@ -280,12 +281,11 @@ class App(Gtk.Window):
                 padding: 7px 10px; box-shadow: none; font-weight: bold;
             }
             .tile { background: #101823; }
-            .tile-header { padding: 0 8px; background: #16222f; border-bottom: 1px solid #243546; min-height: 30px; }
+            .tile-header { padding: 0 8px; background: #16222f; border-bottom: 1px solid #243546; min-height: 25px; }
             .running-outline { margin: 3px; }
-            .tile-header button { background-image: none; background-color: transparent; border: none; box-shadow: none; padding: 1px 3px; color: #8fa2b4; }
+            .tile-header button { background-image: none; background-color: transparent; border: none; box-shadow: none; min-height: 0; padding: 1px 3px; color: #8fa2b4; }
             .tile-header button:hover { background-image: none; background-color: rgba(255, 255, 255, 0.15); color: #ffffff; }
             .tile-focused .tile-header { background: #203e36; }
-            .session-running, .tile-header.session-running { background-color: #15466b; }
             paned.sidebar-paned > separator { background-color: #243546; min-width: 6px; }
             paned.sidebar-paned > separator:hover { background-color: #86dbb8; }
             paned.tile-paned > separator { background-color: #243546; margin: 0; padding: 0; }
@@ -795,17 +795,10 @@ class App(Gtk.Window):
         for session in self.sessions:
             terminal = session.get("terminal")
             outline = getattr(terminal, "_running_outline", None)
-            header = getattr(terminal, "_running_header", None)
             state = session.get("state")
             is_active = False
             if state:
                 is_active = (now - state.get("last_output_at", 0.0) < 2.5) or state.get("quota_busy", False)
-            if header:
-                context = header.get_style_context()
-                if is_active and not context.has_class("session-running"):
-                    context.add_class("session-running")
-                elif not is_active and context.has_class("session-running"):
-                    context.remove_class("session-running")
             if outline:
                 if is_active and not outline.get_visible():
                     outline.show()
@@ -837,7 +830,6 @@ class App(Gtk.Window):
                 indicator.set_show_percent(not self.tiled)
             session["terminal"]._tile_frame = None
             session["terminal"]._running_outline = None
-            session["terminal"]._running_header = None
         self.count_label.set_text(f"{len(self.sessions)} / 8")
         if not self.sessions:
             self.views.set_visible_child_name("empty")
@@ -857,7 +849,7 @@ class App(Gtk.Window):
                 frame.set_vexpand(True)
                 header = Gtk.Overlay()
                 header.get_style_context().add_class("tile-header")
-                header.set_size_request(-1, 30)
+                header.set_size_request(-1, 25)
                 header_bar = Gtk.Box()
                 header_bar.pack_start(session["label"], True, True, 0)
                 header.add(header_bar)
@@ -871,7 +863,6 @@ class App(Gtk.Window):
                 header.add_overlay(outline)
                 header.set_overlay_pass_through(outline, True)
                 session["terminal"]._running_outline = outline
-                session["terminal"]._running_header = header
                 frame.pack_start(header, False, False, 0)
                 frame.pack_start(session["terminal"], True, True, 0)
                 frames.append(frame)
@@ -884,7 +875,7 @@ class App(Gtk.Window):
             self.layout_button.hide()
             for session in self.sessions:
                 tab_box = Gtk.Overlay()
-                tab_box.set_size_request(-1, 30)
+                tab_box.set_size_request(-1, 25)
                 tab_bar = Gtk.Box()
                 tab_bar.pack_start(session["label"], True, True, 0)
                 tab_box.add(tab_bar)
@@ -898,7 +889,6 @@ class App(Gtk.Window):
                 tab_box.add_overlay(outline)
                 tab_box.set_overlay_pass_through(outline, True)
                 session["terminal"]._running_outline = outline
-                session["terminal"]._running_header = tab_box
                 tab_box.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
                 tab_box.connect("button-press-event", self.activate_tab_from_label, session["terminal"])
                 tab_box.show_all()
