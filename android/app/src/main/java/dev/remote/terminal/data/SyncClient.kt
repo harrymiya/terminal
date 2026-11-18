@@ -153,7 +153,15 @@ object SyncClient {
                 "PUT" -> mutation.optJSONObject("item")?.let { merged[id] = it }
             }
         }
-        return merged.values.toList()
+        val byWorkspace = linkedMapOf<Pair<String, String>, JSONObject>()
+        merged.values.forEach { item ->
+            val dir = item.optString("directory_path")
+            val cmd = item.optString("agent_command")
+            val key = if (dir.isNotBlank() && cmd.isNotBlank()) dir to cmd else "id" to item.optString("id")
+            byWorkspace.remove(key)
+            byWorkspace[key] = item
+        }
+        return byWorkspace.values.toList()
     }
 
     fun save(task: TerminalTask) {

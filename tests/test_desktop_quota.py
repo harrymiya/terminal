@@ -39,6 +39,9 @@ class DesktopQuotaTest(unittest.TestCase):
             parsed = dict((m, (pct, days)) for m, pct, days in core.quota_from_agy(sample))
             self.assertEqual(parsed[300], (75, "<1d"), folder)
             self.assertEqual(parsed[10080], (40, "3d"), folder)
+            remote_cmd = core.quota_remote_command("/home/dev/proj", "agy2", '-p "/usage" --output-format json')
+            self.assertIn("-l -i -c", remote_cmd, folder)
+            self.assertIn('agy2 -p "/usage" --output-format json', remote_cmd, folder)
 
 
 if __name__ == "__main__":

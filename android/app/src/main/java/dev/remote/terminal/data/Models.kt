@@ -269,6 +269,25 @@ class LocalStore(context: Context) {
         if (changed) check(preferences.edit().putString("pending_session_sync", updated.toString()).commit()) { "无法清理已同步会话变更" }
     }
 
+    @Synchronized
+    fun remapPendingSessionSyncHostIds(remaps: Map<String, String>) {
+        if (remaps.isEmpty()) return
+        val current = runCatching { JSONArray(preferences.getString("pending_session_sync", "[]")) }.getOrDefault(JSONArray())
+        val updated = JSONArray()
+        var changed = false
+        for (index in 0 until current.length()) {
+            val item = current.optJSONObject(index) ?: continue
+            val oldHostId = item.optString("host_id")
+            val canonicalId = remaps[oldHostId]
+            if (canonicalId != null && canonicalId != oldHostId) {
+                item.put("host_id", canonicalId)
+                changed = true
+            }
+            updated.put(item)
+        }
+        if (changed) check(preferences.edit().putString("pending_session_sync", updated.toString()).commit()) { "无法更新待同步会话主机标识" }
+    }
+
     fun loadSyncUsername(): String = preferences.getString("sync_username", "").orEmpty()
     fun loadSyncPassword(): String = vault.decrypt(preferences.getString("sync_password", null))
     fun saveSyncCredentials(username: String, password: String, remember: Boolean) {

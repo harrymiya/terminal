@@ -647,6 +647,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 }
                 successfullyUploadedIds.forEach { if (dirtyHostProfiles.remove(it)) dirtyProfilesChanged = true }
                 if (dirtyProfilesChanged) store.saveDirtyHostProfiles(dirtyHostProfiles)
+                if (idRemaps.isNotEmpty()) store.remapPendingSessionSyncHostIds(idRemaps)
                 val canonicalById = reconciled.associateBy { it.id }
                 sessions.toList().forEach { session ->
                     val oldId = session.task.host.id
@@ -736,16 +737,19 @@ private fun RemoteTerminalApp(store: LocalStore) {
 
         fun openSharedSession(host: HostProfile, item: org.json.JSONObject, activate: Boolean = true) {
             val id = item.getString("id")
-            // Session IDs are globally unique; a profile ID remap must not open a duplicate terminal.
-            val existing = sessions.indexOfFirst { it.task.id.replace("-", "") == id }
+            val path = item.getString("directory_path")
+            val command = item.getString("agent_command")
+            // Reuse an existing session matching either the session ID or the workspace (host, path, command).
+            val existing = sessions.indexOfFirst {
+                it.task.id.replace("-", "") == id ||
+                    (it.task.host.id == host.id && it.task.directory.path == path && it.task.agent.command == command)
+            }
             if (existing >= 0) { if (activate) { activePage = existing; route = AppRoute.TERMINAL }; return }
             val currentHost = hosts.firstOrNull { it.id == host.id } ?: return
-            val path = item.getString("directory_path")
             val directory = currentHost.directories.firstOrNull { it.path == path }
                 ?: ProjectDirectory(UUID.randomUUID().toString(), item.getString("directory_name"), path)
             val updatedHost = if (directory in currentHost.directories) currentHost else currentHost.copy(directories = currentHost.directories + directory)
             if (updatedHost != currentHost) saveHosts(hosts.map { if (it.id == currentHost.id) updatedHost else it })
-            val command = item.getString("agent_command")
             val agent = agents.firstOrNull { it.command == command }
                 ?: AgentPreset(UUID.randomUUID().toString(), item.getString("agent_name"), command, "✳").also { agents.add(it); store.saveAgents(agents) }
             val task = TerminalTask(id, updatedHost, directory, agent, item.getString("display_name"))
