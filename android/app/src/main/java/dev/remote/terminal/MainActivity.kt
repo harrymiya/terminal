@@ -803,8 +803,9 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 val resolvedHosts = if (syncEnabled) runCatching {
                     withContext(SyncClient.dispatcher) { syncHostProfiles() }
                 }.getOrElse { error ->
-                    if (error.message.orEmpty().contains("401") || error.message.orEmpty().contains("403")) {
-                        syncToken = ""; store.saveSyncSettings(syncUrl, ""); route = AppRoute.LOGIN
+                    val message = error.message.orEmpty()
+                    if (message.contains("401") || message.contains("unauthorized", ignoreCase = true)) {
+                        syncToken = ""; store.saveSyncSettings(syncUrl, "")
                     }
                     emptyList()
                 } else emptyList()
@@ -898,10 +899,9 @@ private fun RemoteTerminalApp(store: LocalStore) {
                         }
                     }.onFailure { error ->
                         val message = error.message.orEmpty()
-                        if (message.contains("401") || message.contains("403")) {
+                        if (message.contains("401") || message.contains("unauthorized", ignoreCase = true)) {
                             syncToken = ""
                             store.saveSyncSettings(syncUrl, "")
-                            route = AppRoute.LOGIN
                         } else {
                             snackbars.showSnackbar("${host.name} 同步失败：$message")
                         }

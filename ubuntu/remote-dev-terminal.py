@@ -232,7 +232,7 @@ class App(Gtk.Window):
             .quota-value { color: #e8eef6; font-size: 12px; font-weight: bold; }
             .quota-value:backdrop { color: #e8eef6; }
             notebook { background-color: #0c1119; border: none; }
-            notebook > header { background-color: #101823; border-bottom: 1px solid #243546; min-height: 34px; padding: 0 4px; }
+            notebook > header { background-color: #101823; border-bottom: 1px solid #243546; min-height: 33px; padding: 0 4px; }
             notebook tab {
                 background-image: none;
                 background-color: #16222f;
@@ -310,49 +310,6 @@ class App(Gtk.Window):
             .tile-header button:hover { background-image: none; background-color: rgba(255, 255, 255, 0.15); color: #ffffff; }
             .tile-focused { box-shadow: inset 0 0 0 2px #86dbb8; }
             .tile-focused .tile-header { background: #203e36; border-bottom: 1px solid #86dbb8; }
-            @keyframes orange-glow-breath {
-                0% {
-                    opacity: 0.3;
-                    background-color: rgba(255, 140, 0, 0.4);
-                    box-shadow: 0 0 4px rgba(255, 140, 0, 0.4), 0 2px 10px rgba(255, 140, 0, 0.25);
-                }
-                50% {
-                    opacity: 1.0;
-                    background-color: #ffaa22;
-                    box-shadow: 0 0 10px #ffaa22, 0 3px 20px rgba(255, 160, 0, 0.9);
-                }
-                100% {
-                    opacity: 0.3;
-                    background-color: rgba(255, 140, 0, 0.4);
-                    box-shadow: 0 0 4px rgba(255, 140, 0, 0.4), 0 2px 10px rgba(255, 140, 0, 0.25);
-                }
-            }
-            .tile-glow-bar {
-                min-height: 2px;
-                margin: 0 -8px;
-                background-color: #ff9800;
-                box-shadow: 0 0 8px #ff9800, 0 2px 14px rgba(255, 152, 0, 0.6);
-                animation: orange-glow-breath 1.8s infinite ease-in-out;
-            }
-            .tile-focused .tile-glow-bar {
-                background-color: #ffaa22;
-                box-shadow: 0 0 12px #ffaa22, 0 3px 20px rgba(255, 170, 34, 0.9);
-            }
-            .tile-running .tile-header {
-                border-bottom: 1px solid #ff9800;
-                box-shadow: 0 2px 12px rgba(255, 152, 0, 0.3);
-            }
-            .tile-running.tile-focused .tile-header {
-                border-bottom: 1px solid #ffaa22;
-                box-shadow: 0 3px 18px rgba(255, 170, 34, 0.55);
-            }
-            .tab-glow-bar {
-                min-height: 2px;
-                margin: 0 -12px;
-                background-color: #ff9800;
-                box-shadow: 0 0 8px #ff9800, 0 2px 14px rgba(255, 152, 0, 0.7);
-                animation: orange-glow-breath 1.8s infinite ease-in-out;
-            }
             paned.sidebar-paned > separator { background-color: #243546; min-width: 4px; }
             paned.sidebar-paned > separator:hover { background-color: #86dbb8; }
             paned.tile-paned > separator { background-color: #243546; margin: 0; padding: 0; }
@@ -566,7 +523,8 @@ class App(Gtk.Window):
         self.refresh_all_shared()
         self.sync_poll_source = None
         self.configure_sync_polling()
-        GLib.timeout_add(50, self._animate_running_headers)
+        self._running_highlight_on = False
+        GLib.timeout_add(500, self._animate_running_headers)
         self.scale_layout(self)
         self.connect("destroy", Gtk.main_quit)
 
@@ -859,38 +817,32 @@ class App(Gtk.Window):
         self.set_initial_positions(root, total_w, total_h)
         return root
 
+    def draw_running_outline(self, widget, cr):
+        allocation = widget.get_allocation()
+        width, height = allocation.width, allocation.height
+        if width > 2 and height > 2:
+            cr.set_source_rgb(0.16, 0.65, 1.0)
+            cr.set_line_width(2.0)
+            cr.set_dash([6.0, 4.0], 0.0)
+            cr.rectangle(1.0, 1.0, width - 2.0, height - 2.0)
+            cr.stroke()
+        return False
+
     def _animate_running_headers(self):
         now = time.monotonic()
+        self._running_highlight_on = not self._running_highlight_on
         for session in self.sessions:
-            glow = getattr(session.get("terminal"), "_glow_bar", None)
-            tab_glow = getattr(session.get("terminal"), "_tab_glow_bar", None)
-            frame = getattr(session.get("terminal"), "_tile_frame", None)
+            outline = getattr(session.get("terminal"), "_running_outline", None)
             state = session.get("state")
             is_active = False
             if state:
                 is_active = (now - state.get("last_output_at", 0.0) < 2.5) or state.get("quota_busy", False)
-            if glow:
-                if is_active:
-                    if not glow.get_visible():
-                        glow.show()
-                else:
-                    if glow.get_visible():
-                        glow.hide()
-            if tab_glow:
-                if is_active:
-                    if not tab_glow.get_visible():
-                        tab_glow.show()
-                else:
-                    if tab_glow.get_visible():
-                        tab_glow.hide()
-            if frame:
-                ctx = frame.get_style_context()
-                if is_active:
-                    if not ctx.has_class("tile-running"):
-                        ctx.add_class("tile-running")
-                else:
-                    if ctx.has_class("tile-running"):
-                        ctx.remove_class("tile-running")
+            if outline:
+                visible = is_active and self._running_highlight_on
+                if visible and not outline.get_visible():
+                    outline.show()
+                elif not visible and outline.get_visible():
+                    outline.hide()
         return True
 
     def rebuild_view(self, selected=None):
@@ -914,8 +866,7 @@ class App(Gtk.Window):
             for indicator in session.get("quota_indicators", ()):
                 indicator.set_show_percent(not self.tiled)
             session["terminal"]._tile_frame = None
-            session["terminal"]._glow_bar = None
-            session["terminal"]._tab_glow_bar = None
+            session["terminal"]._running_outline = None
         self.count_label.set_text(f"{len(self.sessions)} / 8")
         if not self.sessions:
             self.views.set_visible_child_name("empty")
@@ -938,15 +889,14 @@ class App(Gtk.Window):
                 header_bar = Gtk.Box()
                 header_bar.pack_start(session["label"], True, True, 0)
                 header.add(header_bar)
-                glow_bar = Gtk.Box()
-                glow_bar.get_style_context().add_class("tile-glow-bar")
-                glow_bar.set_no_show_all(True)
-                glow_bar.hide()
-                glow_bar.set_halign(Gtk.Align.FILL)
-                glow_bar.set_valign(Gtk.Align.END)
-                glow_bar.set_size_request(-1, 2)
-                header.add_overlay(glow_bar)
-                session["terminal"]._glow_bar = glow_bar
+                outline = Gtk.DrawingArea()
+                outline.set_no_show_all(True)
+                outline.set_sensitive(False)
+                outline.hide()
+                outline.connect("draw", self.draw_running_outline)
+                header.add_overlay(outline)
+                header.set_overlay_pass_through(outline, True)
+                session["terminal"]._running_outline = outline
                 frame.pack_start(header, False, False, 0)
                 frame.pack_start(session["terminal"], True, True, 0)
                 frames.append(frame)
@@ -962,15 +912,14 @@ class App(Gtk.Window):
                 tab_bar = Gtk.Box()
                 tab_bar.pack_start(session["label"], True, True, 0)
                 tab_box.add(tab_bar)
-                tab_glow = Gtk.Box()
-                tab_glow.get_style_context().add_class("tab-glow-bar")
-                tab_glow.set_no_show_all(True)
-                tab_glow.hide()
-                tab_glow.set_halign(Gtk.Align.FILL)
-                tab_glow.set_valign(Gtk.Align.END)
-                tab_glow.set_size_request(-1, 2)
-                tab_box.add_overlay(tab_glow)
-                session["terminal"]._tab_glow_bar = tab_glow
+                outline = Gtk.DrawingArea()
+                outline.set_no_show_all(True)
+                outline.set_sensitive(False)
+                outline.hide()
+                outline.connect("draw", self.draw_running_outline)
+                tab_box.add_overlay(outline)
+                tab_box.set_overlay_pass_through(outline, True)
+                session["terminal"]._running_outline = outline
                 tab_box.show_all()
                 self.tabs.append_page(session["terminal"], tab_box)
             self.tabs.show_all()
@@ -1881,7 +1830,7 @@ class App(Gtk.Window):
                 profile = sync_data_request(self.data, "GET", "/v1/hosts/" + sync_host_key(snapshot) + "/state")
                 result = (sessions, workspaces, agents, profile)
             except Exception as exc:
-                if getattr(exc, "code", None) in (401, 403):
+                if getattr(exc, "code", None) == 401:
                     GLib.idle_add(self.expire_sync_token, request_token)
                 result = "同步失败：" + (str(exc) or type(exc).__name__)
             def finish():
@@ -2060,7 +2009,7 @@ class App(Gtk.Window):
     def poll_shared(self):
         if not self.data.get("auto_sync_enabled", False):
             return True
-        self.refresh_all_shared()
+        self.refresh_all_shared(prompt_for_login=False)
         return True
 
     def configure_sync_polling(self):
@@ -2233,7 +2182,9 @@ class App(Gtk.Window):
                     seen_ids.add(host.get("id"))
                     unique.append(host)
                 result = unique
-            except Exception:
+            except Exception as exc:
+                if getattr(exc, "code", None) == 401:
+                    GLib.idle_add(self.expire_sync_token, config.get("sync_token"))
                 result = None
             def finish():
                 self.host_profile_sync_pending = False
@@ -2292,7 +2243,9 @@ class App(Gtk.Window):
                 self.data["sync_username"] = account.get("username", "")
                 self.data["sync_is_admin"] = account.get("is_admin", False)
                 return True
-            except Exception:
+            except Exception as exc:
+                if getattr(exc, "code", None) != 401:
+                    return False
                 self.data["sync_token"] = ""
         dialog = Gtk.Dialog(title="同步账号登录", transient_for=self, modal=True)
         dialog.add_button("取消", Gtk.ResponseType.CANCEL)
@@ -2340,17 +2293,25 @@ class App(Gtk.Window):
         if expired_token and self.data.get("sync_token") == expired_token:
             self.data["sync_token"] = ""
             self.persist()
-            self.ensure_sync_login()
+            for host in self.data["hosts"]:
+                self.shared_by_host[self.shared_host_key(host)] = "同步登录已失效，请手动重新登录"
+            self.update_sync_status()
         return False
 
-    def refresh_all_shared(self):
+    def refresh_all_shared(self, prompt_for_login=True):
         self.shared_by_host = {}
         if not self.data.get("auto_sync_enabled", False):
             self.refresh_sessions_after_host_profiles = False
             self.update_sync_status()
             return
-        if self.data.get("sync_url") and not self.ensure_sync_login():
-            return
+        if self.data.get("sync_url"):
+            if prompt_for_login:
+                if not self.ensure_sync_login(): return
+            elif not self.data.get("sync_token"):
+                for host in self.data["hosts"]:
+                    self.shared_by_host[self.shared_host_key(host)] = "请手动重新登录同步账号"
+                self.update_sync_status()
+                return
         if not self.data.get("sync_url"):
             self.update_sync_status()
             return
