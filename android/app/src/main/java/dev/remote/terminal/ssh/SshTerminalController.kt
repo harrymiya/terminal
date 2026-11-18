@@ -166,19 +166,52 @@ class SshTerminalController(
     fun approveHostKey(approved: Boolean) { hostKeyDecision?.invoke(approved) }
     @Volatile private var hostKeyDecision: ((Boolean) -> Unit)? = null
 
-    fun close() {
+    fun close(terminateRemote: Boolean = false) {
         running.set(false)
         pageScrollExecutor.shutdownNow()
         outgoing.clear()
         retrySignal.release()
         val connection = activeConnection.getAndSet(null)
-        runCatching { channelRef.getAndSet(null)?.disconnect() }
-        runCatching { sessionRef.getAndSet(null)?.disconnect() }
-        connection?.let {
-            runCatching { it.channel.disconnect() }
-            runCatching { it.session.disconnect() }
+        val activeChannel = channelRef.getAndSet(null)
+        val activeSession = sessionRef.getAndSet(null)
+        runCatching { activeChannel?.disconnect() }
+        runCatching { connection?.channel?.disconnect() }
+        val sessionsToClose = listOfNotNull(activeSession, connection?.session).distinct()
+        if (terminateRemote && sessionsToClose.any { it.isConnected }) {
+            val remoteSession = sessionsToClose.firstOrNull { it.isConnected }
+            Thread({
+                try {
+                    if (remoteSession != null && remoteSession.isConnected) {
+                        val exec = remoteSession.openChannel("exec") as ChannelExec
+                        try {
+                            exec.setCommand(buildTerminateCommand())
+                            exec.connect(5_000)
+                            val deadline = SystemClock.elapsedRealtime() + 3_000
+                            while (!exec.isClosed && SystemClock.elapsedRealtime() < deadline) {
+                                Thread.sleep(30)
+                            }
+                        } finally {
+                            runCatching { exec.disconnect() }
+                        }
+                    }
+                } catch (_: Exception) {
+                } finally {
+                    sessionsToClose.forEach { runCatching { it.disconnect() } }
+                }
+            }, "tmux-close-${task.id.take(8)}").apply { isDaemon = true; start() }
+        } else {
+            sessionsToClose.forEach { runCatching { it.disconnect() } }
         }
         onStatus("已断开")
+    }
+
+    private fun buildTerminateCommand(): String {
+        val sessionName = "rdt_${task.id.replace("-", "").take(18)}"
+        return "if command -v tmux >/dev/null 2>&1 && tmux has-session -t $sessionName 2>/dev/null; then " +
+            "for p in \$(tmux list-panes -t $sessionName -F '#{pane_pid}' 2>/dev/null); do " +
+            "pkill -TERM -P \"\$p\" 2>/dev/null || true; kill -TERM \"\$p\" 2>/dev/null || true; " +
+            "done; tmux kill-session -t $sessionName 2>/dev/null || true; " +
+            "elif command -v screen >/dev/null 2>&1; then screen -S $sessionName -X quit 2>/dev/null || true; fi"
     }
 
     private fun quotaLoop(connection: ActiveConnection) {

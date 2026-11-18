@@ -670,7 +670,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
             AutoConfirmEngine.unregisterSession(session.task.id)
             session.cancelAutoEnter()
             TerminalConnectionRegistry.unregister(session.task.id, session.controller)
-            session.controller.close()
+            session.controller.close(terminateRemote = true)
             sessions.removeAt(index)
             if (sessions.isEmpty()) {
                 route = AppRoute.HOME
