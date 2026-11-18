@@ -79,6 +79,19 @@ class SyncServerTest(unittest.TestCase):
             self.assertNotIn("new-session", command[-1])
             core.sync_request(host, "DELETE", item["id"])
 
+    def test_session_add_and_delete_converge_between_clients(self):
+        item = {"id": "d" * 32, "directory_path": "/work", "directory_name": "work", "agent_name": "Shell", "agent_command": "bash -l", "display_name": "work"}
+        base = {"sync_url": "http://%s:%d" % self.server.server_address, "sync_token": self.token, "id": "shared-host", "address": "127.0.0.1", "port": 2200, "username": "dev"}
+        creator, receiver = dict(base), dict(base)
+        spec = importlib.util.spec_from_file_location("ubuntu_session_sync_core", Path(__file__).resolve().parents[1] / "ubuntu/core.py")
+        core = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(core)
+
+        core.sync_request(creator, "PUT", item["id"], item, host=creator)
+        self.assertEqual(core.sync_request(receiver, "GET", host=receiver)["sessions"], [item])
+        core.sync_request(receiver, "DELETE", item["id"], host=receiver)
+        self.assertEqual(core.sync_request(creator, "GET", host=creator)["sessions"], [])
+
     def test_host_profiles_require_ports_and_merge_duplicate_ids(self):
         def profile(host_id, name="dev", port=2202):
             return {

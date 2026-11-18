@@ -217,6 +217,58 @@ class LocalStore(context: Context) {
         preferences.edit().putInt("sync_interval_seconds", seconds.coerceIn(5, 300)).apply()
     }
 
+    @Synchronized
+    fun enqueueSessionSync(task: TerminalTask, method: String, item: JSONObject? = null) {
+        require(method == "PUT" || method == "DELETE")
+        val current = runCatching { JSONArray(preferences.getString("pending_session_sync", "[]")) }.getOrDefault(JSONArray())
+        val account = loadSyncUsername().trim().lowercase()
+        val sessionId = task.id.replace("-", "")
+        val retained = (0 until current.length()).mapNotNull { current.optJSONObject(it) }
+            .filterNot { pending ->
+                pending.optString("host_id") == task.host.id &&
+                    pending.optString("username") == task.host.username &&
+                    pending.optString("session_id") == sessionId &&
+                    pending.optString("account").lowercase() == account
+            }
+        val updated = JSONArray()
+        retained.forEach { updated.put(it) }
+        updated.put(JSONObject()
+            .put("mutation_id", java.util.UUID.randomUUID().toString())
+            .put("account", account)
+            .put("host_id", task.host.id)
+            .put("username", task.host.username)
+            .put("session_id", sessionId)
+            .put("method", method)
+            .put("item", item))
+        check(preferences.edit().putString("pending_session_sync", updated.toString()).commit()) { "无法保存待同步会话变更" }
+    }
+
+    @Synchronized
+    fun loadPendingSessionSync(accountName: String, host: HostProfile): List<JSONObject> {
+        val account = accountName.trim().lowercase()
+        val current = runCatching { JSONArray(preferences.getString("pending_session_sync", "[]")) }.getOrDefault(JSONArray())
+        return (0 until current.length()).mapNotNull { current.optJSONObject(it) }
+            .filter { pending ->
+                pending.optString("host_id") == host.id &&
+                    pending.optString("username") == host.username &&
+                    pending.optString("account").lowercase() in setOf("", account)
+            }
+            .map { JSONObject(it.toString()) }
+    }
+
+    @Synchronized
+    fun clearPendingSessionSync(mutationIds: Set<String>) {
+        if (mutationIds.isEmpty()) return
+        val current = runCatching { JSONArray(preferences.getString("pending_session_sync", "[]")) }.getOrDefault(JSONArray())
+        val updated = JSONArray()
+        var changed = false
+        for (index in 0 until current.length()) {
+            val item = current.optJSONObject(index) ?: continue
+            if (item.optString("mutation_id") in mutationIds) changed = true else updated.put(item)
+        }
+        if (changed) check(preferences.edit().putString("pending_session_sync", updated.toString()).commit()) { "无法清理已同步会话变更" }
+    }
+
     fun loadSyncUsername(): String = preferences.getString("sync_username", "").orEmpty()
     fun loadSyncPassword(): String = vault.decrypt(preferences.getString("sync_password", null))
     fun saveSyncCredentials(username: String, password: String, remember: Boolean) {

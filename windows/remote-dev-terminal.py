@@ -1792,23 +1792,32 @@ class App(Gtk.Window):
         pending_key = (key, request_token)
         if pending_key in self.sync_pending:
             return
+        pending_mutations = self.pending_session_sync_for(host)
         if key in self.workspace_dirty:
             self.push_workspace_list(host)
         workspace_version = self.workspace_versions.get(key, 0)
         self.sync_pending.add(pending_key)
+        pushed_mutations = []
         def worker():
             try:
-                result = sync_request(self.data, "GET", host=snapshot)["sessions"]
+                sessions = sync_request(self.data, "GET", host=snapshot)["sessions"]
+                for mutation in pending_mutations:
+                    try:
+                        sync_request(self.data, mutation["method"], mutation["session_id"], mutation.get("item"), host=snapshot)
+                        pushed_mutations.append(mutation)
+                    except Exception:
+                        pass
                 workspaces = sync_data_request(self.data, "GET", "/v1/workspaces/" + sync_host_key(snapshot))
                 agents = sync_data_request(self.data, "GET", "/v1/agents/account")
                 profile = sync_data_request(self.data, "GET", "/v1/hosts/" + sync_host_key(snapshot) + "/state")
-                result = (result, workspaces, agents, profile)
+                result = (sessions, workspaces, agents, profile)
             except Exception as exc:
                 if getattr(exc, "code", None) in (401, 403):
                     GLib.idle_add(self.expire_sync_token, request_token)
                 result = "同步失败，请检查服务地址和登录账号"
             def finish():
                 self.sync_pending.discard(pending_key)
+                self.clear_session_sync_mutations(pushed_mutations)
                 if any(self.shared_host_key(h) == key for h in self.data["hosts"]):
                     if isinstance(result, tuple):
                         sessions, workspaces, agents, profile = result
@@ -1857,12 +1866,14 @@ class App(Gtk.Window):
                             self.push_host_state(local_host)
                         if changed:
                             self.persist(); self.refresh()
-                        self.shared_by_host[key] = sessions
                     else:
                         sessions = None
                         self.shared_by_host[key] = result
                     if isinstance(sessions, list):
+                        overlay = pending_mutations + pushed_mutations + self.pending_session_sync_for(host)
+                        sessions = self.merge_session_sync_items(sessions, overlay)
                         remote_ids = {item.get("id") for item in sessions}
+                        self.shared_by_host[key] = sessions
                         for session in list(self.sessions):
                             session_host = self.canonical_session_host(session.get("host", {}))
                             if self.shared_host_key(session_host) == key and session.get("id") not in remote_ids and time.monotonic() - session.get("started_at", 0) > 15:
@@ -2252,18 +2263,58 @@ class App(Gtk.Window):
         for host in self.data["hosts"]:
             self.shared_by_host[self.shared_host_key(host)] = "正在同步…"
 
-    def sync_async(self, host, method, session_id, item=None):
-        if not self.data.get("sync_url") or not self.data.get("auto_sync_enabled", False):
+    def queue_session_sync(self, host, method, session_id, item=None):
+        if not host or method not in ("PUT", "DELETE") or not session_id:
             return
+        pending = self.data.setdefault("pending_session_sync", [])
+        entry = {
+            "mutation_id": uuid.uuid4().hex,
+            "account": str(self.data.get("sync_username", "")).strip().casefold(),
+            "host_id": str(host.get("id", "")),
+            "username": str(host.get("username", "")),
+            "session_id": str(session_id).replace("-", ""),
+            "method": method,
+            "item": dict(item) if item is not None else None,
+        }
+        pending[:] = [old for old in pending if not (
+            old.get("host_id") == entry["host_id"] and old.get("username") == entry["username"]
+            and old.get("session_id") == entry["session_id"]
+            and old.get("account", "").casefold() == entry["account"]
+        )]
+        pending.append(entry)
+        self.persist()
+
+    def pending_session_sync_for(self, host):
+        account = str(self.data.get("sync_username", "")).strip().casefold()
+        return [dict(item) for item in self.data.get("pending_session_sync", [])
+                if item.get("host_id") == str(host.get("id", ""))
+                and item.get("username") == str(host.get("username", ""))
+                and item.get("account", "").casefold() in ("", account)]
+
+    @staticmethod
+    def merge_session_sync_items(items, mutations):
+        merged = {item.get("id"): item for item in items if item.get("id")}
+        for mutation in mutations:
+            session_id = mutation.get("session_id")
+            if mutation.get("method") == "DELETE":
+                merged.pop(session_id, None)
+            elif mutation.get("method") == "PUT" and mutation.get("item"):
+                merged[session_id] = mutation["item"]
+        return list(merged.values())
+
+    def clear_session_sync_mutations(self, mutations):
+        mutation_ids = {item.get("mutation_id") for item in mutations}
+        pending = self.data.get("pending_session_sync", [])
+        updated = [item for item in pending if item.get("mutation_id") not in mutation_ids]
+        if len(updated) != len(pending):
+            self.data["pending_session_sync"] = updated
+            self.persist()
+        return False
+
+    def sync_async(self, host, method, session_id, item=None):
         session = next((item for item in self.sessions if item.get("id") == session_id), None)
         host = session.get("host") if session else self.canonical_session_host(host)
-        def worker():
-            try:
-                sync_request(self.data, method, session_id, item, host=host)
-                GLib.idle_add(self.refresh_host_shared, host)
-            except Exception as exc:
-                GLib.idle_add(self.message, "会话同步失败", str(exc))
-        self.sync_executor.submit(worker)
+        self.queue_session_sync(host, method, session_id, item)
 
     def show_shared_sessions(self, _button):
         if not self.data.get("auto_sync_enabled", False):
@@ -2273,9 +2324,20 @@ class App(Gtk.Window):
         if not host or not self.data.get("sync_url"):
             self.message("共享会话", "请先在系统设置中填写同步服务地址并登录账号。")
             return
+        pending_mutations = self.pending_session_sync_for(host)
         def worker():
             try:
                 items = sync_request(self.data, "GET", host=host)["sessions"]
+                pushed_mutations = []
+                for mutation in pending_mutations:
+                    try:
+                        sync_request(self.data, mutation["method"], mutation["session_id"], mutation.get("item"), host=host)
+                        pushed_mutations.append(mutation)
+                    except Exception:
+                        pass
+                items = self.merge_session_sync_items(items, pending_mutations + self.pending_session_sync_for(host))
+                if pushed_mutations:
+                    GLib.idle_add(self.clear_session_sync_mutations, pushed_mutations)
             except Exception as exc:
                 GLib.idle_add(self.message, "读取共享会话失败", str(exc))
                 return

@@ -11,6 +11,12 @@ import java.util.concurrent.Executors
 
 class SyncConflictException(val revision: Int, val body: JSONObject) : Exception("版本冲突(409)")
 
+data class SessionSyncBatch(
+    val remoteItems: List<JSONObject>,
+    val completedMutationIds: Set<String>,
+    val failedMutations: Int,
+)
+
 object SyncClient {
     val dispatcher = Executors.newSingleThreadExecutor { runnable -> Thread(runnable, "session-sync").apply { isDaemon = true } }.asCoroutineDispatcher()
     @Volatile private var syncUrl: String = ""
@@ -112,13 +118,53 @@ object SyncClient {
         return (0 until array.length()).map { array.getJSONObject(it) }
     }
 
+    fun syncSessions(host: HostProfile, pending: List<JSONObject>): SessionSyncBatch {
+        val remoteItems = list(host)
+        val completed = mutableSetOf<String>()
+        var failures = 0
+        pending.forEach { mutation ->
+            val sessionId = mutation.optString("session_id").replace("-", "")
+            val mutationId = mutation.optString("mutation_id")
+            try {
+                when (mutation.optString("method")) {
+                    "PUT" -> {
+                        val item = mutation.optJSONObject("item") ?: error("missing session payload")
+                        request(host, "PUT", sessionPath(host) + "/$sessionId", item)
+                    }
+                    "DELETE" -> request(host, "DELETE", sessionPath(host) + "/$sessionId")
+                    else -> error("invalid session mutation")
+                }
+                if (mutationId.isNotBlank()) completed.add(mutationId)
+            } catch (_: Exception) {
+                failures += 1
+            }
+        }
+        return SessionSyncBatch(remoteItems, completed, failures)
+    }
+
+    fun mergeSessionItems(remoteItems: List<JSONObject>, mutations: List<JSONObject>): List<JSONObject> {
+        val merged = linkedMapOf<String, JSONObject>()
+        remoteItems.forEach { item -> item.optString("id").takeIf(String::isNotBlank)?.let { merged[it] = item } }
+        mutations.forEach { mutation ->
+            val id = mutation.optString("session_id")
+            if (id.isBlank()) return@forEach
+            when (mutation.optString("method")) {
+                "DELETE" -> merged.remove(id)
+                "PUT" -> mutation.optJSONObject("item")?.let { merged[id] = it }
+            }
+        }
+        return merged.values.toList()
+    }
+
     fun save(task: TerminalTask) {
         val id = task.id.replace("-", "")
-        val item = JSONObject().put("id", id).put("directory_path", task.directory.path)
-            .put("directory_name", task.directory.name).put("agent_name", task.agent.name)
-            .put("agent_command", task.agent.command).put("display_name", task.displayName)
+        val item = sessionItem(task)
         request(task.host, "PUT", sessionPath(task.host) + "/$id", item)
     }
+
+    fun sessionItem(task: TerminalTask): JSONObject = JSONObject().put("id", task.id.replace("-", ""))
+        .put("directory_path", task.directory.path).put("directory_name", task.directory.name)
+        .put("agent_name", task.agent.name).put("agent_command", task.agent.command).put("display_name", task.displayName)
 
     fun delete(task: TerminalTask) { request(task.host, "DELETE", sessionPath(task.host) + "/${task.id.replace("-", "")}") }
 

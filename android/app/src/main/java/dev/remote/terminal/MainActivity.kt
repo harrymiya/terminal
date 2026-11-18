@@ -650,15 +650,11 @@ private fun RemoteTerminalApp(store: LocalStore) {
             return uniqueResult
         }
 
-        fun closeSession(session: TerminalSessionState) {
+        fun closeSession(session: TerminalSessionState, syncDeletion: Boolean = true) {
             val index = sessions.indexOf(session)
             if (index < 0) return
             sessionStore.remove(session.task.id)
-            if (autoSyncEnabled && syncUrl.isNotBlank() && syncToken.isNotBlank()) scope.launch {
-                runCatching { withContext(SyncClient.dispatcher) { SyncClient.delete(session.task) } }
-                    .onSuccess { startupShared = startupShared.filterNot { it.first.id == session.task.host.id && it.second.optString("id") == session.task.id.replace("-", "") } }
-                    .onFailure { snackbars.showSnackbar("同步关闭失败：${it.message}") }
-            }
+            if (syncDeletion) store.enqueueSessionSync(session.task, "DELETE")
             AutoConfirmEngine.unregisterSession(session.task.id)
             session.cancelAutoEnter()
             TerminalConnectionRegistry.unregister(session.task.id, session.controller)
@@ -684,10 +680,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 if (same == 0) agent.name else "${agent.name} ${same + 1}")
             if (restoredTask == null) {
                 sessionStore.save(task)
-                if (autoSyncEnabled && syncUrl.isNotBlank() && syncToken.isNotBlank()) scope.launch {
-                    runCatching { withContext(SyncClient.dispatcher) { SyncClient.save(task) } }
-                        .onFailure { snackbars.showSnackbar("会话同步失败：${it.message}") }
-                }
+                store.enqueueSessionSync(task, "PUT", SyncClient.sessionItem(task))
             }
             val state = TerminalSessionState(task, mainHandler, appContext)
             state.controller = SshTerminalController(
@@ -750,13 +743,30 @@ private fun RemoteTerminalApp(store: LocalStore) {
             if (activate) { activePage = sessions.lastIndex; route = AppRoute.TERMINAL }
         }
 
+        suspend fun syncSharedSessions(host: HostProfile) {
+            val account = store.loadSyncUsername()
+            val pendingBeforePull = store.loadPendingSessionSync(account, host)
+            val batch = withContext(SyncClient.dispatcher) { SyncClient.syncSessions(host, pendingBeforePull) }
+            val pendingAfterPush = store.loadPendingSessionSync(account, host)
+            val mergedPending = pendingBeforePull + pendingAfterPush
+            val items = SyncClient.mergeSessionItems(batch.remoteItems, mergedPending)
+            startupShared = startupShared.filterNot { it.first.id == host.id } + items.map { host to it }
+            val remoteIds = items.map { it.optString("id") }.toSet()
+            val hadSessions = sessions.isNotEmpty()
+            sessions.toList().filter { session ->
+                session.task.host.id == host.id && session.task.id.replace("-", "") !in remoteIds &&
+                    android.os.SystemClock.elapsedRealtime() - session.startedAt > 15_000L
+            }.forEach { closeSession(it, syncDeletion = false) }
+            items.forEach { item -> openSharedSession(host, item, activate = false) }
+            if (!hadSessions && sessions.isNotEmpty() && route == AppRoute.HOME) { activePage = 0; route = AppRoute.TERMINAL }
+            if (sharedHost?.id == host.id && sharedSessions != null) sharedSessions = items
+            store.clearPendingSessionSync(batch.completedMutationIds)
+        }
+
         fun refreshShared(host: HostProfile) {
             if (!autoSyncEnabled) return
             scope.launch {
-                runCatching { withContext(SyncClient.dispatcher) { SyncClient.list(host) } }
-                    .onSuccess { items ->
-                        startupShared = startupShared.filterNot { it.first.id == host.id } + items.map { host to it }
-                    }
+                runCatching { syncSharedSessions(host) }
                     .onFailure { snackbars.showSnackbar("${host.name} 同步失败：${it.message}") }
             }
         }
@@ -885,19 +895,8 @@ private fun RemoteTerminalApp(store: LocalStore) {
                             snackbars.showSnackbar("${host.name} 同步失败：$message")
                         }
                     }
-                    runCatching { withContext(SyncClient.dispatcher) { SyncClient.list(host) } }
-                        .onSuccess { items ->
-                            startupShared = startupShared.filterNot { it.first.id == host.id } + items.map { host to it }
-                            val remoteIds = items.map { it.optString("id") }.toSet()
-                            sessions.toList().filter { session ->
-                                session.task.host.id == host.id && session.task.id.replace("-", "") !in remoteIds &&
-                                    android.os.SystemClock.elapsedRealtime() - session.startedAt > 15_000L
-                            }.forEach(::closeSession)
-                            val hadSessions = sessions.isNotEmpty()
-                            items.forEach { item -> openSharedSession(host, item, activate = false) }
-                            if (!hadSessions && sessions.isNotEmpty() && route == AppRoute.HOME) { activePage = 0; route = AppRoute.TERMINAL }
-                            if (sharedHost?.id == host.id && sharedSessions != null) sharedSessions = items
-                        }
+                    runCatching { syncSharedSessions(host) }
+                        .onFailure { error -> snackbars.showSnackbar("${host.name} 会话同步失败：${error.message}") }
                 }
                 syncLoading = false
                 kotlinx.coroutines.delay(syncIntervalSeconds * 1_000L)

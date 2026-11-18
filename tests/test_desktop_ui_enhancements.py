@@ -85,6 +85,28 @@ class DesktopUIEnhancementsTest(unittest.TestCase):
             app.disconnect_by_func(self.app_mod.Gtk.main_quit)
             app.destroy()
 
+    def test_session_changes_queue_until_sync_and_merge_over_pulled_list(self):
+        app = self.app_mod.App()
+        try:
+            app.data = {"sync_username": "single-user", "pending_session_sync": []}
+            app.persist = lambda: None
+            host = {"id": "host-id", "username": "dev"}
+            deleted_id = "a" * 32
+            added_id = "b" * 32
+            added = {"id": added_id, "directory_path": "/new", "directory_name": "new", "agent_name": "Shell", "agent_command": "bash -l", "display_name": "new"}
+            app.queue_session_sync(host, "PUT", deleted_id, {**added, "id": deleted_id})
+            app.queue_session_sync(host, "DELETE", deleted_id)
+            app.queue_session_sync(host, "PUT", added_id, added)
+            pending = app.pending_session_sync_for(host)
+            self.assertEqual([(item["session_id"], item["method"]) for item in pending], [(deleted_id, "DELETE"), (added_id, "PUT")])
+            pulled = [{**added, "id": deleted_id}, {**added, "id": "c" * 32}]
+            merged = app.merge_session_sync_items(pulled, pending)
+            self.assertEqual([item["id"] for item in merged], ["c" * 32, added_id])
+        finally:
+            app.sync_executor.shutdown(wait=True)
+            app.disconnect_by_func(self.app_mod.Gtk.main_quit)
+            app.destroy()
+
     def test_uniform_control_heights(self):
         for platform in ("omarchy", "ubuntu", "windows"):
             py_file = (Path(__file__).resolve().parents[1] / platform / "remote-dev-terminal.py").read_text(encoding="utf-8")
