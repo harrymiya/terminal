@@ -42,6 +42,11 @@ class DesktopQuotaTest(unittest.TestCase):
             remote_cmd = core.quota_remote_command("/home/dev/proj", "agy2", '-p "/usage" --output-format json')
             self.assertIn("-l -i -c", remote_cmd, folder)
             self.assertIn('agy2 -p "/usage" --output-format json', remote_cmd, folder)
+            close_cmd = core.close_remote_session_command("a" * 32)
+            self.assertIn("tmux kill-session -t rdt_" + "a" * 18, close_cmd, folder)
+            self.assertIn("pkill -TERM -P", close_cmd, folder)
+            with self.assertRaises(ValueError):
+                core.close_remote_session_command("bad;rm")
 
 
 if __name__ == "__main__":

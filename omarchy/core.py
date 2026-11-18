@@ -334,6 +334,20 @@ def ssh_argv(host, directory, agent, session_id=None, control_path=None, restore
     return ["ssh", "-tt", "-o", "ServerAliveInterval=20", "-o", "ServerAliveCountMax=6", *options, "-p", str(port), "-l", host["username"], "--", address, remote], session_id
 
 
+def close_remote_session_command(session_id):
+    if not session_id or any(c not in "0123456789abcdef" for c in session_id):
+        raise ValueError("无效的会话 ID")
+    name = "rdt_" + session_id[:18]
+    return (
+        f"if command -v tmux >/dev/null 2>&1 && tmux has-session -t {name} 2>/dev/null; then "
+        f"for p in $(tmux list-panes -t {name} -F '#{{pane_pid}}' 2>/dev/null); do "
+        f"pkill -TERM -P \"$p\" 2>/dev/null || true; kill -TERM \"$p\" 2>/dev/null || true; "
+        f"done; "
+        f"tmux kill-session -t {name} 2>/dev/null || true; "
+        f"fi"
+    )
+
+
 def _normalize_signature(sig):
     if not sig:
         return ""

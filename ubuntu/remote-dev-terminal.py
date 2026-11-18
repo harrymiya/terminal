@@ -3,6 +3,7 @@ import sys
 import os
 import json
 import shlex
+import signal
 import subprocess
 import tempfile
 import threading
@@ -18,7 +19,7 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("Vte", "2.91")
 gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Gtk, Vte, GLib, Gdk, GdkPixbuf, Pango
-from core import load_config, save_config, ssh_argv, auto_enter_signature, AutoEnterController, quota_agent, quota_remote_command, quota_from_codex, quota_from_agy, format_quota, upload_image, MAX_IMAGE_BYTES, sync_request, sync_data_request, sync_host_key, legacy_sync_keys, ssh_address, ssh_port, ssh_host_fingerprint, sync_auth_request, save_sync_password, load_sync_password, clear_sync_password, render_battery_pixbuf, save_host_password, load_host_password, clear_host_password, ssh_auth_environment
+from core import load_config, save_config, ssh_argv, close_remote_session_command, auto_enter_signature, AutoEnterController, quota_agent, quota_remote_command, quota_from_codex, quota_from_agy, format_quota, upload_image, MAX_IMAGE_BYTES, sync_request, sync_data_request, sync_host_key, legacy_sync_keys, ssh_address, ssh_port, ssh_host_fingerprint, sync_auth_request, save_sync_password, load_sync_password, clear_sync_password, render_battery_pixbuf, save_host_password, load_host_password, clear_host_password, ssh_auth_environment
 from version import VERSION
 from mcp_server import EmbeddedMCPServer
 
@@ -2659,18 +2660,42 @@ class App(Gtk.Window):
                 label_parent.remove(label)
             self.sessions[:] = [item for item in self.sessions if item["terminal"] is not terminal]
             self.rebuild_view()
-            # Stop the multiplex master as well as the visible SSH client.
+            # Terminate local SSH child process, kill remote tmux session & processes, then close multiplex master.
+            pid = state.pop("pid", None)
+            if pid and pid > 0:
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except OSError:
+                    pass
             address = ssh_address(host)
-            subprocess.Popen(["ssh", "-S", socket_path, "-O", "exit", "-p", str(ssh_port(host)), "-l", host["username"], "--", address], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            shutil.rmtree(socket_dir, ignore_errors=True)
+            port = str(ssh_port(host))
+            username = host["username"]
+            def cleanup_remote():
+                try:
+                    if address and port != "0" and os.path.exists(socket_path):
+                        subprocess.run(
+                            ["ssh", "-S", socket_path, "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-p", port, "-l", username, "--", address, close_remote_session_command(session_id)],
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
+                        )
+                        subprocess.run(
+                            ["ssh", "-S", socket_path, "-O", "exit", "-p", port, "-l", username, "--", address],
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5,
+                        )
+                except (OSError, ValueError, subprocess.SubprocessError):
+                    pass
+                finally:
+                    shutil.rmtree(socket_dir, ignore_errors=True)
+            threading.Thread(target=cleanup_remote, daemon=True).start()
         close.connect("clicked", close_tab)
         self.sessions.append({"terminal": terminal, "label": label, "key": key, "id": session_id, "host": host, "state": state,
                               "item": item, "socket_path": socket_path, "close_button": close, "started_at": time.monotonic(),
                               "quota_indicators": (hourly_img, weekly_img)})
         self.rebuild_view(selected=terminal if activate else None)
-        def spawned(_terminal, _pid, error, *_):
+        def spawned(_terminal, pid, error, *_):
             if error:
                 self.message("无法启动 SSH", str(error))
+            elif pid and pid > 0:
+                state["pid"] = pid
         reconnect = Gtk.Button(label="重连")
         reconnect.set_no_show_all(True)
         label.pack_start(reconnect, False, False, 0)
