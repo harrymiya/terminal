@@ -497,7 +497,7 @@ class App(Gtk.Window):
         self.refresh_all_shared()
         self.sync_poll_source = None
         self.configure_sync_polling()
-        GLib.timeout_add(500, self._animate_running_headers)
+        GLib.timeout_add(16, self._animate_running_headers)
         self.scale_layout(self)
         self.connect("destroy", Gtk.main_quit)
 
@@ -811,6 +811,8 @@ class App(Gtk.Window):
                     outline.show()
                 elif not is_active and outline.get_visible():
                     outline.hide()
+                if is_active:
+                    outline.queue_draw()
         return True
 
     def rebuild_view(self, selected=None):
@@ -914,7 +916,7 @@ class App(Gtk.Window):
         if width > 2 and height > 2:
             cr.set_source_rgb(0.12, 0.65, 1.0)
             cr.set_line_width(1.0)
-            cr.set_dash([4.0, 4.0], 0.0)
+            cr.set_dash([4.0, 4.0], -(time.monotonic() * 16.0 % 8.0))
             cr.rectangle(0.5, 0.5, width - 1.0, height - 1.0)
             cr.stroke()
         return False
