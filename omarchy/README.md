@@ -1,6 +1,6 @@
 # Remote Dev Terminal · Omarchy
 
-完整中文安装及使用步骤见 [安装说明.md](安装说明.md)。
+完整中文安装及使用步骤见 [安装说明.md](安装说明.md)，MCP 服务接入及操作说明见 [MCP使用说明.md](MCP使用说明.md)。
 
 这是与 Android 版并列的 Linux 桌面版本，适用于基于 Arch Linux 的 Omarchy。使用 GTK 3、VTE 和系统 OpenSSH，支持管理主机、浏览远端目录、配置命令预设和多个终端标签。SSH 连接意外中断时自动重连；远端安装 tmux 时可恢复原会话。标签显示工作区和 Agent 名称；Codex 和 Antigravity 还依次显示 5 小时及每周剩余额度的百分比，暂不可用的额度显示为「--」。
 

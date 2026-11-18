@@ -2516,7 +2516,8 @@ class App(Gtk.Window):
                 base = ["ssh", "-S", socket_path, "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-p", str(ssh_port(host)), "-l", host["username"], "--", address]
                 try:
                     if kind == "agy":
-                        output = subprocess.check_output(base + ["bash -lc 'agy -p \"/usage\" --output-format json'"], stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+                        cmd = f"{shlex.quote(quota_executable)} -p \"/usage\" --output-format json"
+                        output = subprocess.check_output(base + [f"bash -lc {shlex.quote(cmd)}"], stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
                         result = quota_from_agy(json.loads(output))
                     else:
                         remote = quota_remote_command(directory["path"], quota_executable, "app-server --listen stdio://")

@@ -20,6 +20,7 @@ gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Gtk, Vte, GLib, Gdk, GdkPixbuf, Pango
 from core import load_config, save_config, ssh_argv, auto_enter_signature, AutoEnterController, quota_agent, quota_remote_command, quota_from_codex, quota_from_agy, format_quota, upload_image, MAX_IMAGE_BYTES, sync_request, sync_data_request, sync_host_key, legacy_sync_keys, ssh_address, ssh_port, ssh_host_fingerprint, sync_auth_request, save_sync_password, load_sync_password, clear_sync_password, render_battery_pixbuf, save_host_password, load_host_password, clear_host_password, ssh_auth_environment
 from version import VERSION
+from mcp_server import EmbeddedMCPServer
 
 
 def make_quota_indicator():
@@ -427,6 +428,7 @@ class App(Gtk.Window):
         toolbar.get_style_context().add_class("toolbar")
         workspace.pack_start(toolbar, False, False, 0)
         menu = Gtk.ToggleButton()
+        self.menu_toggle = menu
         menu.get_style_context().add_class("menu-toggle")
         menu.set_tooltip_text("显示或隐藏侧边栏")
         menu_content = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=7)
@@ -472,6 +474,7 @@ class App(Gtk.Window):
             self.layout_button.hide()
         toolbar.pack_start(self.layout_button, False, False, 0)
         zoom = Gtk.SpinButton.new_with_range(50, 200, 1)
+        self.zoom_spin = zoom
         zoom.set_numeric(True)
         zoom.set_value(self.scale)
         zoom.set_tooltip_text("界面缩放")
@@ -499,6 +502,25 @@ class App(Gtk.Window):
         self.configure_sync_polling()
         GLib.timeout_add(16, self._animate_running_headers)
         self.scale_layout(self)
+        self.mcp_server = None
+        if os.environ.get("RDT_MCP_DISABLED") != "1" and self.data.get("mcp_enabled", True):
+            self.mcp_server = EmbeddedMCPServer(self, {
+                "platform": "omarchy",
+                "version": VERSION,
+                "max_image_bytes": MAX_IMAGE_BYTES,
+                "askpass_path": Path(__file__).with_name("askpass.py"),
+                "ssh_address": ssh_address,
+                "ssh_port": ssh_port,
+                "ssh_auth_environment": ssh_auth_environment,
+                "save_host_password": save_host_password,
+                "clear_host_password": clear_host_password,
+                "upload_image": upload_image,
+            })
+            self.mcp_server.start()
+        def on_destroy(*_):
+            if self.mcp_server is not None:
+                self.mcp_server.stop()
+        self.connect("destroy", on_destroy)
         self.connect("destroy", Gtk.main_quit)
 
     def change_view(self, button):
@@ -2641,7 +2663,7 @@ class App(Gtk.Window):
             shutil.rmtree(socket_dir, ignore_errors=True)
         close.connect("clicked", close_tab)
         self.sessions.append({"terminal": terminal, "label": label, "key": key, "id": session_id, "host": host, "state": state,
-                              "close_button": close, "started_at": time.monotonic(),
+                              "item": item, "socket_path": socket_path, "close_button": close, "started_at": time.monotonic(),
                               "quota_indicators": (hourly_img, weekly_img)})
         self.rebuild_view(selected=terminal if activate else None)
         def spawned(_terminal, _pid, error, *_):
@@ -2651,6 +2673,7 @@ class App(Gtk.Window):
         reconnect.set_no_show_all(True)
         label.pack_start(reconnect, False, False, 0)
         label.reorder_child(close, -1)
+        self.sessions[-1]["reconnect_button"] = reconnect
         self.scale_layout(label)
         def read_quota():
             if state["closed"]:
@@ -2666,7 +2689,8 @@ class App(Gtk.Window):
                 base = ["ssh", "-S", socket_path, "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-p", str(ssh_port(host)), "-l", host["username"], "--", address]
                 try:
                     if kind == "agy":
-                        output = subprocess.check_output(base + ["bash -lc 'agy -p \"/usage\" --output-format json'"], stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+                        cmd = f"{shlex.quote(quota_executable)} -p \"/usage\" --output-format json"
+                        output = subprocess.check_output(base + [f"bash -lc {shlex.quote(cmd)}"], stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
                         result = quota_from_agy(json.loads(output))
                     else:
                         remote = quota_remote_command(directory["path"], quota_executable, "app-server --listen stdio://")

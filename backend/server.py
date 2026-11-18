@@ -43,7 +43,7 @@ def host_endpoint_keys(host):
     return pairs
 
 
-def merge_duplicate_host_profiles(db, user_id):
+def merge_duplicate_host_profiles(db, user_id, *args):
     rows = db.execute("SELECT host_id, payload FROM account_hosts WHERE user_id=? AND deleted=0 ORDER BY rowid", (user_id,)).fetchall()
     groups = {}
     for host_id, payload in rows:
@@ -90,6 +90,7 @@ def merge_duplicate_host_profiles(db, user_id):
                     db.execute("UPDATE account_host_state SET revision=?, payload=? WHERE user_id=? AND host_id=?", (old_state[0], old_state[1], user_id, canonical_id))
             db.execute("INSERT OR IGNORE INTO account_sessions(user_id, host_id, username, id, payload) SELECT user_id, ?, username, id, payload FROM account_sessions WHERE user_id=? AND host_id=?", (canonical_id, user_id, duplicate_id))
             db.execute("DELETE FROM account_sessions WHERE user_id=? AND host_id=?", (user_id, duplicate_id))
+            deduplicate_sessions_by_workspace(db, user_id, canonical_id)
             old_agents = db.execute("SELECT payload FROM account_agents WHERE user_id=? AND host_id=?", (user_id, duplicate_id)).fetchone()
             current_agents = db.execute("SELECT payload FROM account_agents WHERE user_id=? AND host_id=?", (user_id, canonical_id)).fetchone()
             if old_agents and not current_agents:
@@ -98,6 +99,24 @@ def merge_duplicate_host_profiles(db, user_id):
                 db.execute("INSERT OR IGNORE INTO agent_history VALUES (?, ?, ?, ?)", (user_id, canonical_id, revision, agent_payload))
             duplicate["canonical_id"] = canonical_id
             db.execute("UPDATE account_hosts SET payload=?, deleted=1 WHERE user_id=? AND host_id=?", (json.dumps(duplicate, ensure_ascii=False), user_id, duplicate_id))
+
+
+def deduplicate_sessions_by_workspace(db, user_id, host_id):
+    rows = db.execute("SELECT rowid, payload FROM account_sessions WHERE user_id=? AND host_id=? ORDER BY rowid DESC", (user_id, host_id)).fetchall()
+    seen = set()
+    for rowid, payload_str in rows:
+        try:
+            payload = json.loads(payload_str)
+            d_path = payload.get("directory_path")
+            a_cmd = payload.get("agent_command")
+            if d_path is not None and a_cmd is not None:
+                ws_key = (d_path, a_cmd)
+                if ws_key in seen:
+                    db.execute("DELETE FROM account_sessions WHERE rowid=?", (rowid,))
+                else:
+                    seen.add(ws_key)
+        except Exception:
+            pass
 
 
 def workspace_revision(payload):

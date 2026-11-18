@@ -6,11 +6,14 @@ if ! command -v secret-tool >/dev/null 2>&1; then
 fi
 data_dir="${XDG_DATA_HOME:-$HOME/.local/share}"
 install_dir="$data_dir/remote-dev-terminal"
-mkdir -p "$install_dir" "$data_dir/applications"
+bin_dir="$HOME/.local/bin"
+mkdir -p "$install_dir" "$data_dir/applications" "$bin_dir"
 install -m 644 "$source_dir/core.py" "$install_dir/core.py"
 install -m 644 "$source_dir/version.py" "$install_dir/version.py"
 install -m 755 "$source_dir/remote-dev-terminal.py" "$install_dir/remote-dev-terminal.py"
 install -m 755 "$source_dir/askpass.py" "$install_dir/askpass.py"
+install -m 755 "$source_dir/mcp_server.py" "$install_dir/mcp_server.py"
+ln -sf "$install_dir/mcp_server.py" "$bin_dir/remote-dev-terminal-mcp"
 # Desktop entry Exec arguments require double-quote escaping.
 escaped="${install_dir//\\/\\\\}"
 escaped="${escaped//\"/\\\"}"

@@ -437,7 +437,7 @@ def quota_agent(command):
     name = os.path.basename(executable)
     if name in ("codex", "codex2"):
         return "codex", executable
-    if name == "agy":
+    if name in ("agy", "agy2"):
         return "agy", executable
     return None, None
 
