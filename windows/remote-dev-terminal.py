@@ -199,7 +199,7 @@ class App(Gtk.Window):
             .quota-value { color: #e8eef6; font-size: 12px; font-weight: bold; }
             .quota-value:backdrop { color: #e8eef6; }
             notebook { background-color: #0c1119; border: none; }
-            notebook > header { background-color: #101823; border-bottom: 1px solid #243546; min-height: 33px; padding: 0 4px; }
+            notebook > header { background-color: #101823; border-bottom: 1px solid #243546; min-height: 25px; padding: 0 4px; }
             notebook tab {
                 background-image: none;
                 background-color: #16222f;
@@ -207,10 +207,10 @@ class App(Gtk.Window):
                 border: 1px solid #243546;
                 border-bottom: none;
                 border-radius: 0;
-                padding: 4px 12px;
+                padding: 2px 12px;
                 margin: 0 2px;
                 box-shadow: none;
-                min-height: 25px;
+                min-height: 21px;
             }
             notebook tab:hover { background-image: none; background-color: #213548; color: #ffffff; }
             notebook tab:checked {
@@ -280,6 +280,7 @@ class App(Gtk.Window):
             }
             .tile { background: #101823; }
             .tile-header { padding: 4px 8px; background: #16222f; border-bottom: 1px solid #243546; min-height: 25px; }
+            .running-outline { margin: 3px; border: 1px dashed #22aaff; }
             .tile-header button { background-image: none; background-color: transparent; border: none; box-shadow: none; padding: 1px 3px; color: #8fa2b4; }
             .tile-header button:hover { background-image: none; background-color: rgba(255, 255, 255, 0.15); color: #ffffff; }
             .tile-focused { box-shadow: inset 0 0 0 2px #86dbb8; }
@@ -781,17 +782,6 @@ class App(Gtk.Window):
         self.set_initial_positions(root, total_w, total_h)
         return root
 
-    def draw_running_outline(self, widget, cr):
-        allocation = widget.get_allocation()
-        width, height = allocation.width, allocation.height
-        if width > 2 and height > 2:
-            cr.set_source_rgb(0.16, 0.65, 1.0)
-            cr.set_line_width(2.0)
-            cr.set_dash([6.0, 4.0], 0.0)
-            cr.rectangle(1.0, 1.0, width - 2.0, height - 2.0)
-            cr.stroke()
-        return False
-
     def _animate_running_headers(self):
         now = time.monotonic()
         for session in self.sessions:
@@ -853,9 +843,10 @@ class App(Gtk.Window):
                 header.add(header_bar)
                 outline = Gtk.DrawingArea()
                 outline.set_no_show_all(True)
-                outline.set_sensitive(False)
+                outline.get_style_context().add_class("running-outline")
+                outline.set_halign(Gtk.Align.FILL)
+                outline.set_valign(Gtk.Align.FILL)
                 outline.hide()
-                outline.connect("draw", self.draw_running_outline)
                 header.add_overlay(outline)
                 header.set_overlay_pass_through(outline, True)
                 session["terminal"]._running_outline = outline
@@ -876,9 +867,10 @@ class App(Gtk.Window):
                 tab_box.add(tab_bar)
                 outline = Gtk.DrawingArea()
                 outline.set_no_show_all(True)
-                outline.set_sensitive(False)
+                outline.get_style_context().add_class("running-outline")
+                outline.set_halign(Gtk.Align.FILL)
+                outline.set_valign(Gtk.Align.FILL)
                 outline.hide()
-                outline.connect("draw", self.draw_running_outline)
                 tab_box.add_overlay(outline)
                 tab_box.set_overlay_pass_through(outline, True)
                 session["terminal"]._running_outline = outline
