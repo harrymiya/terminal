@@ -500,6 +500,7 @@ def create_server(address, database, token=None):
                         if old_state: db.execute("INSERT OR IGNORE INTO account_host_state VALUES (?, ?, ?, ?)", (self.user_id, host_id, old_state[0], old_state[1]))
                         db.execute("INSERT OR IGNORE INTO account_sessions(user_id, host_id, username, id, payload) SELECT user_id, ?, username, id, payload FROM account_sessions WHERE user_id=? AND host_id=?", (host_id, self.user_id, old_id))
                         db.execute("DELETE FROM account_sessions WHERE user_id=? AND host_id=?", (self.user_id, old_id))
+                    deduplicate_sessions_by_workspace(db, self.user_id, host_id)
                     for duplicate_id in duplicate_host_ids:
                         row = db.execute("SELECT payload FROM account_hosts WHERE user_id=? AND host_id=?", (self.user_id, duplicate_id)).fetchone()
                         if row:
@@ -584,6 +585,18 @@ def create_server(address, database, token=None):
                 except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
                     return self.reply(400, {"error": "invalid session"})
                 with sqlite3.connect(database) as db:
+                    rows = db.execute("SELECT id, payload FROM account_sessions WHERE user_id=? AND host_id=?", (self.user_id, host_id)).fetchall()
+                    target_dir = item.get("directory_path")
+                    target_cmd = item.get("agent_command")
+                    for row_id, payload_str in rows:
+                        if row_id == session_id:
+                            continue
+                        try:
+                            parsed = json.loads(payload_str)
+                            if parsed.get("directory_path") == target_dir and parsed.get("agent_command") == target_cmd:
+                                db.execute("DELETE FROM account_sessions WHERE user_id=? AND host_id=? AND id=?", (self.user_id, host_id, row_id))
+                        except Exception:
+                            pass
                     db.execute("INSERT INTO account_sessions VALUES (?, ?, ?, ?, ?) ON CONFLICT(user_id, host_id, username, id) DO UPDATE SET payload=excluded.payload", (self.user_id, host_id, username, session_id, json.dumps(item, ensure_ascii=False)))
                 return self.reply(200, item)
             if path.startswith("/v1/agents/"):

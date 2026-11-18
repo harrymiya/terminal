@@ -181,6 +181,21 @@ class UbuntuWindowAndTabsTest(unittest.TestCase):
         update(None)
         self.assertEqual(text.get_text(), '--')
 
+    def test_running_outline_is_windowless_and_pass_through(self):
+        Gtk = app_module.Gtk
+        terminal = app_module.Vte.Terminal()
+        header = Gtk.Box()
+        header.pack_start(Gtk.Label(label='project · Codex'), True, True, 0)
+        self.app.sessions = [{'terminal': terminal, 'label': header, 'key': 'k', 'id': 'id', 'state': {}}]
+        for tiled in (True, False):
+            self.app.tiled = tiled
+            self.app.rebuild_view()
+            outline = terminal._running_outline
+            self.assertFalse(outline.get_has_window())
+            self.assertFalse(outline.get_can_focus())
+            overlay = outline.get_parent()
+            self.assertTrue(overlay.get_overlay_pass_through(outline))
+
 
 if __name__ == '__main__':
     unittest.main()

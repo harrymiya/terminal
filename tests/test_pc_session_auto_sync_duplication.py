@@ -381,6 +381,15 @@ class BackendServerSessionIdempotencyTest(unittest.TestCase):
                 "agent_command": "bash -l",
                 "display_name": "proj · Shell",
             }
+            host_payload = {"address": "10.0.0.1", "port": 22, "username": username}
+            db.execute(
+                "INSERT INTO account_hosts VALUES (?, ?, ?, 0)",
+                (user_id, canonical_id, json.dumps({**host_payload, "id": canonical_id})),
+            )
+            db.execute(
+                "INSERT INTO account_hosts VALUES (?, ?, ?, 0)",
+                (user_id, duplicate_id, json.dumps({**host_payload, "id": duplicate_id})),
+            )
             db.execute(
                 "INSERT INTO account_sessions VALUES (?, ?, ?, ?, ?)",
                 (user_id, canonical_id, username, item1["id"], json.dumps(item1)),
@@ -391,8 +400,7 @@ class BackendServerSessionIdempotencyTest(unittest.TestCase):
             )
 
             # Call merge_duplicate_host_profiles
-            duplicate = {"id": duplicate_id, "address": "10.0.0.1", "port": 22, "username": username}
-            self.server_mod.merge_duplicate_host_profiles(db, user_id, canonical_id, duplicate, duplicate_id)
+            self.server_mod.merge_duplicate_host_profiles(db, user_id)
 
             # Check remaining sessions under canonical_id
             rows = db.execute(

@@ -903,6 +903,8 @@ class App(Gtk.Window):
                 header_bar.pack_start(session["label"], True, True, 0)
                 header.add(header_bar)
                 outline = Gtk.DrawingArea()
+                outline.set_has_window(False)
+                outline.set_can_focus(False)
                 outline.set_no_show_all(True)
                 outline.get_style_context().add_class("running-outline")
                 outline.set_halign(Gtk.Align.FILL)
@@ -929,6 +931,8 @@ class App(Gtk.Window):
                 tab_bar.pack_start(session["label"], True, True, 0)
                 tab_box.add(tab_bar)
                 outline = Gtk.DrawingArea()
+                outline.set_has_window(False)
+                outline.set_can_focus(False)
                 outline.set_no_show_all(True)
                 outline.get_style_context().add_class("running-outline")
                 outline.set_halign(Gtk.Align.FILL)
@@ -1934,10 +1938,30 @@ class App(Gtk.Window):
                         self.shared_by_host[key] = sessions
                         for session in list(self.sessions):
                             session_host = self.canonical_session_host(session.get("host", {}))
-                            if self.shared_host_key(session_host) == key and session.get("id") not in remote_ids and time.monotonic() - session.get("started_at", 0) > 15:
-                                session.get("close_button").clicked()
+                            if self.shared_host_key(session_host) == key:
+                                ws = session.get("key", (None, None, None, None, None))[3:5]
+                                matching_item = next((item for item in sessions if (item.get("directory_path"), item.get("agent_command")) == ws), None)
+                                if matching_item and matching_item.get("id"):
+                                    session["id"] = matching_item["id"]
+                                elif session.get("id") not in remote_ids and time.monotonic() - session.get("started_at", 0) > 15:
+                                    state = session.get("state")
+                                    if isinstance(state, dict):
+                                        state["closed_by_sync"] = True
+                                    session.get("close_button").clicked()
                         for item in sessions:
-                            if len(self.sessions) < 8 and not any(session["id"] == item["id"] for session in self.sessions):
+                            if len(self.sessions) >= 8:
+                                break
+                            target_key = (snapshot.get("id"), snapshot.get("port"), snapshot.get("username"), item.get("directory_path"), item.get("agent_command"))
+                            already_active = any(
+                                session.get("id") == item.get("id")
+                                or session.get("key", ())[:5] == target_key
+                                or (
+                                    self.shared_host_key(self.canonical_session_host(session.get("host", {}))) == key
+                                    and session.get("key", (None, None, None, None, None))[3:5] == (item.get("directory_path"), item.get("agent_command"))
+                                )
+                                for session in self.sessions
+                            )
+                            if not already_active:
                                 self.open_terminal(None, snapshot, item, activate=False)
                     self.update_sync_status()
                 return False
@@ -2127,6 +2151,9 @@ class App(Gtk.Window):
         if old_id in self.dirty_host_profiles:
             self.dirty_host_profiles.discard(old_id)
             self.dirty_host_profiles.add(canonical_id)
+        for entry in self.data.get("pending_session_sync", []):
+            if entry.get("host_id") == str(old_id):
+                entry["host_id"] = str(canonical_id)
         self.persist()
         self.refresh()
         return False
@@ -2255,6 +2282,11 @@ class App(Gtk.Window):
                             if canonical_id != old_id:
                                 session["key"] = (canonical_id, *session["key"][1:])
                             session["host"] = current_by_id[canonical_id]
+                    if remapped_ids:
+                        for entry in self.data.get("pending_session_sync", []):
+                            old_h = entry.get("host_id")
+                            if old_h in remapped_ids:
+                                entry["host_id"] = remapped_ids[old_h]
                     if self.refresh_sessions_after_host_profiles:
                         self.refresh_sessions_after_host_profiles = False
                         self.shared_by_host = {}
@@ -2396,7 +2428,15 @@ class App(Gtk.Window):
                 merged.pop(session_id, None)
             elif mutation.get("method") == "PUT" and mutation.get("item"):
                 merged[session_id] = mutation["item"]
-        return list(merged.values())
+        by_workspace = {}
+        for item in merged.values():
+            ws_key = (item.get("directory_path"), item.get("agent_command"))
+            if ws_key[0] is not None and ws_key[1] is not None:
+                by_workspace.pop(ws_key, None)
+                by_workspace[ws_key] = item
+            else:
+                by_workspace[("id", item.get("id"))] = item
+        return list(by_workspace.values())
 
     def clear_session_sync_mutations(self, mutations):
         mutation_ids = {item.get("mutation_id") for item in mutations}
@@ -2600,7 +2640,8 @@ class App(Gtk.Window):
         image_button.connect("clicked", lambda *_: self.send_image_dialog(host, socket_path, terminal, state))
         def close_tab(*_):
             state["closed"] = True
-            self.sync_async(host, "DELETE", session_id)
+            if not state.get("closed_by_sync"):
+                self.sync_async(host, "DELETE", session_id)
             if state["watchdog_timer"]:
                 GLib.source_remove(state["watchdog_timer"])
                 state["watchdog_timer"] = None
