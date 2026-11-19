@@ -51,13 +51,18 @@ object AutoConfirmEngine {
     private val ExplicitCursorRegex = Regex(
         """^\s*(?:[›❯●◉]|\[[xX*]\]|\([xX*]\))"""
     )
-    private val CodexFooter = Regex("""(?i)^press\s+(?:enter|return)\s+to\s+confirm\b""")
+    private val CodexFooter = Regex(
+        """(?i)^press\s+(?:enter|return)\s+to\s+confirm\s+or\s+(?:esc|escape)\s+to\s+cancel\b"""
+    )
     private val CodexTitle = Regex(
         """(?i)^(?:would you like to (?:run|send input|grant|make)|do you want to (?:approve network access|make)|.+ needs your approval\.)"""
     )
     private val NumberedOption = Regex("""^(?:[›❯>]\s*)?\d+[.)]\s*""")
     private val CodexOnce = Regex(
         """(?i)^yes(?:,\s*(?:proceed|just this once|grant these permissions for this turn|grant for this turn with strict auto review))?\s*(?:\([^)]*\)|\[[^]]*\])?$"""
+    )
+    private val CodexOtherChoice = Regex(
+        """(?i)don['’]t ask again|(?:for|in) this session|for this conversation|in the future|provide the requested info|^(?:always|no|deny|cancel)\b"""
     )
 
     // 积极肯定的选项文字（包含 Yes, Allow, Approve, Proceed, Continue, Resume, Restore, 允许, 确认, 恢复 等）
@@ -106,7 +111,11 @@ object AutoConfirmEngine {
                 !Regex("""^\[(?:rdt_[0-9a-fA-F]+|\d+)\]\s+\d+:\S+""").containsMatchIn(it) }
             .toList()
         if (rawLines.isEmpty()) return null
-        if (codex) return detectCodexApproval(rawLines)
+        val lastLine = rawLines.last()
+        if (YesNoPromptRegex.containsMatchIn(lastLine)) {
+            return if (YesDefaultRegex.containsMatchIn(lastLine)) normalizeSignature(rawLines.takeLast(5).joinToString("\n")) else null
+        }
+        if (codex) detectCodexApproval(rawLines)?.let { return it.signature }
 
         // An inline yes/no prompt can follow an older menu still on screen.
         val optionWindowStart = maxOf(0, rawLines.size - 45)
@@ -146,7 +155,11 @@ object AutoConfirmEngine {
         return null
     }
 
-    private fun detectCodexApproval(lines: List<String>): String? {
+    // A recognized menu can have no affirmative selection. Only an unrecognized
+    // screen falls through to the ordinary terminal prompt detector.
+    private data class CodexApproval(val signature: String? = null)
+
+    private fun detectCodexApproval(lines: List<String>): CodexApproval? {
         val footer = (lines.lastIndex downTo maxOf(0, lines.size - 6)).firstOrNull { index ->
             CodexFooter.containsMatchIn(lines.drop(index).take(3).joinToString(" "))
         }
@@ -154,23 +167,23 @@ object AutoConfirmEngine {
         val selected = (end - 1 downTo maxOf(0, end - 45)).firstOrNull {
             ExplicitCursorRegex.containsMatchIn(lines[it]) || lines[it].startsWith("> ")
         }
-        if (selected == null) {
-            val inline = lines.last()
-            return inline.takeIf { footer == null && YesDefaultRegex.containsMatchIn(it) }?.let(::normalizeSignature)
-        }
-        val title = (selected - 1 downTo 0).firstOrNull { CodexTitle.containsMatchIn(lines[it]) }
+        val title = selected?.let { (it - 1 downTo 0).firstOrNull { index -> CodexTitle.containsMatchIn(lines[index]) } }
         if (footer == null && title == null) return null
-        val option = OptionRegex.find(lines[selected]) ?: return null
+        if (selected == null) return CodexApproval()
+        val option = OptionRegex.find(lines[selected]) ?: return CodexApproval()
         val parts = listOf(option.groupValues[1].trim()) +
             lines.subList(selected + 1, end).take(3).takeWhile { !NumberedOption.containsMatchIn(it) }
         val label = parts.joinToString(" ").replace(Regex("""\s+"""), " ").trim()
-        if (!CodexOnce.matches(label) || (title == null && ',' !in label)) return null
+        val approveOnce = CodexOnce.matches(label)
+        if (footer == null && !approveOnce && !CodexOtherChoice.containsMatchIn(label)) return null
+        if (!approveOnce || (title == null && ',' !in label)) return CodexApproval()
 
         // Use the approval text next to the choices. Output elsewhere in the viewport
         // can be repainted while Codex is still waiting on the same request.
         val start = maxOf(title ?: 0, selected - 2)
-        return (listOfNotNull(title?.takeIf { it < start }?.let(lines::get)) +
+        val signature = (listOfNotNull(title?.takeIf { it < start }?.let(lines::get)) +
             lines.subList(start, selected) + label).joinToString("\n")
+        return CodexApproval(signature)
     }
 
     interface SessionCallback {

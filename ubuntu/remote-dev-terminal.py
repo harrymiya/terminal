@@ -19,7 +19,7 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("Vte", "2.91")
 gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Gtk, Vte, GLib, Gdk, GdkPixbuf, Pango
-from core import load_config, save_config, ssh_argv, close_remote_session_command, auto_enter_signature, AutoEnterController, quota_agent, quota_key, read_agent_quota, hourly_quota, format_developer_quota, upload_image, MAX_IMAGE_BYTES, sync_request, sync_data_request, sync_host_key, legacy_sync_keys, ssh_address, ssh_port, ssh_host_fingerprint, sync_auth_request, save_sync_password, load_sync_password, clear_sync_password, render_battery_pixbuf, save_host_password, load_host_password, clear_host_password, ssh_auth_environment
+from core import load_config, save_config, ssh_argv, close_remote_session_command, auto_enter_signature, AutoEnterController, quota_agent, quota_key, read_agent_quota, hourly_quota, upload_image, MAX_IMAGE_BYTES, sync_request, sync_data_request, sync_host_key, legacy_sync_keys, ssh_address, ssh_port, ssh_host_fingerprint, sync_auth_request, save_sync_password, load_sync_password, clear_sync_password, render_battery_pixbuf, save_host_password, load_host_password, clear_host_password, ssh_auth_environment
 from version import VERSION
 from mcp_server import EmbeddedMCPServer
 
@@ -75,6 +75,35 @@ def make_quota_indicator():
     box.set_show_percent = set_show_percent
     update(None)
     return box, update
+
+
+def make_developer_quota_indicator():
+    grid = Gtk.Grid(column_spacing=4, row_spacing=2, valign=Gtk.Align.CENTER)
+    hourly_period = Gtk.Label(xalign=1)
+    week_period = Gtk.Label(label="周", xalign=1)
+    reset = Gtk.Label(xalign=1)
+    reset.set_tooltip_text("周额度重置")
+    for label in (hourly_period, week_period, reset):
+        label.get_style_context().add_class("subtitle")
+    hourly, update_hourly = make_quota_indicator()
+    weekly, update_weekly = make_quota_indicator()
+    grid.attach(hourly_period, 0, 0, 1, 1)
+    grid.attach(hourly, 1, 0, 1, 1)
+    grid.attach(week_period, 0, 1, 1, 1)
+    grid.attach(weekly, 1, 1, 1, 1)
+    grid.attach(reset, 2, 1, 1, 1)
+
+    def update(quota):
+        minutes, hourly_percent, *_ = hourly_quota(quota)
+        _, weekly_percent, days = next((window for window in quota if window[0] == 10080), (10080, None, None))
+        period = f"{minutes // 60}时" if minutes % 60 == 0 else f"{minutes}分"
+        hourly_period.set_text(period)
+        update_hourly(hourly_percent)
+        update_weekly(weekly_percent)
+        remaining = days.replace("d", "天") if days else "--"
+        reset.set_text(f"重置 {remaining}")
+
+    return grid, update
 
 
 class App(Gtk.Window):
@@ -1304,10 +1333,18 @@ class App(Gtk.Window):
         for index, item in enumerate(agents):
             row = Gtk.Box(spacing=4)
             row.set_hexpand(True)
-            button = Gtk.Button(label=item["name"])
+            button = Gtk.Button()
             button.set_tooltip_text(item["command"] + "\n点击选择开发者")
             button.get_style_context().add_class("host-button")
-            self.fit_sidebar_label(button)
+            content = Gtk.Box(spacing=6)
+            name = Gtk.Label(label=item["name"], valign=Gtk.Align.CENTER)
+            self.fit_sidebar_label(name)
+            content.pack_start(name, True, True, 0)
+            if quota_agent(item["command"])[0]:
+                quota, row.update_developer_quota = make_developer_quota_indicator()
+                content.pack_end(quota, False, False, 0)
+            button.add(content)
+            button.get_accessible().set_name(item["name"])
             button.set_hexpand(True)
             if index == active_index:
                 button.get_style_context().add_class("agent-selected")
@@ -1329,11 +1366,6 @@ class App(Gtk.Window):
                     edit.connect("clicked", self.manage_agent, index, action)
                     actions.pack_start(edit, False, False, 0)
                 row.pack_start(actions, False, False, 0)
-            quota = Gtk.Label(xalign=1)
-            quota.get_style_context().add_class("subtitle")
-            quota.set_no_show_all(True)
-            row.developer_quota = quota
-            row.pack_end(quota, False, False, 0)
             self.agents_list.pack_start(row, False, False, 0)
             self.scale_layout(row)
         if not agents:
@@ -1344,21 +1376,16 @@ class App(Gtk.Window):
         self.update_quota_displays()
         self.refresh_quotas()
 
-
     def update_quota_displays(self):
         host = self.current_host()
         agents = self.host_agents(host) if host else []
         for index, row in enumerate(self.agents_list.get_children()):
-            label = getattr(row, "developer_quota", None)
-            if label is None:
+            update = getattr(row, "update_developer_quota", None)
+            if update is None or index >= len(agents):
                 continue
-            key = quota_key(host, agents[index]["command"]) if index < len(agents) else None
-            if key is None:
-                label.hide()
-                continue
+            key = quota_key(host, agents[index]["command"])
             result = self.quota_cache.get(key, (None, []))[1]
-            label.set_text(format_developer_quota(result))
-            label.show()
+            update(result)
 
         for session in self.sessions:
             if "update_quota" in session:
@@ -1441,8 +1468,8 @@ class App(Gtk.Window):
         self.manage(button, "agents", action)
 
     @staticmethod
-    def fit_sidebar_label(button):
-        label = button.get_child()
+    def fit_sidebar_label(widget):
+        label = widget if isinstance(widget, Gtk.Label) else widget.get_child()
         if isinstance(label, Gtk.Label):
             label.set_xalign(0.0)
             label.set_single_line_mode(True)

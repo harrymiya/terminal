@@ -370,7 +370,7 @@ def _normalize_signature(sig):
 
 
 
-_CODEX_FOOTER = re.compile(r"^press\s+(?:enter|return)\s+to\s+confirm\b", re.I)
+_CODEX_FOOTER = re.compile(r"^press\s+(?:enter|return)\s+to\s+confirm\s+or\s+(?:esc|escape)\s+to\s+cancel\b", re.I)
 _CODEX_TITLE = re.compile(
     r"^(?:would you like to (?:run|send input|grant|make)|"
     r"do you want to (?:approve network access|make)|.+ needs your approval\.)", re.I
@@ -381,9 +381,13 @@ _CODEX_ONCE = re.compile(
     r"yes(?:,\s*(?:proceed|just this once|grant these permissions for this turn|"
     r"grant for this turn with strict auto review))?\s*(?:\([^)]*\)|\[[^]]*\])?", re.I
 )
+_CODEX_OTHER_CHOICE = re.compile(
+    r"don['’]t ask again|(?:for|in) this session|for this conversation|in the future|provide the requested info|^(?:always|no|deny|cancel)\b",
+    re.I,
+)
 
 
-def _codex_approval_signature(lines, option, yes_default):
+def _codex_approval_signature(lines, option):
     footer = next(
         (i for i in range(len(lines) - 1, max(-1, len(lines) - 7), -1)
          if _CODEX_FOOTER.match(" ".join(lines[i:i + 3]))),
@@ -392,26 +396,30 @@ def _codex_approval_signature(lines, option, yes_default):
     end = len(lines) if footer is None else footer
     selected = next((i for i in range(end - 1, max(-1, end - 46), -1)
                      if _EXPLICIT_CURSOR.match(lines[i])), None)
-    if selected is None:
-        if footer is None and yes_default.search(lines[-1]):
-            return _normalize_signature(lines[-1])
-        return None
-
-    title = next((i for i in range(selected - 1, -1, -1) if _CODEX_TITLE.match(lines[i])), None)
+    title = None if selected is None else next(
+        (i for i in range(selected - 1, -1, -1) if _CODEX_TITLE.match(lines[i])), None,
+    )
+    # A recognized Codex menu owns the decision, including a rejected selection.
+    # Other terminal prompts continue through the ordinary detector.
     if footer is None and title is None:
-        return None
+        return False, None
+    if selected is None:
+        return True, None
     parts = [option.match(lines[selected]).group(1)]
     for line in lines[selected + 1:min(end, selected + 4)]:
         if _NUMBERED_OPTION.match(line):
             break
         parts.append(line)
     label = " ".join(" ".join(parts).split())
-    if not _CODEX_ONCE.fullmatch(label) or (title is None and "," not in label):
-        return None
+    approve_once = _CODEX_ONCE.fullmatch(label)
+    if footer is None and not approve_once and not _CODEX_OTHER_CHOICE.search(label):
+        return False, None
+    if not approve_once or (title is None and "," not in label):
+        return True, None
 
     start = max(title if title is not None else 0, selected - 2)
     heading = [lines[title]] if title is not None and title < start else []
-    return "\n".join(heading + lines[start:selected] + [label])
+    return True, "\n".join(heading + lines[start:selected] + [label])
 
 
 def auto_enter_signature(text, codex=False):
@@ -430,16 +438,23 @@ def auto_enter_signature(text, codex=False):
     # Only a capital Y indicates that Enter selects yes. A lowercase y/N or
     # ambiguous y/n must not be silently answered with Enter.
     enter_prompt = re.compile(r"(?i)(?:press\s+(?:enter|return)\s+to\s+(?:continue|confirm|approve)|按\s*(?:回车|enter)\s*(?:继续|确认|批准|同意))[:\s?.!]*$")
-    yes_default = re.compile(r"(?:\[Y/(?:n|no)\]|\(Y/(?:n|no)\)|\[Yes/no\]|\(Yes/no\))[:\s?.]*$")
+    yes_default = re.compile(r"(?:\[Y/(?:n|no)\]|\(Y/(?:n|no)\)|\[Yes/no\]|\(Yes/no\)|\[Y\]/n)[:\s?？.>›❯!]*$")
+    yes_no = re.compile(yes_default.pattern, re.I)
     option = re.compile(r"^\s*(?:[›❯>➜→*●◉]|\[[xX*]\]|\([xX*]\))\s*(?:\d+[.)]\s*)?(.*)$")
     explicit_cursor = re.compile(r"^\s*(?:[›❯●◉]|\[[xX*]\]|\([xX*]\))")
     affirmative = re.compile(r"(?i)^(?:yes\b|allow\b|approve\b|proceed\b|continue\b|always\b|允许|批准|同意|继续|确认|总是)")
     request = re.compile(r"(?i)(?:approv(?:e|al)|allow|would you like|do you want|proceed|continue|permission|confirm|execute|apply|install|run|resume|recover|restore|授权|批准|是否允许|需要确认|是否继续|确认执行|\?|？)")
+    if yes_no.search(lines[-1]):
+        return _normalize_signature("\n".join(lines[-5:])) if yes_default.search(lines[-1]) else None
     if codex:
-        return _codex_approval_signature(lines, option, yes_default)
+        recognized, signature = _codex_approval_signature(lines, option)
+        if recognized:
+            return signature
 
     # Recent selected option wins, including a selected rejection.
     for index in range(len(lines) - 1, max(-1, len(lines) - 45), -1):
+        if index >= len(lines) - 20 and yes_no.search(lines[index]):
+            return _normalize_signature("\n".join(lines[max(0, index - 4):index + 1])) if yes_default.search(lines[index]) else None
         match = option.match(lines[index])
         if not match:
             continue
@@ -455,7 +470,7 @@ def auto_enter_signature(text, codex=False):
             return _normalize_signature("\n".join(lines[start:index + 1]))
         return None
     for index in range(len(lines) - 1, max(-1, len(lines) - 20), -1):
-        if yes_default.search(lines[index]) or enter_prompt.search(lines[index]):
+        if enter_prompt.search(lines[index]):
             start = max(0, index - 4)
             return _normalize_signature("\n".join(lines[start:index + 1]))
 
@@ -636,16 +651,6 @@ def quota_key(host, command):
 
 def hourly_quota(quota):
     return min((window for window in quota if 0 < window[0] < 1440), default=(300, None))
-
-
-def format_developer_quota(quota):
-    minutes, hourly, *_ = hourly_quota(quota)
-    weekly, reset = next(((percent, days) for duration, percent, days in quota if duration == 10080), (None, None))
-    period = f"{minutes // 60}时" if minutes % 60 == 0 else f"{minutes}分"
-    hourly_text = "--" if hourly is None else f"{hourly}%"
-    weekly_text = "--" if weekly is None else f"{weekly}%"
-    reset_text = reset.replace("d", "天") if reset else "--"
-    return f"{period} {hourly_text} · 周 {weekly_text}\n重置 {reset_text}"
 
 
 def format_quota(quota):

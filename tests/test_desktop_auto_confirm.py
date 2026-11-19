@@ -130,6 +130,33 @@ class DesktopAutoConfirmTest(unittest.TestCase):
                 ):
                     self.assertIsNone(detect(body + selection, codex=True))
 
+    def test_codex_sessions_still_handle_ordinary_confirmations(self):
+        prior_menu = (
+            "Would you like to run the following command?\n"
+            "  1. Yes, proceed\n"
+            "› 2. No\n"
+            "Press enter to confirm or esc to cancel\n"
+        )
+        for platform in ('omarchy', 'ubuntu', 'windows'):
+            with self.subTest(platform=platform):
+                detect = load_core(platform).auto_enter_signature
+                for text in (
+                    "Press Enter to confirm",
+                    "Press enter to continue",
+                    "按回车继续",
+                    "Do you trust the contents of this directory?\n› 1. Yes, I trust this folder\n  2. No\nPress enter to continue",
+                    "Permission required\n● 1. Allow once\n○ 2. No",
+                    "Would you like to run this command?\n❯ 1. Allow once\n  2. No\nPress Enter to confirm",
+                    prior_menu + "Continue? [Y/n]",
+                ):
+                    self.assertIsNotNone(detect(text, codex=True), text)
+                for text in (
+                    prior_menu + "Continue? [y/N]",
+                    "Continue? [y/n]",
+                    "Would you like to run the following command?\n  1. Yes, proceed\n› 2. Yes, and don't ask again\nPress enter to confirm",
+                ):
+                    self.assertIsNone(detect(text, codex=True), text)
+
     def test_auto_enter_delay_accepts_tenths_and_clamps_to_one_tenth(self):
         for platform in ('omarchy', 'ubuntu', 'windows'):
             with self.subTest(platform=platform):

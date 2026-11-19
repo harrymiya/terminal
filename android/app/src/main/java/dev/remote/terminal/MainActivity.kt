@@ -193,15 +193,8 @@ private val Muted = Color(0xFF91A0B2)
 private val Mint = Color(0xFF83E2BD)
 private val Blue = Color(0xFF84B5FF)
 private val Coral = Color(0xFFFF8278)
-private fun quotaLabel(minutes: Int, percent: Int?): String {
-    val period = when {
-        minutes % 10080 == 0 -> "${minutes / 10080}周"
-        minutes % 60 == 0 -> "${minutes / 60}小时"
-        else -> "${minutes}分"
-    }
-    val remaining = percent?.let { "$it%" } ?: "--"
-    return "$period $remaining"
-}
+private fun quotaPeriod(minutes: Int): String =
+    if (minutes % 60 == 0) "${minutes / 60}小时" else "${minutes}分"
 
 private fun formatTenths(tenths: Int): String =
     if (tenths % 10 == 0) (tenths / 10).toString() else "${tenths / 10}.${tenths % 10}"
@@ -1715,9 +1708,35 @@ private fun SessionTab(session: TerminalSessionState, selected: Boolean, onClick
 @Composable
 private fun HourlyQuotaLabel(quota: List<QuotaWindow>?) {
     val hourly = quota.hourlyQuota()
-    val percent = hourly?.remainingPercent
-    Text(quotaLabel(hourly?.minutes ?: 300, percent), color = if (percent != null && percent <= 20) Coral else Muted,
-        fontSize = 10.sp, maxLines = 1)
+    QuotaBattery(quotaPeriod(hourly?.minutes ?: 300), hourly?.remainingPercent)
+}
+
+@Composable
+private fun QuotaBattery(period: String, percent: Int?, periodWidth: androidx.compose.ui.unit.Dp = 0.dp) {
+    val fill = when {
+        percent == null -> Color.Transparent
+        percent < 5 -> Coral
+        percent < 20 -> Color(0xFFFF9E20)
+        else -> Mint
+    }
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(period, color = Muted, fontSize = 10.sp, maxLines = 1, modifier = Modifier.widthIn(min = periodWidth))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Surface(
+                modifier = Modifier.size(28.dp, 11.dp),
+                shape = RoundedCornerShape(3.dp),
+                border = androidx.compose.foundation.BorderStroke(1.dp, Muted),
+                color = Ink,
+            ) {
+                Box(Modifier.fillMaxSize().padding(2.dp)) {
+                    Box(Modifier.fillMaxWidth((percent ?: 0).coerceIn(0, 100) / 100f)
+                        .height(7.dp).background(fill, RoundedCornerShape(1.dp)))
+                }
+            }
+            Box(Modifier.size(3.dp, 5.dp).background(Muted, RoundedCornerShape(1.dp)))
+        }
+        Text(percent?.let { "$it%" } ?: "--", color = White, fontSize = 10.sp, maxLines = 1)
+    }
 }
 
 @Composable
@@ -1730,8 +1749,13 @@ private fun AgentQuotaDetails(quota: List<QuotaWindow>?) {
         remaining in 1L until 86_400L -> "<1天"
         else -> "${(remaining / 86_400L).coerceAtLeast(0)}天"
     }
-    Text("${quotaLabel(hourly?.minutes ?: 300, hourly?.remainingPercent)} · ${quotaLabel(10080, weekly?.remainingPercent)} · 重置 $reset",
-        color = Muted, fontSize = 10.sp, maxLines = 1)
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        QuotaBattery(quotaPeriod(hourly?.minutes ?: 300), hourly?.remainingPercent, periodWidth = 30.dp)
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            QuotaBattery("周", weekly?.remainingPercent, periodWidth = 30.dp)
+            Text("重置 $reset", color = Muted, fontSize = 10.sp, maxLines = 1)
+        }
+    }
 }
 
 private data class TerminalSelection(

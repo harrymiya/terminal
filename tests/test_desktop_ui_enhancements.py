@@ -89,15 +89,26 @@ class DesktopUIEnhancementsTest(unittest.TestCase):
             row = app.agents_list.get_children()[0]
             children = row.get_children()
             self.assertEqual([button.get_label() for button in children[1].get_children()], ["↑", "↓", "✎", "×"])
-            self.assertEqual(row.developer_quota.get_text(), "5时 75% · 周 40%\n重置 3天")
-            self.assertEqual(app.agents_list.get_children()[1].developer_quota.get_text(), "5时 -- · 周 --\n重置 --")
+            quota = children[0].get_child().get_children()[1]
+            self.assertIsInstance(quota, self.app_mod.Gtk.Grid)
+            self.assertTrue(quota.is_ancestor(children[0]))
+            self.assertEqual(quota.get_child_at(0, 0).get_text(), "5时")
+            self.assertEqual(quota.get_child_at(0, 1).get_text(), "周")
+            for line, percent in enumerate((75, 40)):
+                battery, value = quota.get_child_at(1, line).get_children()
+                self.assertEqual(battery.get_children()[0].get_value(), percent)
+                self.assertEqual(value.get_text(), f"{percent}%")
+            self.assertEqual(quota.get_child_at(2, 1).get_text(), "重置 3天")
+            gemini = app.agents_list.get_children()[1].get_children()[0].get_child().get_children()[1]
+            self.assertEqual(gemini.get_child_at(1, 0).get_children()[1].get_text(), "--")
+            self.assertEqual(gemini.get_child_at(2, 1).get_text(), "重置 --")
             self.assertFalse(children[1].get_children()[0].get_sensitive())
             children[1].get_children()[1].clicked()
             self.assertEqual([item["command"] for item in app.data["agents"]], ["agy", "codex"])
             self.assertEqual(app.agents.get_active(), 1)
             self.assertEqual((host["selected_agent"], other["selected_agent"]), (1, 0))
             app.edit_toggle.set_active(False)
-            self.assertEqual(len(app.agents_list.get_children()[1].get_children()), 2)
+            self.assertEqual(len(app.agents_list.get_children()[1].get_children()), 1)
         finally:
             app.sync_executor.shutdown(wait=True)
             app.disconnect_by_func(self.app_mod.Gtk.main_quit)
