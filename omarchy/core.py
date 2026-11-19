@@ -63,13 +63,14 @@ def config_path():
 def load_config(path=None):
     path = path or config_path()
     if not path.exists():
-        return {"hosts": [], "agents": [dict(a) for a in DEFAULT_AGENTS], "sync_url": "", "sync_token": ""}
+        return {"hosts": [], "agents": [dict(a) for a in DEFAULT_AGENTS], "sync_url": "", "sync_token": "", "offline_mode": False}
     with path.open(encoding="utf-8") as f:
         data = json.load(f)
     if not isinstance(data, dict) or not isinstance(data.get("hosts"), list) or not isinstance(data.get("agents"), list):
         raise ValueError("配置文件格式无效")
     data.setdefault("sync_url", "")
     data.setdefault("sync_token", "")
+    data.setdefault("offline_mode", False)
     migrated = False
     for host in data["hosts"]:
         if not host.get("id"):

@@ -226,6 +226,11 @@ class LocalStore(context: Context) {
         preferences.edit().putBoolean("auto_sync_enabled", enabled).apply()
     }
 
+    fun loadOfflineMode(): Boolean = preferences.getBoolean("offline_mode", false)
+    fun saveOfflineMode(enabled: Boolean) {
+        preferences.edit().putBoolean("offline_mode", enabled).apply()
+    }
+
     fun loadSyncIntervalSeconds(): Int = preferences.getInt("sync_interval_seconds", 5).coerceIn(5, 300)
     fun saveSyncIntervalSeconds(seconds: Int) {
         preferences.edit().putInt("sync_interval_seconds", seconds.coerceIn(5, 300)).apply()

@@ -940,6 +940,7 @@ class App(Gtk.Window):
             self.message("无法读取配置", str(exc))
             raise SystemExit(1)
         self.data.setdefault("auto_sync_enabled", False)
+        self.data.setdefault("offline_mode", False)
         self.data.setdefault("sync_interval_seconds", 5)
         self.dirty_host_profiles = set(self.data.get("dirty_host_profiles", []))
         self.workspace_dirty = set(self.data.get("dirty_workspaces", []))
@@ -2175,7 +2176,12 @@ class App(Gtk.Window):
         grid.attach(Gtk.Label(label=self.data.get("sync_username", "未登录"), xalign=0), 1, 1, 1, 1)
         auto_sync = Gtk.CheckButton(label="启用跨设备自动同步（本机设置）")
         auto_sync.set_active(bool(self.data.get("auto_sync_enabled", False)))
-        grid.attach(auto_sync, 0, 2, 2, 1)
+        offline_mode = Gtk.CheckButton(label="离线模式（本机独立使用，不做数据同步）")
+        offline_mode.set_active(bool(self.data.get("offline_mode", False)))
+        sync_mode_row = Gtk.Box(spacing=12)
+        sync_mode_row.pack_start(auto_sync, False, False, 0)
+        sync_mode_row.pack_start(offline_mode, False, False, 0)
+        grid.attach(sync_mode_row, 0, 2, 2, 1)
         sync_interval = Gtk.SpinButton.new_with_range(5, 300, 5)
         sync_interval.set_value(min(max(int(self.data.get("sync_interval_seconds", 5)), 5), 300))
         sync_interval_row = Gtk.Box(spacing=6)
@@ -2251,6 +2257,7 @@ class App(Gtk.Window):
             new_url = url_entry.get_text().strip()
             if self.data.get("sync_url") != new_url: self.data["sync_token"] = ""
             self.data["sync_url"] = new_url
+            self.data["offline_mode"] = offline_mode.get_active()
             self.data["auto_sync_enabled"] = auto_sync.get_active()
             self.data["sync_interval_seconds"] = sync_interval.get_value_as_int()
             self.data["agent_quota_interval_seconds"] = quota_interval.get_value_as_int()
@@ -3130,8 +3137,11 @@ class App(Gtk.Window):
         self.update_sync_status()
         self.refresh_host_shared(host)
 
+    def is_offline_mode(self):
+        return bool(self.data.get("offline_mode", False))
+
     def refresh_host_shared(self, host):
-        if not self.data.get("sync_url") or not self.data.get("auto_sync_enabled", False):
+        if self.is_offline_mode() or not self.data.get("sync_url") or not self.data.get("auto_sync_enabled", False):
             return
         host = self.canonical_session_host(host)
         key = self.shared_host_key(host)
@@ -3259,7 +3269,7 @@ class App(Gtk.Window):
         self.sync_executor.submit(worker)
 
     def push_workspace_list(self, host):
-        if not self.data.get("sync_url"): return
+        if self.is_offline_mode() or not self.data.get("sync_url"): return
         key = self.shared_host_key(host)
         version = self.workspace_versions.get(key, 0) + 1
         self.workspace_versions[key] = version
@@ -3337,7 +3347,7 @@ class App(Gtk.Window):
         self.data["agents"] = agents
 
     def push_agent_list(self, host=None):
-        if not self.data.get("sync_url"):
+        if self.is_offline_mode() or not self.data.get("sync_url"):
             return
         items = [{"id": agent.get("id") or __import__("hashlib").sha256(agent.get("command", "").encode()).hexdigest()[:32],
                   "name": agent.get("name", "Agent"), "command": agent.get("command", "bash -l"), "icon": agent.get("icon", "✳")}
@@ -3385,7 +3395,7 @@ class App(Gtk.Window):
         self.sync_executor.submit(worker)
 
     def push_host_state(self, host):
-        if not host or not self.data.get("sync_url"): return
+        if self.is_offline_mode() or not host or not self.data.get("sync_url"): return
         agents = self.host_agents(host)
         index = min(max(host.get("selected_agent", 0), 0), max(0, len(agents) - 1))
         state = {"name": host.get("name", "主机"), "icon": host.get("icon", "⌘")}
@@ -3406,7 +3416,7 @@ class App(Gtk.Window):
         self.sync_executor.submit(worker)
 
     def poll_shared(self):
-        if not self.data.get("auto_sync_enabled", False):
+        if self.is_offline_mode() or not self.data.get("auto_sync_enabled", False):
             return True
         self.refresh_all_shared(prompt_for_login=False)
         return True
@@ -3415,7 +3425,7 @@ class App(Gtk.Window):
         if self.sync_poll_source:
             GLib.source_remove(self.sync_poll_source)
             self.sync_poll_source = None
-        if self.data.get("auto_sync_enabled", False):
+        if not self.is_offline_mode() and self.data.get("auto_sync_enabled", False):
             interval = min(max(int(self.data.get("sync_interval_seconds", 5)), 5), 300)
             self.sync_poll_source = GLib.timeout_add_seconds(interval, self.poll_shared)
 
@@ -3444,7 +3454,7 @@ class App(Gtk.Window):
                 "legacy_keys": legacy_sync_keys(host)}
 
     def push_host_profile(self, host):
-        if not self.data.get("sync_url") or not self.data.get("sync_token"): return
+        if self.is_offline_mode() or not self.data.get("sync_url") or not self.data.get("sync_token"): return
         try:
             payload = self.host_profile_payload(host)
         except ValueError:
@@ -3495,12 +3505,12 @@ class App(Gtk.Window):
         return False
 
     def delete_host_profile(self, host_id):
-        if not self.data.get("sync_url") or not self.data.get("sync_token"): return
+        if self.is_offline_mode() or not self.data.get("sync_url") or not self.data.get("sync_token"): return
         self.dirty_host_profiles.discard(host_id)
         self.sync_executor.submit(lambda: sync_data_request(self.data, "DELETE", "/v1/hosts/" + str(host_id)))
 
     def sync_host_profiles(self):
-        if not self.data.get("sync_url") or not self.data.get("sync_token") or self.host_profile_sync_pending: return
+        if self.is_offline_mode() or not self.data.get("sync_url") or not self.data.get("sync_token") or self.host_profile_sync_pending: return
         self.host_profile_sync_pending = True
         local_hosts = [dict(host) for host in self.data["hosts"]]
         config = dict(self.data)
@@ -3638,7 +3648,7 @@ class App(Gtk.Window):
         self.sync_executor.submit(worker)
 
     def ensure_sync_login(self):
-        if not self.data.get("sync_url"):
+        if self.is_offline_mode() or not self.data.get("sync_url"):
             return False
         if self.data.get("sync_token"):
             try:
@@ -3651,6 +3661,7 @@ class App(Gtk.Window):
                     return False
                 self.data["sync_token"] = ""
         dialog = Gtk.Dialog(title="同步账号登录", transient_for=self, modal=True)
+        dialog.add_button("离线模式", 1)
         dialog.add_button("取消", Gtk.ResponseType.CANCEL)
         dialog.add_button("登录", Gtk.ResponseType.OK)
         grid = Gtk.Grid(column_spacing=10, row_spacing=8, margin=16)
@@ -3672,12 +3683,19 @@ class App(Gtk.Window):
         dialog.show_all()
         while True:
             response = dialog.run()
+            if response == 1:
+                self.data["offline_mode"] = True
+                self.persist()
+                self.configure_sync_polling()
+                dialog.destroy()
+                return False
             if response != Gtk.ResponseType.OK:
                 dialog.destroy()
                 return False
             account_name, account_password = username.get_text().strip(), password.get_text()
             try:
                 result = sync_auth_request(self.data, "login", account_name, account_password)
+                self.data["offline_mode"] = False
                 self.data["sync_username"] = result["username"]
                 self.data["sync_token"] = result["access_token"]
                 self.data["sync_is_admin"] = result.get("is_admin", False)
@@ -3696,14 +3714,15 @@ class App(Gtk.Window):
         if expired_token and self.data.get("sync_token") == expired_token:
             self.data["sync_token"] = ""
             self.persist()
-            for host in self.data["hosts"]:
-                self.shared_by_host[self.shared_host_key(host)] = "同步登录已失效，请手动重新登录"
-            self.update_sync_status()
+            if not self.is_offline_mode():
+                for host in self.data["hosts"]:
+                    self.shared_by_host[self.shared_host_key(host)] = "同步登录已失效，请手动重新登录"
+                self.update_sync_status()
         return False
 
     def refresh_all_shared(self, prompt_for_login=True):
         self.shared_by_host = {}
-        if not self.data.get("auto_sync_enabled", False):
+        if self.is_offline_mode() or not self.data.get("auto_sync_enabled", False):
             self.refresh_sessions_after_host_profiles = False
             self.update_sync_status()
             return
@@ -3725,7 +3744,7 @@ class App(Gtk.Window):
         self.update_sync_status()
 
     def queue_session_sync(self, host, method, session_id, item=None):
-        if not host or method not in ("PUT", "DELETE") or not session_id:
+        if self.is_offline_mode() or not host or method not in ("PUT", "DELETE") or not session_id:
             return
         pending = self.data.setdefault("pending_session_sync", [])
         entry = {
@@ -3784,6 +3803,9 @@ class App(Gtk.Window):
         self.queue_session_sync(self.canonical_session_host(host), method, session_id, item)
 
     def show_shared_sessions(self, _button):
+        if self.is_offline_mode():
+            self.message("离线模式", "当前处于离线模式，本机独立运行，不进行服务器同步。")
+            return
         if not self.data.get("auto_sync_enabled", False):
             self.message("自动同步已关闭", "请先在系统设置中启用本机的跨设备自动同步。")
             return

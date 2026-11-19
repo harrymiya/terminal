@@ -370,7 +370,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
         val sessions = remember { mutableStateListOf<TerminalSessionState>() }
         var selectedHostId by rememberSaveable { mutableStateOf(hosts.firstOrNull()?.id.orEmpty()) }
         var selectedAgentId by rememberSaveable { mutableStateOf(agents.firstOrNull()?.id.orEmpty()) }
-        var route by rememberSaveable { mutableStateOf(if (store.loadSyncUrl().isNotBlank() && store.loadSyncToken().isBlank()) AppRoute.LOGIN else AppRoute.HOME) }
+        var route by rememberSaveable { mutableStateOf(if (!store.loadOfflineMode() && store.loadSyncUrl().isNotBlank() && store.loadSyncToken().isBlank()) AppRoute.LOGIN else AppRoute.HOME) }
         var activePage by rememberSaveable { mutableIntStateOf(0) }
         val sessionStore = remember { SessionStore(appContext) }
         var sessionsRestored by remember { mutableStateOf(false) }
@@ -400,6 +400,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
         }
         var syncUrl by remember { mutableStateOf(store.loadSyncUrl()) }
         var syncToken by remember { mutableStateOf(store.loadSyncToken()) }
+        var offlineMode by remember { mutableStateOf(store.loadOfflineMode()) }
         var autoSyncEnabled by remember { mutableStateOf(store.loadAutoSyncEnabled()) }
         var syncIntervalSeconds by remember { mutableIntStateOf(store.loadSyncIntervalSeconds()) }
         var editingHost by remember { mutableStateOf<HostProfile?>(null) }
@@ -521,6 +522,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
         }
 
         fun syncHostProfile(host: HostProfile) {
+            if (offlineMode) return
             dirtyHostProfiles.add(host.id)
             store.saveDirtyHostProfiles(dirtyHostProfiles)
             if (syncUrl.isBlank() || syncToken.isBlank()) return
@@ -552,7 +554,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
         }
 
         fun syncWorkspaceList(host: HostProfile, directories: List<ProjectDirectory>) {
-            if (syncUrl.isBlank()) return
+            if (offlineMode || syncUrl.isBlank()) return
             val version = (workspaceVersions[host.id] ?: 0) + 1
             workspaceVersions[host.id] = version
             dirtyWorkspaces.add(host.id)
@@ -616,7 +618,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
         }
 
         fun syncAgentList(host: HostProfile, items: List<AgentPreset>) {
-            if (syncUrl.isBlank()) return
+            if (offlineMode || syncUrl.isBlank()) return
             val identity = SyncClient.agentRevisionIdentity(store.loadSyncUsername())
             val version = (agentVersions[identity] ?: 0) + 1
             agentVersions[identity] = version
@@ -774,7 +776,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
             val index = sessions.indexOf(session)
             if (index < 0) return
             sessionStore.remove(session.task.id)
-            if (syncDeletion) store.enqueueSessionSync(session.task, "DELETE")
+            if (syncDeletion && !offlineMode) store.enqueueSessionSync(session.task, "DELETE")
             AutoConfirmEngine.unregisterSession(session.task.id)
             session.cancelAutoEnter()
             TerminalConnectionRegistry.unregister(session.task.id, session.controller)
@@ -800,7 +802,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 if (same == 0) agent.name else "${agent.name} ${same + 1}")
             if (restoredTask == null) {
                 sessionStore.save(task)
-                store.enqueueSessionSync(task, "PUT", SyncClient.sessionItem(task))
+                if (!offlineMode) store.enqueueSessionSync(task, "PUT", SyncClient.sessionItem(task))
             }
             val state = TerminalSessionState(task, mainHandler, appContext) { sessionTask ->
                 quotaKey(sessionTask.host, sessionTask.agent.command)?.let(quotas::get)
@@ -890,7 +892,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
         }
 
         fun refreshShared(host: HostProfile) {
-            if (!autoSyncEnabled) return
+            if (offlineMode || !autoSyncEnabled) return
             scope.launch {
                 runCatching { syncSharedSessions(host) }
                     .onFailure { snackbars.showSnackbar("${host.name} 同步失败：${it.message}") }
@@ -899,14 +901,14 @@ private fun RemoteTerminalApp(store: LocalStore) {
 
         LaunchedEffect(Unit) {
             sessionStore.load(hosts, agents).forEach { task ->
-                if (!autoSyncEnabled || syncUrl.isBlank() || syncToken.isBlank()) openTask(task.host, task.directory, task.agent, task)
+                if (offlineMode || !autoSyncEnabled || syncUrl.isBlank() || syncToken.isBlank()) openTask(task.host, task.directory, task.agent, task)
             }
             activePage = activePage.coerceIn(0, (sessions.size - 1).coerceAtLeast(0))
             sessionsRestored = true
         }
 
-        LaunchedEffect(syncUrl, syncToken, autoSyncEnabled, syncIntervalSeconds) {
-            val syncEnabled = autoSyncEnabled && syncUrl.isNotBlank() && syncToken.isNotBlank()
+        LaunchedEffect(syncUrl, syncToken, offlineMode, autoSyncEnabled, syncIntervalSeconds) {
+            val syncEnabled = !offlineMode && autoSyncEnabled && syncUrl.isNotBlank() && syncToken.isNotBlank()
             syncLoading = syncEnabled && hosts.isNotEmpty()
             if (!syncEnabled) startupShared = emptyList()
             while (true) {
@@ -1045,7 +1047,9 @@ private fun RemoteTerminalApp(store: LocalStore) {
                         selectedAgentId = agent.id
                         selectedHost?.let { host ->
                             store.saveHostSelectedAgent(host.id, agent.id)
-                            scope.launch { runCatching { withContext(SyncClient.dispatcher) { SyncClient.updateCurrentAgent(host, agent.command) } } }
+                            if (!offlineMode && syncUrl.isNotBlank() && syncToken.isNotBlank()) {
+                                scope.launch { runCatching { withContext(SyncClient.dispatcher) { SyncClient.updateCurrentAgent(host, agent.command) } } }
+                            }
                         }
                     },
                     syncLoading = syncLoading,
@@ -1083,8 +1087,10 @@ private fun RemoteTerminalApp(store: LocalStore) {
                     store = store,
                     syncUrl = syncUrl,
                     syncToken = syncToken,
+                    offlineMode = offlineMode,
                     autoSyncEnabled = autoSyncEnabled,
                     syncIntervalSeconds = syncIntervalSeconds,
+                    onOfflineModeChange = { enabled -> offlineMode = enabled; store.saveOfflineMode(enabled) },
                     onAutoSyncEnabledChange = { enabled -> autoSyncEnabled = enabled; store.saveAutoSyncEnabled(enabled) },
                     onSyncIntervalSecondsChange = { seconds -> syncIntervalSeconds = seconds; store.saveSyncIntervalSeconds(seconds) },
                     syncUsername = store.loadSyncUsername(),
@@ -1117,14 +1123,21 @@ private fun RemoteTerminalApp(store: LocalStore) {
                         AutoConfirmEngine.globalDelaySeconds = seconds
                         if (autoEnterEnabled) sessions.forEach { it.resumeAutoEnter(seconds, autoEnterEnabled) }
                     },
-                    onBack = { route = if (syncUrl.isNotBlank() && syncToken.isBlank()) AppRoute.LOGIN else AppRoute.HOME },
+                    onBack = { route = if (!offlineMode && syncUrl.isNotBlank() && syncToken.isBlank()) AppRoute.LOGIN else AppRoute.HOME },
                 )
                 AppRoute.LOGIN -> SyncLoginScreen(
                     syncUrl = syncUrl,
                     initialUsername = store.loadSyncUsername(),
                     initialPassword = store.loadSyncPassword(),
                     onBack = { route = AppRoute.HOME },
+                    onOfflineMode = {
+                        offlineMode = true
+                        store.saveOfflineMode(true)
+                        route = AppRoute.HOME
+                    },
                     onSuccess = { username, password, token, remember ->
+                        offlineMode = false
+                        store.saveOfflineMode(false)
                         syncToken = token
                         store.saveSyncSettings(syncUrl, token)
                         store.saveSyncCredentials(username, password, remember)
@@ -1171,7 +1184,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 selectedHostId = host.id
                 syncHostProfile(host)
                 scope.launch(Dispatchers.IO) { HostRouteResolver.resolveHostRoute(host, force = true) }
-                if (autoSyncEnabled && syncUrl.isNotBlank() && syncToken.isNotBlank()) refreshShared(host)
+                if (!offlineMode && autoSyncEnabled && syncUrl.isNotBlank() && syncToken.isNotBlank()) refreshShared(host)
                 addingHost = false; editingHost = null
             },
         )
@@ -1200,7 +1213,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
             onConfirm = {
                 dirtyHostProfiles.remove(host.id)
                 store.saveDirtyHostProfiles(dirtyHostProfiles)
-                if (syncUrl.isNotBlank() && syncToken.isNotBlank()) scope.launch { runCatching { withContext(SyncClient.dispatcher) { SyncClient.deleteHostProfile(host.id) } } }
+                if (!offlineMode && syncUrl.isNotBlank() && syncToken.isNotBlank()) scope.launch { runCatching { withContext(SyncClient.dispatcher) { SyncClient.deleteHostProfile(host.id) } } }
                 saveHosts(hosts.filterNot { it.id == host.id }); deletingHost = null
             },
             onDismiss = { deletingHost = null },
@@ -2319,6 +2332,7 @@ private fun SyncLoginScreen(
     initialUsername: String,
     initialPassword: String,
     onBack: () -> Unit,
+    onOfflineMode: () -> Unit,
     onSuccess: (String, String, String, Boolean) -> Unit,
 ) {
     val scope = rememberCoroutineScope()
@@ -2349,6 +2363,9 @@ private fun SyncLoginScreen(
         }, modifier = Modifier.fillMaxWidth()) {
             if (busy) CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = White) else Text("登录")
         }
+        FilledTonalButton(enabled = !busy, onClick = onOfflineMode, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
+            Text("离线模式")
+        }
         TextButton(onClick = onBack, modifier = Modifier.align(Alignment.CenterHorizontally)) { Text("返回", color = Muted) }
     }
 }
@@ -2358,8 +2375,10 @@ private fun SettingsScreen(
     store: LocalStore,
     syncUrl: String,
     syncToken: String,
+    offlineMode: Boolean,
     autoSyncEnabled: Boolean,
     syncIntervalSeconds: Int,
+    onOfflineModeChange: (Boolean) -> Unit,
     onAutoSyncEnabledChange: (Boolean) -> Unit,
     onSyncIntervalSecondsChange: (Int) -> Unit,
     syncUsername: String,
@@ -2421,8 +2440,19 @@ private fun SettingsScreen(
             Divider()
             Text("系统同步", color = White, fontWeight = FontWeight.SemiBold)
             OutlinedTextField(draftSyncUrl, { draftSyncUrl = it }, label = { Text("同步服务地址") }, placeholder = { Text("https://地址:端口") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-            Text(if (syncUsername.isBlank()) "未登录" else "当前账号：$syncUsername", color = Muted, fontSize = 12.sp)
+            Text(when {
+                offlineMode -> "离线模式（仅本机独立使用）"
+                syncUsername.isBlank() -> "未登录"
+                else -> "当前账号：$syncUsername"
+            }, color = Muted, fontSize = 12.sp)
             FilledTonalButton(onClick = onLogin, modifier = Modifier.fillMaxWidth()) { Text("登录同步账号") }
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Column(Modifier.weight(1f)) {
+                    Text("离线模式", color = White, fontSize = 13.sp)
+                    Text("开启后仅本机独立使用，不进行任何服务器同步。", color = Muted, fontSize = 11.sp)
+                }
+                Switch(checked = offlineMode, onCheckedChange = onOfflineModeChange)
+            }
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Column(Modifier.weight(1f)) {
                     Text("跨设备自动同步", color = White, fontSize = 13.sp)
