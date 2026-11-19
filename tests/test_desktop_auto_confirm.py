@@ -102,6 +102,45 @@ class DesktopAutoConfirmTest(unittest.TestCase):
                 for text in cases:
                     self.assertIsNotNone(detect(text), text[:80])
 
+    def test_codex_approval_uses_the_visible_one_time_choice(self):
+        body = "\n".join(f"$ command argument {i}" for i in range(65))
+        menu = (
+            "\n› 1. Yes, grant these\n"
+            "     permissions for this turn (y)\n"
+            "  2. Yes, grant these permissions for this session\n"
+            "  3. No, continue without permissions\n"
+            "Press enter\n"
+            "to confirm or esc to cancel\n"
+            "[rdt_1234] 0:codex*"
+        )
+        for platform in ('omarchy', 'ubuntu', 'windows'):
+            with self.subTest(platform=platform):
+                detect = load_core(platform).auto_enter_signature
+                prompt = body + menu
+                signature = detect(prompt, codex=True)
+                self.assertIsNotNone(signature)
+                self.assertEqual(detect("• Working (12s)\n" + prompt, codex=True), signature)
+                self.assertNotEqual(detect(prompt.replace("argument 64", "argument 99"), codex=True), signature)
+                for selection in (
+                    menu.replace("› 1.", "  1.").replace("  2.", "› 2."),
+                    menu.replace("› 1.", "  1.").replace("  3.", "› 3."),
+                    menu.replace("› 1.", "  1."),
+                    "\n› 1. Yes\n  2. No\nPress enter to confirm or esc to cancel",
+                    "\n› 1. Yes, provide the requested info\n  2. No\nPress enter to confirm or esc to cancel",
+                ):
+                    self.assertIsNone(detect(body + selection, codex=True))
+
+    def test_auto_enter_delay_accepts_tenths_and_clamps_to_one_tenth(self):
+        for platform in ('omarchy', 'ubuntu', 'windows'):
+            with self.subTest(platform=platform):
+                controller = load_core(platform).AutoEnterController()
+                for delay in (0.1, 0.01):
+                    controller.reset()
+                    self.assertFalse(controller.observe('approval', 10, delay))
+                    self.assertFalse(controller.observe('approval', 10.099, delay))
+                    self.assertTrue(controller.observe('approval', 10.1, delay))
+                    self.assertFalse(controller.observe('approval', 10.2, delay))
+
 
 if __name__ == '__main__':
     unittest.main()

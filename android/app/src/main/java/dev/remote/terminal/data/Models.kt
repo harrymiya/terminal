@@ -136,10 +136,24 @@ data class AgentPreset(
 
 /** Returns the configured Codex CLI executable, including compatible codex2 builds. */
 fun codexExecutable(command: String): String? {
-    val configuredExecutable = command.trim().split(Regex("\\s+"), limit = 2).firstOrNull() ?: return null
-    val executable = configuredExecutable.removeSurrounding("\"").removeSurrounding("'")
-    return executable.takeIf { it.substringAfterLast('/') == "codex" || it.substringAfterLast('/') == "codex2" }
+    val executable = agentExecutable(command) ?: return null
+    return executable.takeIf { it.substringAfterLast('/') in setOf("codex", "codex2", "codx") }
 }
+
+/** Returns the configured Antigravity CLI executable, including compatible agy2 builds. */
+fun antigravityExecutable(command: String): String? {
+    val executable = agentExecutable(command) ?: return null
+    return executable.takeIf { it.substringAfterLast('/') == "agy" || it.substringAfterLast('/') == "agy2" }
+}
+
+private val AgentExecutablePattern = Regex("""^\s*(?:"[^"]+"|'[^']+'|[^\s"']+)(?=\s|$)""")
+
+private fun agentExecutable(command: String): String? =
+    AgentExecutablePattern.find(command)?.value?.trimStart()?.removeSurrounding("\"")?.removeSurrounding("'")
+
+fun quotaExecutable(command: String): String? = codexExecutable(command) ?: antigravityExecutable(command)
+
+data class QuotaWindow(val minutes: Int, val remainingPercent: Int, val resetsAt: Long? = null)
 
 data class TerminalTask(
     val id: String,
@@ -405,10 +419,17 @@ class LocalStore(context: Context) {
         preferences.edit().putBoolean("auto_enter_enabled", enabled).apply()
     }
 
-    fun loadAutoEnterDelaySeconds(): Int = preferences.getInt("auto_enter_delay_seconds", 3).coerceIn(1, 30)
+    fun loadAutoEnterDelayTenths(): Int =
+        preferences.getInt("auto_enter_delay_tenths", preferences.getInt("auto_enter_delay_seconds", 3) * 10).coerceIn(1, 300)
 
-    fun saveAutoEnterDelaySeconds(seconds: Int) {
-        preferences.edit().putInt("auto_enter_delay_seconds", seconds.coerceIn(1, 30)).apply()
+    fun saveAutoEnterDelayTenths(tenths: Int) {
+        preferences.edit().putInt("auto_enter_delay_tenths", tenths.coerceIn(1, 300)).apply()
+    }
+
+    fun loadQuotaIntervalSeconds(): Int = preferences.getInt("agent_quota_interval_seconds", 60).coerceIn(15, 300)
+
+    fun saveQuotaIntervalSeconds(seconds: Int) {
+        preferences.edit().putInt("agent_quota_interval_seconds", seconds.coerceIn(15, 300)).apply()
     }
 
     fun isHostKeyTrusted(address: String, port: Int, fingerprint: String): Boolean =

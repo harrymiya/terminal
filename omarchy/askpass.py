@@ -19,6 +19,9 @@ if credential_id and prompt.lower().rstrip().endswith("password:") and "passphra
     except (OSError, subprocess.TimeoutExpired):
         pass
 
+if os.environ.get("RDT_SSH_NONINTERACTIVE") == "1":
+    sys.exit(1)
+
 dialog = Gtk.Dialog(title="SSH", modal=True)
 dialog.add_buttons("取消", Gtk.ResponseType.CANCEL, "确定", Gtk.ResponseType.OK)
 box = dialog.get_content_area()

@@ -21,6 +21,27 @@ class HostKeyApprovalRequiredException(val address: String, val port: Int, val f
 
 object RemoteDirectoryBrowser {
     fun listDirectories(host: HostProfile, store: LocalStore, requestedPath: String): RemoteDirectoryListing {
+        return withSshSession(host, store) { session ->
+            val sftp = session.openChannel("sftp") as ChannelSftp
+            try {
+                sftp.connect(15_000)
+                val normalizedPath = sftp.realpath(requestedPath.ifBlank { sftp.pwd() })
+                val entries = sftp.ls(normalizedPath).mapNotNull { item ->
+                    val entry = item as? ChannelSftp.LsEntry ?: return@mapNotNull null
+                    if (entry.filename == "." || entry.filename == "..") return@mapNotNull null
+                    val childPath = joinPath(normalizedPath, entry.filename)
+                    val isDirectory = entry.attrs.isDir ||
+                        (entry.attrs.isLink && runCatching { sftp.stat(childPath).isDir }.getOrDefault(false))
+                    if (isDirectory) RemoteDirectoryEntry(entry.filename, childPath) else null
+                }.sortedBy { it.name.lowercase() }
+                RemoteDirectoryListing(normalizedPath, entries)
+            } finally {
+                runCatching { sftp.disconnect() }
+            }
+        }
+    }
+
+    internal fun <T> withSshSession(host: HostProfile, store: LocalStore, read: (Session) -> T): T {
         var currentAddress = host.address
         var currentPort = host.port
         val hostKeys = BrowserHostKeyRepository(store) { currentAddress to currentPort }
@@ -61,26 +82,12 @@ object RemoteDirectoryBrowser {
             throw (connectFailure ?: IOException("无法连接主机"))
         }
 
-        var channel: ChannelSftp? = null
         try {
-            val sftp = session.openChannel("sftp") as ChannelSftp
-            channel = sftp
-            sftp.connect(15_000)
-            val normalizedPath = sftp.realpath(requestedPath.ifBlank { sftp.pwd() })
-            val entries = sftp.ls(normalizedPath).mapNotNull { item ->
-                val entry = item as? ChannelSftp.LsEntry ?: return@mapNotNull null
-                if (entry.filename == "." || entry.filename == "..") return@mapNotNull null
-                val childPath = joinPath(normalizedPath, entry.filename)
-                val isDirectory = entry.attrs.isDir ||
-                    (entry.attrs.isLink && runCatching { sftp.stat(childPath).isDir }.getOrDefault(false))
-                if (isDirectory) RemoteDirectoryEntry(entry.filename, childPath) else null
-            }.sortedBy { it.name.lowercase() }
-            return RemoteDirectoryListing(normalizedPath, entries)
+            return read(session)
         } catch (error: Exception) {
             hostKeys.untrustedFingerprint?.let { throw HostKeyApprovalRequiredException(currentAddress, currentPort, it) }
             throw error
         } finally {
-            runCatching { channel?.disconnect() }
             runCatching { session.disconnect() }
         }
     }

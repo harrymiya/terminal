@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 import uuid
 import re
 import subprocess
+import select
 import socket
 import urllib.request
 from urllib.parse import quote
@@ -360,14 +361,59 @@ def _normalize_signature(sig):
     return sig.strip()
 
 
-def auto_enter_signature(text):
+
+_CODEX_FOOTER = re.compile(r"^press\s+(?:enter|return)\s+to\s+confirm\b", re.I)
+_CODEX_TITLE = re.compile(
+    r"^(?:would you like to (?:run|send input|grant|make)|"
+    r"do you want to (?:approve network access|make)|.+ needs your approval\.)", re.I
+)
+_EXPLICIT_CURSOR = re.compile(r"^(?:[›❯●◉]|> |\[[xX*]\]|\([xX*]\))")
+_NUMBERED_OPTION = re.compile(r"^(?:[›❯>]\s*)?\d+[.)]\s*")
+_CODEX_ONCE = re.compile(
+    r"yes(?:,\s*(?:proceed|just this once|grant these permissions for this turn|"
+    r"grant for this turn with strict auto review))?\s*(?:\([^)]*\)|\[[^]]*\])?", re.I
+)
+
+
+def _codex_approval_signature(lines, option, yes_default):
+    footer = next(
+        (i for i in range(len(lines) - 1, max(-1, len(lines) - 7), -1)
+         if _CODEX_FOOTER.match(" ".join(lines[i:i + 3]))),
+        None,
+    )
+    end = len(lines) if footer is None else footer
+    selected = next((i for i in range(end - 1, max(-1, end - 46), -1)
+                     if _EXPLICIT_CURSOR.match(lines[i])), None)
+    if selected is None:
+        if footer is None and yes_default.search(lines[-1]):
+            return _normalize_signature(lines[-1])
+        return None
+
+    title = next((i for i in range(selected - 1, -1, -1) if _CODEX_TITLE.match(lines[i])), None)
+    if footer is None and title is None:
+        return None
+    parts = [option.match(lines[selected]).group(1)]
+    for line in lines[selected + 1:min(end, selected + 4)]:
+        if _NUMBERED_OPTION.match(line):
+            break
+        parts.append(line)
+    label = " ".join(" ".join(parts).split())
+    if not _CODEX_ONCE.fullmatch(label) or (title is None and "," not in label):
+        return None
+
+    start = max(title if title is not None else 0, selected - 2)
+    heading = [lines[title]] if title is not None and title < start else []
+    return "\n".join(heading + lines[start:selected] + [label])
+
+
+def auto_enter_signature(text, codex=False):
     """Identify a currently visible, explicitly affirmative Enter action."""
     if not text:
         return None
     lines = []
     for raw in text.splitlines():
         line = raw.strip().strip("│┃║| ").strip()
-        if not line or re.match(r"^\[(?:rdt_[0-9a-fA-F]+|\d+)\]\s+\d+:\S+", line):
+        if not line or all(char in "─━═╭╮╰╯┌┐└┘+ " for char in line) or re.match(r"^\[(?:rdt_[0-9a-fA-F]+|\d+)\]\s+\d+:\S+", line):
             continue
         lines.append(line)
     if not lines:
@@ -381,6 +427,9 @@ def auto_enter_signature(text):
     explicit_cursor = re.compile(r"^\s*(?:[›❯●◉]|\[[xX*]\]|\([xX*]\))")
     affirmative = re.compile(r"(?i)^(?:yes\b|allow\b|approve\b|proceed\b|continue\b|always\b|允许|批准|同意|继续|确认|总是)")
     request = re.compile(r"(?i)(?:approv(?:e|al)|allow|would you like|do you want|proceed|continue|permission|confirm|execute|apply|install|run|resume|recover|restore|授权|批准|是否允许|需要确认|是否继续|确认执行|\?|？)")
+    if codex:
+        return _codex_approval_signature(lines, option, yes_default)
+
     # Recent selected option wins, including a selected rejection.
     for index in range(len(lines) - 1, max(-1, len(lines) - 45), -1):
         match = option.match(lines[index])
@@ -429,7 +478,7 @@ class AutoEnterController:
             self.detected_at = now
             self.handled = False
             return False
-        if not self.handled and now - self.detected_at >= max(1, delay):
+        if not self.handled and now >= self.detected_at + max(0.1, delay):
             self.handled = True
             return True
         return False
@@ -445,7 +494,7 @@ def quota_agent(command):
         return None, None
     executable = words[0]
     name = os.path.basename(executable)
-    if name in ("codex", "codex2"):
+    if name in ("codex", "codex2", "codx"):
         return "codex", executable
     if name in ("agy", "agy2"):
         return "agy", executable
@@ -454,7 +503,8 @@ def quota_agent(command):
 
 def quota_remote_command(directory, executable, arguments):
     command = f"{shlex.quote(executable)} {arguments}"
-    return f'cd -- {shlex.quote(directory)} && "${{SHELL:-/bin/bash}}" -l -i -c {shlex.quote(command)}'
+    cd = f"cd -- {shlex.quote(directory)} && " if directory else ""
+    return cd + '"${SHELL:-/bin/bash}" -l -i -c ' + shlex.quote(command)
 
 
 def quota_from_codex(message):
@@ -483,13 +533,15 @@ def quota_from_codex(message):
 
 def quota_from_agy(message):
     result = {}
-    now = time.time()
     for group in message.get("command", {}).get("data", {}).get("groups", []):
+        is_gemini_models = (group.get("name") or "").strip().casefold() == "gemini models"
         for bucket in group.get("buckets", []):
             name = bucket.get("id", "").lower()
             if "gemini" not in name:
                 continue
             minutes = 10080 if "weekly" in name or "7d" in name else 300 if "5h" in name or "session" in name else None
+            if minutes == 10080 and not is_gemini_models:
+                continue
             value = bucket.get("remaining_fraction")
             if minutes and value is not None:
                 percent = max(0, min(100, int(float(value) * 100)))
@@ -508,6 +560,84 @@ def quota_from_agy(message):
                         pass
                 result[minutes] = (percent, days_str)
     return [(mins, p, d) for mins, (p, d) in sorted(result.items())]
+
+
+
+def read_agent_quota(host, command, directory=None, control_path=None):
+    """Read the selected remote account's limits over SSH without using its terminal input."""
+    kind, executable = quota_agent(command)
+    address, port = ssh_address(host), ssh_port(host)
+    if not kind or not address or not port:
+        return []
+    batch = "no" if host.get("credential_id") else "yes"
+    control = ["-S", control_path] if control_path else []
+    base = ["ssh", *control, "-o", f"BatchMode={batch}", "-o", "StrictHostKeyChecking=yes",
+            "-o", "NumberOfPasswordPrompts=1", "-o", "ConnectTimeout=5",
+            "-p", str(port), "-l", host["username"], "--", address]
+    env = ssh_auth_environment(host, Path(__file__).with_name("askpass.py"))
+    env["RDT_SSH_NONINTERACTIVE"] = "1"
+    if kind == "agy":
+        remote = quota_remote_command(directory, executable, '-p "/usage" --output-format json')
+        output = subprocess.check_output(base + [remote], stdin=subprocess.DEVNULL,
+                                         stderr=subprocess.DEVNULL, env=env, timeout=30)
+        return quota_from_agy(json.loads(output[output.index(b"{"):]))
+
+    remote = quota_remote_command(directory, executable, "app-server --listen stdio://")
+    with subprocess.Popen(base + [remote], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                          stderr=subprocess.DEVNULL, env=env, bufsize=0) as proc:
+        try:
+            proc.stdin.write(b'{"id":1,"method":"initialize","params":{"clientInfo":{"name":"remote_dev_terminal","version":"1.0"}}}\n')
+            deadline = time.monotonic() + 15
+            pending = b""
+            while time.monotonic() < deadline and len(pending) < 1_000_000:
+                ready, _, _ = select.select([proc.stdout], [], [], max(0, deadline - time.monotonic()))
+                if not ready:
+                    break
+                chunk = os.read(proc.stdout.fileno(), 4096)
+                if not chunk:
+                    break
+                pending += chunk
+                while b"\n" in pending:
+                    line, pending = pending.split(b"\n", 1)
+                    try:
+                        message = json.loads(line)
+                    except ValueError:
+                        continue
+                    if not isinstance(message, dict):
+                        continue
+                    if message.get("id") == 1:
+                        if "error" in message:
+                            return []
+                        proc.stdin.write(b'{"method":"initialized","params":{}}\n'
+                                         b'{"id":2,"method":"account/rateLimits/read","params":{}}\n')
+                    elif message.get("id") == 2:
+                        return quota_from_codex(message)
+        finally:
+            proc.kill()
+    return []
+
+
+def quota_key(host, command):
+    executable = quota_agent(command)[1]
+    if executable is None:
+        return None
+    endpoints = tuple(host.get(field) for field in
+                      ("address", "port", "lan_address", "lan_port", "external_address", "external_port"))
+    return (host.get("id"), host.get("username"), endpoints, executable)
+
+
+def hourly_quota(quota):
+    return min((window for window in quota if 0 < window[0] < 1440), default=(300, None))
+
+
+def format_developer_quota(quota):
+    minutes, hourly, *_ = hourly_quota(quota)
+    weekly, reset = next(((percent, days) for duration, percent, days in quota if duration == 10080), (None, None))
+    period = f"{minutes // 60}时" if minutes % 60 == 0 else f"{minutes}分"
+    hourly_text = "--" if hourly is None else f"{hourly}%"
+    weekly_text = "--" if weekly is None else f"{weekly}%"
+    reset_text = reset.replace("d", "天") if reset else "--"
+    return f"{period} {hourly_text} · 周 {weekly_text}\n重置 {reset_text}"
 
 
 def format_quota(quota):

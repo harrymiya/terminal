@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 import threading
 import uuid
-import select
+import math
 import time
 import shutil
 import re
@@ -19,9 +19,22 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("Vte", "2.91")
 gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Gtk, Vte, GLib, Gdk, GdkPixbuf, Pango
-from core import load_config, save_config, ssh_argv, close_remote_session_command, auto_enter_signature, AutoEnterController, quota_agent, quota_remote_command, quota_from_codex, quota_from_agy, format_quota, upload_image, MAX_IMAGE_BYTES, sync_request, sync_data_request, sync_host_key, legacy_sync_keys, ssh_address, ssh_port, ssh_host_fingerprint, sync_auth_request, save_sync_password, load_sync_password, clear_sync_password, render_battery_pixbuf, save_host_password, load_host_password, clear_host_password, ssh_auth_environment
+from core import load_config, save_config, ssh_argv, close_remote_session_command, auto_enter_signature, AutoEnterController, quota_agent, quota_key, read_agent_quota, hourly_quota, format_developer_quota, upload_image, MAX_IMAGE_BYTES, sync_request, sync_data_request, sync_host_key, legacy_sync_keys, ssh_address, ssh_port, ssh_host_fingerprint, sync_auth_request, save_sync_password, load_sync_password, clear_sync_password, render_battery_pixbuf, save_host_password, load_host_password, clear_host_password, ssh_auth_environment
 from version import VERSION
 from mcp_server import EmbeddedMCPServer
+
+
+def live_terminal_text(terminal):
+    # The visible viewport can be scrolled into history and the cursor can be
+    # hidden above the approval choices. Read the live rows by absolute position.
+    end = max(0, int(terminal.get_vadjustment().get_upper()) - 1)
+    start = max(0, end - terminal.get_row_count() + 1)
+    last_column = terminal.get_column_count() - 1
+    if hasattr(terminal, "get_text_range_format"):
+        text, _ = terminal.get_text_range_format(Vte.Format.TEXT, start, 0, end, last_column)
+    else:
+        text, _ = terminal.get_text_range(start, 0, end, last_column, None, None)
+    return text or ""
 
 
 def make_quota_indicator():
@@ -70,6 +83,13 @@ class App(Gtk.Window):
         self.set_default_size(1200, 760)
         self.set_size_request(700, 450)
         self.sessions = []
+        self.agent_rows = None
+        self.agent_list_version = 0
+        self.agent_sync_in_flight = False
+        self.quota_cache = {}
+        self.quota_attempts = {}
+        self.quota_pending = set()
+        self.quota_shutdown = False
         self.shared_by_host = {}
         self.sync_pending = set()
         self.workspace_versions = {}
@@ -362,12 +382,12 @@ class App(Gtk.Window):
         self.edit_mode = False
         self.edit_actions = []
         self.edit_toggle = Gtk.ToggleButton(label="编辑")
-        self.edit_toggle.set_tooltip_text("进入编辑模式，管理主机、Agent 和工作区")
+        self.edit_toggle.set_tooltip_text("进入编辑模式，管理主机、开发者和工作区")
         self.edit_toggle.connect("toggled", self.toggle_sidebar_edit)
         brand_row.pack_start(self.edit_toggle, False, False, 0)
         refresh_button = Gtk.Button()
         refresh_button.set_image(Gtk.Image.new_from_icon_name("view-refresh-symbolic", Gtk.IconSize.BUTTON))
-        refresh_button.set_tooltip_text("立即同步主机、Agent、工作区和共享会话")
+        refresh_button.set_tooltip_text("立即同步主机、开发者、工作区和共享会话")
         refresh_button.connect("clicked", lambda *_: self.refresh_all_shared())
         brand_row.pack_start(refresh_button, False, False, 0)
         settings_button = Gtk.Button()
@@ -382,7 +402,7 @@ class App(Gtk.Window):
         subtitle.get_style_context().add_class("subtitle")
         sidebar.pack_start(subtitle, False, False, 0)
         self.refreshing = False
-        for title, attr in [("主机", "hosts"), ("当前 Agent", "agents"), ("工作区 · 点击直达", "directories")]:
+        for title, attr in [("主机", "hosts"), ("开发者", "agents"), ("工作区 · 点击直达", "directories")]:
             heading = Gtk.Label(label=title, xalign=0)
             heading.get_style_context().add_class("section")
             sidebar.pack_start(heading, False, False, 0)
@@ -397,7 +417,7 @@ class App(Gtk.Window):
             elif attr == "directories":
                 actions = [("＋工作区", "add")]
             else:
-                actions = [("＋Agent", "add")]
+                actions = [("＋开发者", "add")]
             for label, action in actions:
                 button = Gtk.Button(label=label)
                 button.get_child().set_single_line_mode(True)
@@ -412,14 +432,16 @@ class App(Gtk.Window):
                 self.sync_status = Gtk.Label(xalign=0)
                 self.sync_status.set_line_wrap(True)
                 self.sync_status.get_style_context().add_class("subtitle")
-                self.sync_status.set_tooltip_text("会话、Agent、工作区和主机状态按系统设置周期同步")
+                self.sync_status.set_tooltip_text("会话、开发者、工作区和主机状态按系统设置周期同步")
                 sidebar.pack_start(self.sync_status, False, False, 0)
         self.hosts.connect("changed", self.host_changed)
         self.agents.connect("changed", self.agent_changed)
         self.auto_enter = Gtk.CheckButton(label="自动回车")
         self.auto_enter.set_active(self.data.get("auto_enter", False))
         self.auto_enter.connect("toggled", self.save_settings)
-        self.delay = Gtk.SpinButton.new_with_range(1, 30, 1)
+        self.delay = Gtk.SpinButton.new_with_range(0.1, 30, 0.1)
+        self.delay.set_digits(1)
+        self.delay.set_snap_to_ticks(True)
         self.delay.set_value(self.data.get("auto_enter_delay", 3))
         workspace = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         root.pack2(workspace, resize=True, shrink=False)
@@ -493,10 +515,12 @@ class App(Gtk.Window):
         self.grid.set_vexpand(True)
         self.grid.connect("size-allocate", self._on_grid_allocate)
         self.views.add_named(self.grid, "grid")
-        self.empty = Gtk.Label(label="选择左侧主机和 Agent，然后点击工作区直达终端。")
+        self.empty = Gtk.Label(label="选择左侧主机和开发者，然后点击工作区直达终端。")
         self.empty.get_style_context().add_class("empty")
         self.views.add_named(self.empty, "empty")
         self.views.set_visible_child_name("empty")
+        self.quota_timer = GLib.timeout_add_seconds(1, self.refresh_quotas)
+        self.connect("destroy", self.stop_quota_refresh)
         self.refresh()
         self.refresh_all_shared()
         self.sync_poll_source = None
@@ -554,6 +578,7 @@ class App(Gtk.Window):
             self.sidebar_revealer.show()
             self.sidebar_revealer.set_reveal_child(True)
             self.sidebar_paned.set_position(self.sidebar_width)
+            self.refresh_quotas()
         else:
             self.sidebar_revealer.set_reveal_child(False)
             self.sidebar_revealer.hide()
@@ -821,7 +846,7 @@ class App(Gtk.Window):
             state = session.get("state")
             is_active = False
             if state:
-                is_active = (now - state.get("last_output_at", 0.0) < 2.5) or state.get("quota_busy", False)
+                is_active = (now - state.get("last_output_at", 0.0) < 2.5)
             if outline:
                 if is_active and not outline.get_visible():
                     outline.show()
@@ -949,7 +974,7 @@ class App(Gtk.Window):
 
     def save_settings(self, *_):
         self.data["auto_enter"] = self.auto_enter.get_active()
-        self.data["auto_enter_delay"] = self.delay.get_value_as_int()
+        self.data["auto_enter_delay"] = self.delay.get_value()
         self.persist()
 
     def manage_sync_users(self, parent=None):
@@ -1115,6 +1140,13 @@ class App(Gtk.Window):
         delay_row.pack_start(self.delay, False, False, 0)
         delay_row.pack_start(Gtk.Label(label="秒"), False, False, 0)
         grid.attach(delay_row, 0, 5, 2, 1)
+        quota_interval = Gtk.SpinButton.new_with_range(15, 300, 5)
+        quota_interval.set_value(int(self.data.get("agent_quota_interval_seconds", 60)))
+        quota_interval_row = Gtk.Box(spacing=6)
+        quota_interval_row.pack_start(Gtk.Label(label="开发者额度刷新周期"), False, False, 0)
+        quota_interval_row.pack_start(quota_interval, False, False, 0)
+        quota_interval_row.pack_start(Gtk.Label(label="秒（15–300）"), False, False, 0)
+        grid.attach(quota_interval_row, 0, 6, 2, 1)
         key_path = Path.home() / ".ssh" / "id_ed25519.pub"
         key_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         key_label = Gtk.Label(label=key_path.read_text(encoding="utf-8").strip() if key_path.exists() else "尚未生成本地 SSH 密钥", xalign=0)
@@ -1144,10 +1176,10 @@ class App(Gtk.Window):
         key_buttons.pack_start(generate, False, False, 0)
         key_buttons.pack_start(copy, False, False, 0)
         key_box.pack_start(key_buttons, False, False, 0)
-        grid.attach(Gtk.Label(label="本机 SSH 公钥", xalign=0), 0, 6, 2, 1)
-        grid.attach(key_box, 0, 7, 2, 1)
+        grid.attach(Gtk.Label(label="本机 SSH 公钥", xalign=0), 0, 7, 2, 1)
+        grid.attach(key_box, 0, 8, 2, 1)
         if self.data.get("sync_is_admin"):
-            grid.attach(self.manage_sync_users(dialog), 0, 8, 2, 2)
+            grid.attach(self.manage_sync_users(dialog), 0, 9, 2, 2)
         self.scale_layout(dialog)
         dialog.show_all()
         if dialog.run() == Gtk.ResponseType.OK:
@@ -1156,6 +1188,8 @@ class App(Gtk.Window):
             self.data["sync_url"] = new_url
             self.data["auto_sync_enabled"] = auto_sync.get_active()
             self.data["sync_interval_seconds"] = sync_interval.get_value_as_int()
+            self.data["agent_quota_interval_seconds"] = quota_interval.get_value_as_int()
+            self.refresh_quotas()
             self.save_settings()
             self.configure_sync_polling()
             self.refresh_all_shared()
@@ -1274,36 +1308,23 @@ class App(Gtk.Window):
         agents = self.host_agents(host) if host else []
         active_index = self.agents.get_active()
         children = self.agents_list.get_children()
-        if len(children) == len(agents):
-            matched = True
-            for child, item in zip(children, agents):
-                row_children = child.get_children() if isinstance(child, Gtk.Box) else []
-                btn = row_children[0] if row_children else None
-                has_manage_actions = len(row_children) > 1
-                if (not isinstance(btn, Gtk.Button)
-                        or btn.get_label() != item.get("name", "")
-                        or has_manage_actions != self.edit_mode):
-                    matched = False
-                    break
-            if matched:
-                for index, child in enumerate(children):
-                    btn = child.get_children()[0] if isinstance(child, Gtk.Box) and child.get_children() else None
-                    if btn:
-                        ctx = btn.get_style_context()
-                        if index == active_index:
-                            if not ctx.has_class("agent-selected"):
-                                ctx.add_class("agent-selected")
-                        else:
-                            if ctx.has_class("agent-selected"):
-                                ctx.remove_class("agent-selected")
-                return
-        for child in self.agents_list.get_children():
+        items = [(item["name"], item["command"]) for item in agents]
+        if items and self.agent_rows == (items, self.edit_mode) and len(children) == len(items):
+            for index, row in enumerate(children):
+                ctx = row.get_children()[0].get_style_context()
+                (ctx.add_class if index == active_index else ctx.remove_class)("agent-selected")
+            self.update_quota_displays()
+            self.refresh_quotas()
+            return
+
+        self.agent_rows = (items, self.edit_mode)
+        for child in children:
             self.agents_list.remove(child)
         for index, item in enumerate(agents):
             row = Gtk.Box(spacing=4)
             row.set_hexpand(True)
             button = Gtk.Button(label=item["name"])
-            button.set_tooltip_text(item.get("command", "") + "\n点击选择 Agent")
+            button.set_tooltip_text(item["command"] + "\n点击选择开发者")
             button.get_style_context().add_class("host-button")
             self.fit_sidebar_label(button)
             button.set_hexpand(True)
@@ -1312,22 +1333,127 @@ class App(Gtk.Window):
             button.connect("clicked", lambda _button, i=index: self.agents.set_active(i))
             row.pack_start(button, True, True, 0)
             if self.edit_mode:
-                actions = Gtk.Box(spacing=4)
-                actions.set_halign(Gtk.Align.END)
+                actions = Gtk.Box(spacing=4, halign=Gtk.Align.END)
+                for symbol, offset, tooltip in (("↑", -1, "上移开发者"), ("↓", 1, "下移开发者")):
+                    move = Gtk.Button(label=symbol)
+                    move.set_tooltip_text(tooltip)
+                    move.set_sensitive(0 <= index + offset < len(agents))
+                    move.get_style_context().add_class("manage-button")
+                    move.connect("clicked", self.move_agent, index, offset)
+                    actions.pack_start(move, False, False, 0)
                 for label, action in [("✎", "edit"), ("×", "delete")]:
                     edit = Gtk.Button(label=label)
-                    edit.set_tooltip_text("编辑 Agent" if action == "edit" else "删除 Agent")
+                    edit.set_tooltip_text("编辑开发者" if action == "edit" else "删除开发者")
                     edit.get_style_context().add_class("manage-button")
                     edit.connect("clicked", self.manage_agent, index, action)
                     actions.pack_start(edit, False, False, 0)
                 row.pack_start(actions, False, False, 0)
+            quota = Gtk.Label(xalign=1)
+            quota.get_style_context().add_class("subtitle")
+            quota.set_no_show_all(True)
+            row.developer_quota = quota
+            row.pack_end(quota, False, False, 0)
             self.agents_list.pack_start(row, False, False, 0)
             self.scale_layout(row)
         if not agents:
-            hint = Gtk.Label(label="请先选择主机，再点击顶部“编辑”添加 Agent", xalign=0)
+            hint = Gtk.Label(label="请先选择主机，再点击顶部“编辑”添加开发者", xalign=0)
             hint.get_style_context().add_class("subtitle")
             self.agents_list.pack_start(hint, False, False, 0)
         self.agents_list.show_all()
+        self.update_quota_displays()
+        self.refresh_quotas()
+
+
+    def update_quota_displays(self):
+        host = self.current_host()
+        agents = self.host_agents(host) if host else []
+        for index, row in enumerate(self.agents_list.get_children()):
+            label = getattr(row, "developer_quota", None)
+            if label is None:
+                continue
+            key = quota_key(host, agents[index]["command"]) if index < len(agents) else None
+            if key is None:
+                label.hide()
+                continue
+            result = self.quota_cache.get(key, (None, []))[1]
+            label.set_text(format_developer_quota(result))
+            label.show()
+
+        for session in self.sessions:
+            if "update_quota" in session:
+                key = quota_key(session["host"], session["item"]["agent_command"])
+                session["update_quota"](self.quota_cache.get(key, (None, []))[1])
+
+    def refresh_quotas(self):
+        if self.quota_shutdown:
+            return False
+        now = time.monotonic()
+        interval = min(max(int(self.data.get("agent_quota_interval_seconds", 60)), 15), 300)
+        lifetime = max(300, interval * 2)
+        expired = [key for key, (updated, _) in self.quota_cache.items() if now - updated >= lifetime]
+        for key in expired:
+            del self.quota_cache[key]
+        if expired:
+            self.update_quota_displays()
+        targets = {}
+        for session in self.sessions:
+            if not session["state"].get("connected") or "update_quota" not in session:
+                continue
+            host, item = session["host"], session["item"]
+            key = quota_key(host, item["agent_command"])
+            if key is not None:
+                targets.setdefault(key, (host, item["agent_command"], item["directory_path"], session["socket_path"]))
+        if self.get_visible() and self.sidebar_revealer.get_reveal_child():
+            host = self.current_host()
+            agents = self.host_agents(host) if host else []
+            for agent in agents:
+                command = agent["command"]
+                key = quota_key(host, command)
+                if key is not None:
+                    targets.setdefault(key, (host, command, None, None))
+        due_order = sorted(targets, key=lambda key: self.quota_attempts.get(key, -float("inf")))
+        for key in due_order:
+            if len(self.quota_pending) >= 4:
+                break
+            if key in self.quota_pending or now - self.quota_attempts.get(key, -float("inf")) < interval:
+                continue
+            self.quota_pending.add(key)
+            self.quota_attempts[key] = now
+            threading.Thread(target=self.fetch_quota, args=(key, targets[key]), daemon=True).start()
+        self.quota_attempts = {key: touched for key, touched in self.quota_attempts.items()
+                               if key in self.quota_pending or now - touched < lifetime}
+        return True
+
+    def fetch_quota(self, key, target):
+        try:
+            result = read_agent_quota(*target)
+        except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+            result = []
+
+        def finish():
+            self.quota_pending.discard(key)
+            if result and not self.quota_shutdown:
+                self.quota_cache[key] = (time.monotonic(), result)
+                self.update_quota_displays()
+            return False
+
+        GLib.idle_add(finish)
+
+    def stop_quota_refresh(self, *_):
+        self.quota_shutdown = True
+        GLib.source_remove(self.quota_timer)
+
+    def move_agent(self, _button, index, offset):
+        host = self.current_host()
+        agents = list(self.host_agents(host)) if host else []
+        target = index + offset
+        if not (0 <= index < len(agents) and 0 <= target < len(agents)):
+            return
+        agents[index], agents[target] = agents[target], agents[index]
+        self.replace_agents(agents)
+        self.persist()
+        self.refresh_host_content()
+        self.push_agent_list()
 
     def manage_agent(self, button, index, action):
         self.agents.set_active(index)
@@ -1355,7 +1481,7 @@ class App(Gtk.Window):
             self._edit_sidebar_width = None
         self.edit_mode = button.get_active()
         button.set_label("完成" if self.edit_mode else "编辑")
-        button.set_tooltip_text("退出编辑模式" if self.edit_mode else "进入编辑模式，管理主机、Agent 和工作区")
+        button.set_tooltip_text("退出编辑模式" if self.edit_mode else "进入编辑模式，管理主机、开发者和工作区")
         for actions in self.edit_actions:
             actions.set_visible(self.edit_mode)
         self.refresh_host_content()
@@ -1399,7 +1525,7 @@ class App(Gtk.Window):
             button = Gtk.Button(label="▸  " + item["name"])
             self.fit_sidebar_label(button)
             button.set_hexpand(True)
-            button.set_tooltip_text(item["path"] + "\n点击使用当前 Agent 打开")
+            button.set_tooltip_text(item["path"] + "\n点击使用当前开发者打开")
             button.get_style_context().add_class("project-button")
             button.connect("clicked", self.open_directory, index)
             row.pack_start(button, True, True, 0)
@@ -1933,18 +2059,13 @@ class App(Gtk.Window):
                         identity = self.data.get("sync_username", "") + ":account"
                         local_agent_revision = agent_revisions.get(identity, 0)
                         remote_agent_revision = remote_agents.get("revision", 0)
-                        if remote_agents.get("configured") and local_agent_revision < remote_agent_revision:
-                            self.data["agents"] = remote_agents["agents"]
-                            agent_revisions[identity] = remote_agent_revision
-                            config_changed = True
-                        elif remote_agents.get("configured") and self.data.get("agents", []) != remote_agents["agents"]:
-                            self.data["agents"] = remote_agents["agents"]
-                            agent_revisions[identity] = remote_agent_revision
-                            config_changed = True
-                        elif not remote_agents.get("configured") and self.data.get("agents"):
-                            self.push_agent_list(local_host)
-                        elif remote_agents.get("configured"):
-                            agent_revisions[identity] = remote_agent_revision
+                        if not self.agent_sync_in_flight:
+                            if remote_agents.get("configured") and local_agent_revision < remote_agent_revision:
+                                self.replace_agents(remote_agents["agents"])
+                                agent_revisions[identity] = remote_agent_revision
+                                config_changed = True
+                            elif not remote_agents.get("configured") and self.data.get("agents"):
+                                self.push_agent_list(local_host)
                         local_profile = profile.get("state", {})
                         if profile.get("configured") and local_host is not None:
                             if local_profile.get("name") and local_host.get("name") != local_profile["name"]:
@@ -2056,6 +2177,18 @@ class App(Gtk.Window):
             GLib.idle_add(finish)
         self.sync_executor.submit(worker)
 
+    def replace_agents(self, agents):
+        previous = self.data.get("agents", [])
+        identity_to_index = {agent.get("id"): i for i, agent in enumerate(agents) if agent.get("id")}
+        command_to_index = {agent["command"]: i for i, agent in enumerate(agents)}
+        for host in self.data["hosts"]:
+            index = host.get("selected_agent", 0)
+            if 0 <= index < len(previous):
+                agent = previous[index]
+                index = identity_to_index.get(agent.get("id"), command_to_index.get(agent["command"], index))
+            host["selected_agent"] = max(0, min(index, len(agents) - 1))
+        self.data["agents"] = agents
+
     def push_agent_list(self, host=None):
         if not self.data.get("sync_url"):
             return
@@ -2065,6 +2198,11 @@ class App(Gtk.Window):
         host = host or self.current_host()
         if not host: return
         identity = self.data.get("sync_username", "") + ":account"
+        self.agent_list_version += 1
+        if self.agent_sync_in_flight:
+            return
+        version = self.agent_list_version
+        self.agent_sync_in_flight = True
         base_revision = self.data.setdefault("agent_sync_revisions", {}).get(identity, 0)
         def worker():
             revision = base_revision
@@ -2081,14 +2219,22 @@ class App(Gtk.Window):
                         revision = int(conflict["revision"])
                     except (AttributeError, KeyError, TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
                         break
-            if response is not None:
-                def finish():
-                    self.data.setdefault("agent_sync_revisions", {})[identity] = response.get("revision", revision)
-                    if self.data.get("agents", []) != response.get("agents", []):
-                        self.data["agents"] = response.get("agents", []); self.persist(); self.refresh()
-                    else: self.persist()
+            def finish():
+                if self.quota_shutdown:
                     return False
-                GLib.idle_add(finish)
+                self.agent_sync_in_flight = False
+                if response is not None:
+                    self.data.setdefault("agent_sync_revisions", {})[identity] = response.get("revision", revision)
+                if self.agent_list_version != version:
+                    self.push_agent_list()
+                elif response is not None:
+                    ordered = response.get("agents", [])
+                    if self.data.get("agents", []) != ordered:
+                        self.replace_agents(ordered)
+                        self.refresh()
+                    self.persist()
+                return False
+            GLib.idle_add(finish)
         self.sync_executor.submit(worker)
 
     def push_host_state(self, host):
@@ -2590,7 +2736,7 @@ class App(Gtk.Window):
         terminal.set_scrollback_lines(10000)
         label = Gtk.Box(spacing=5)
         label.pack_start(Gtk.Label(label=directory["name"] + " · " + agent["name"]), True, True, 0)
-        kind, quota_executable = quota_agent(agent["command"])
+        kind, _ = quota_agent(agent["command"])
         if kind == "codex":
             # Codex handles Page Up/Down, while tmux may capture the wheel and
             # enter an empty copy-mode history instead of scrolling Codex.
@@ -2616,49 +2762,26 @@ class App(Gtk.Window):
                 return True
             terminal.add_events(Gdk.EventMask.SCROLL_MASK | Gdk.EventMask.SMOOTH_SCROLL_MASK)
             terminal.connect("scroll-event", scroll_codex)
-        quota_box = Gtk.Box(spacing=3)
         hourly_img, update_hourly = make_quota_indicator()
-        sep = Gtk.Label(label="·")
-        sep.get_style_context().add_class("subtitle")
-        weekly_img, update_weekly = make_quota_indicator()
-        days_label = Gtk.Label(label="")
-        days_label.get_style_context().add_class("subtitle")
-        quota_box.pack_start(hourly_img, False, False, 0)
-        quota_box.pack_start(sep, False, False, 0)
-        quota_box.pack_start(weekly_img, False, False, 0)
-        quota_box.pack_start(days_label, False, False, 0)
         if kind:
-            quota_box.show_all()
-            days_label.hide()
-        quota_box.set_no_show_all(True)
-        label.pack_start(quota_box, False, False, 0)
+            hourly_img.show_all()
+            label.pack_start(hourly_img, False, False, 0)
 
+        shown_hourly = None
         def update_quota_display(result):
+            nonlocal shown_hourly
             if not kind:
                 return
-            hourly_pct = None
-            weekly_pct = None
-            days_val = None
-            for item in result:
-                if isinstance(item, (list, tuple)) and len(item) >= 2:
-                    limit, pct = item[0], item[1]
-                    if limit == 300:
-                        hourly_pct = pct
-                    elif limit == 10080:
-                        weekly_pct = pct
-                        if len(item) > 2 and item[2]:
-                            days_val = item[2]
-            update_hourly(hourly_pct)
-            hourly_img.set_tooltip_text(f"小时余量: {hourly_pct}%" if hourly_pct is not None else "小时余量: --")
-            update_weekly(weekly_pct)
-            weekly_img.set_tooltip_text(f"周余量: {weekly_pct}%" if weekly_pct is not None else "周余量: --")
-            if days_val:
-                days_label.set_text(days_val)
-                days_label.show()
-            else:
-                days_label.set_text("")
-                days_label.hide()
-            quota_box.show()
+            minutes, percent, *_ = hourly_quota(result)
+            current = (minutes, percent)
+            if current == shown_hourly:
+                return
+            shown_hourly = current
+            update_hourly(percent)
+            period = f"{minutes // 60}小时" if minutes % 60 == 0 else f"{minutes}分钟"
+            remaining = "--" if percent is None else f"{percent}%"
+            hourly_img.set_tooltip_text(f"{period}剩余 {remaining}")
+
         image_button = Gtk.Button.new_from_icon_name("image-x-generic-symbolic", Gtk.IconSize.MENU)
         image_button.set_relief(Gtk.ReliefStyle.NONE)
         image_button.set_tooltip_text("发送图片给此终端的 Agent")
@@ -2673,13 +2796,13 @@ class App(Gtk.Window):
             "retry": 0,
             "retry_source": None,
             "watchdog_timer": None,
-            "quota_busy": False,
             "connected_at": 0,
             "last_output_at": 0.0
         }
         image_button.connect("clicked", lambda *_: self.send_image_dialog(host, socket_path, terminal, state))
         def close_tab(*_):
             state["closed"] = True
+            stop_prompt_timer()
             if not state.get("closed_by_sync"):
                 self.sync_async(host, "DELETE", session_id)
             if state["watchdog_timer"]:
@@ -2728,7 +2851,8 @@ class App(Gtk.Window):
         close.connect("clicked", close_tab)
         self.sessions.append({"terminal": terminal, "label": label, "key": key, "id": session_id, "host": host, "state": state,
                               "item": item, "socket_path": socket_path, "close_button": close, "started_at": time.monotonic(),
-                              "quota_indicators": (hourly_img, weekly_img)})
+                              "quota_indicators": (hourly_img,) if kind else (),
+                              "update_quota": update_quota_display})
         self.rebuild_view(selected=terminal if activate else None)
         def spawned(_terminal, pid, error, *_):
             if error:
@@ -2741,92 +2865,44 @@ class App(Gtk.Window):
         label.reorder_child(close, -1)
         self.sessions[-1]["reconnect_button"] = reconnect
         self.scale_layout(label)
-        def read_quota():
-            if state["closed"]:
-                return False
-            if state["quota_busy"] or not state["connected"]:
-                return True
-            if not kind:
-                return False
-            state["quota_busy"] = True
-            def worker():
-                result = []
-                address = ssh_address(host)
-                base = ["ssh", "-S", socket_path, "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-p", str(ssh_port(host)), "-l", host["username"], "--", address]
-                try:
-                    if kind == "agy":
-                        remote = quota_remote_command(directory["path"], quota_executable, '-p "/usage" --output-format json')
-                        output = subprocess.check_output(base + [remote], stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15).decode("utf-8", errors="replace").strip()
-                        if output and not output.startswith("{") and "{" in output:
-                            output = output[output.find("{"):]
-                        result = quota_from_agy(json.loads(output))
-                    else:
-                        remote = quota_remote_command(directory["path"], quota_executable, "app-server --listen stdio://")
-                        proc = subprocess.Popen(base + [remote], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
-                        try:
-                            proc.stdin.write(b'{"id":1,"method":"initialize","params":{"clientInfo":{"name":"remote_dev_terminal","version":"1.0"}}}\n')
-                            deadline = time.monotonic() + 15
-                            pending = b""
-                            while time.monotonic() < deadline and len(pending) < 1000000:
-                                ready, _, _ = select.select([proc.stdout], [], [], max(0, deadline - time.monotonic()))
-                                if not ready:
-                                    break
-                                chunk = os.read(proc.stdout.fileno(), 4096)
-                                if not chunk:
-                                    break
-                                pending += chunk
-                                while b"\n" in pending:
-                                    line, pending = pending.split(b"\n", 1)
-                                    try:
-                                        msg = json.loads(line)
-                                    except ValueError:
-                                        continue
-                                    if msg.get("id") == 1 and "error" not in msg:
-                                        proc.stdin.write(b'{"method":"initialized","params":{}}\n{"id":2,"method":"account/rateLimits/read","params":{}}\n')
-                                    elif msg.get("id") == 2:
-                                        result = quota_from_codex(msg)
-                                        break
-                                if result:
-                                    break
-                        finally:
-                            proc.kill()
-                            proc.communicate()
-                except (OSError, ValueError, TypeError, subprocess.SubprocessError):
-                    pass
-                def finish():
-                    state["quota_busy"] = False
-                    if not state["closed"] and state["connected"]:
-                        update_quota_display(result)
-                    return False
-                GLib.idle_add(finish)
-            threading.Thread(target=worker, daemon=True).start()
-            return True
-        GLib.timeout_add_seconds(60, read_quota)
         auto_confirm = AutoEnterController()
 
         def visible_signature():
             try:
-                # Only inspect the visible screen, not old prompts in scrollback.
-                if hasattr(terminal, "get_text_format"):
-                    text = terminal.get_text_format(Vte.Format.TEXT)
-                else:
-                    _, row = terminal.get_cursor_position()
-                    text, _ = terminal.get_text_range_format(
-                        Vte.Format.TEXT, max(0, row - terminal.get_row_count() + 1), 0,
-                        row, terminal.get_column_count() - 1)
-                return auto_enter_signature(text or "")
+                return auto_enter_signature(live_terminal_text(terminal), codex=kind == "codex")
             except (AttributeError, TypeError, ValueError):
                 return None
 
+        prompt_timer = None
+
+        def stop_prompt_timer():
+            nonlocal prompt_timer
+            if prompt_timer is not None:
+                GLib.source_remove(prompt_timer)
+                prompt_timer = None
+
         def check_prompt():
+            nonlocal prompt_timer
             enabled = state["connected"] and self.auto_enter.get_active() and not state["closed"]
             signature = visible_signature() if enabled else None
-            if auto_confirm.observe(signature, time.monotonic(), self.delay.get_value_as_int(), enabled):
-                # A changed selection or prompt must start a fresh countdown.
+            now = time.monotonic()
+            delay = self.delay.get_value()
+            if auto_confirm.observe(signature, now, delay, enabled):
                 if visible_signature() == signature:
                     terminal.feed_child(b"\r")
                 else:
                     auto_confirm.reset()
+            stop_prompt_timer()
+            if signature and not auto_confirm.handled:
+                remaining_ms = max(1, math.ceil((auto_confirm.detected_at + delay - now) * 1000))
+
+                def at_deadline():
+                    nonlocal prompt_timer
+                    prompt_timer = None
+                    check_prompt()
+                    return False
+
+                prompt_timer = GLib.timeout_add(remaining_ms, at_deadline)
 
         def changed(*_):
             state["last_output_at"] = time.monotonic()
@@ -2885,7 +2961,7 @@ class App(Gtk.Window):
         reconnect.connect("clicked", start)
         def child_exited(_terminal, status):
             state["connected"] = False
-            update_quota_display([])
+            stop_prompt_timer()
             auto_confirm.reset()
             if state["closed"]:
                 return
@@ -2913,7 +2989,8 @@ class App(Gtk.Window):
                 state["connected"] = True
                 state["connected_at"] = time.monotonic()
                 state["last_output_at"] = time.monotonic()
-                read_quota()
+                self.update_quota_displays()
+                self.refresh_quotas()
                 changed()
             return True
         GLib.timeout_add_seconds(1, check_connection)

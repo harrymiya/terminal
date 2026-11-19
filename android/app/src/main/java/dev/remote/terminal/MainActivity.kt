@@ -79,6 +79,8 @@ import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Search
@@ -86,7 +88,7 @@ import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.AssistChip
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -151,7 +153,10 @@ import dev.remote.terminal.data.SessionStore
 import dev.remote.terminal.data.SyncClient
 import dev.remote.terminal.data.LocalStore
 import dev.remote.terminal.data.ProjectDirectory
+import dev.remote.terminal.data.QuotaWindow
+import dev.remote.terminal.data.quotaExecutable
 import dev.remote.terminal.data.TerminalTask
+import dev.remote.terminal.data.antigravityExecutable
 import dev.remote.terminal.data.codexExecutable
 import dev.remote.terminal.data.HostRoute
 import dev.remote.terminal.data.HostRouteResolver
@@ -166,6 +171,7 @@ import dev.remote.terminal.ssh.TerminalBuffer
 import dev.remote.terminal.ssh.TerminalConnectionRegistry
 import dev.remote.terminal.ssh.TerminalKeepAliveService
 import dev.remote.terminal.ssh.AutoConfirmEngine
+import dev.remote.terminal.ssh.AgentQuotaReader
 import dev.remote.terminal.ssh.terminalColor
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
@@ -187,37 +193,37 @@ private val Muted = Color(0xFF91A0B2)
 private val Mint = Color(0xFF83E2BD)
 private val Blue = Color(0xFF84B5FF)
 private val Coral = Color(0xFFFF8278)
-private val ActionRequestRegex = Regex("(?i)(approve (this|the)? ?(command|action)?|allow (this|the)? ?(command|action)?|would you like to|do you want to|run this command\\?|continue\\? ?\\[|\\[(y/n|yes/no)\\]|\\((y/n|yes/no)\\)|press\\s+(enter|return)\\s+to\\s+(continue|confirm|approve)|permission required|needs your approval|批准|是否允许|需要确认|是否继续)")
-private val AutoEnterPromptRegex = Regex("(?:\\[Y/n\\]|\\(Y/n\\)|\\[Yes/no\\]|(?i:press\\s+(?:enter|return)\\s+to\\s+(?:continue|confirm|approve)))\\s*$")
-
-private val SelectedApprovalRegex = Regex(
-    "(?i)^\\s*[›❯>➜]\\s*(?:\\d+[.)]\\s*)?(?:yes\\b|allow\\b|approve\\b|proceed\\b|continue\\b|允许|批准|同意|继续|确认)"
-)
-
-private fun quotaLabel(minutes: Int, percent: Int): String {
+private fun quotaLabel(minutes: Int, percent: Int?): String {
     val period = when {
         minutes % 10080 == 0 -> "${minutes / 10080}周"
         minutes % 60 == 0 -> "${minutes / 60}小时"
         else -> "${minutes}分"
     }
-    return "$period $percent%"
+    val remaining = percent?.let { "$it%" } ?: "--"
+    return "$period $remaining"
 }
 
-private fun detectAutoEnterPromptSignature(text: String): String? {
-    val visibleText = text.trimEnd()
-    val lines = visibleText.lineSequence().filter { it.isNotBlank() }.toList()
-    val promptIndex = lines.indexOfLast { AutoEnterPromptRegex.containsMatchIn(it) }
-    if (promptIndex >= 0) {
-        return lines.subList(maxOf(0, promptIndex - 4), promptIndex + 1).joinToString("\n")
-    }
-    // Interactive CLIs draw a menu and often put a keyboard hint below it.
-    // Only accept an explicitly selected affirmative option in an approval prompt.
-    val selectedIndex = lines.indexOfLast { it.trimStart().firstOrNull() in listOf('›', '❯', '>', '➜') }
-    if (selectedIndex < 0 || !SelectedApprovalRegex.containsMatchIn(lines[selectedIndex])) return null
-    val requestIndex = (selectedIndex - 1 downTo maxOf(0, selectedIndex - 20))
-        .firstOrNull { ActionRequestRegex.containsMatchIn(lines[it]) } ?: return null
-    return lines.subList(maxOf(0, requestIndex - 4), selectedIndex + 1).joinToString("\n")
-}
+private fun formatTenths(tenths: Int): String =
+    if (tenths % 10 == 0) (tenths / 10).toString() else "${tenths / 10}.${tenths % 10}"
+
+private data class AgentQuotaKey(
+    val hostId: String,
+    val username: String,
+    val endpoints: List<HostEndpoint>,
+    val executable: String,
+)
+
+private fun quotaKey(host: HostProfile, command: String): AgentQuotaKey? =
+    quotaExecutable(command)?.let { AgentQuotaKey(host.id, host.username, host.endpoints(), it) }
+
+private data class AgentQuotaTarget(
+    val host: HostProfile,
+    val command: String,
+    val session: TerminalSessionState? = null,
+)
+
+private fun List<QuotaWindow>?.hourlyQuota(): QuotaWindow? =
+    this?.filter { it.minutes < 1440 }?.minByOrNull { it.minutes }
 
 private fun alertConfirmation(context: Context) {
     val audio = context.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
@@ -257,20 +263,17 @@ private class TerminalSessionState(
     var task: TerminalTask,
     private val mainHandler: Handler,
     private val appContext: Context,
+    private val quotaFor: (TerminalTask) -> List<QuotaWindow>?,
 ) : AutoConfirmEngine.SessionCallback {
     val buffer = TerminalBuffer()
     var status by mutableStateOf("等待连接")
     var unread by mutableStateOf(false)
     var needsAction by mutableStateOf(false)
     var confirmationAlerted = false
-    var autoEnterEligible by mutableStateOf(false)
-    var autoEnterPromptSignature by mutableStateOf<String?>(null)
-    var handledPromptSignature by mutableStateOf<String?>(null)
-    var autoEnterAwaitingResponse = false
     var lastOutputAt by mutableStateOf(0L)
     val startedAt = android.os.SystemClock.elapsedRealtime()
     var isStreaming by mutableStateOf(false)
-    var codexQuota by mutableStateOf<List<Pair<Int, Int>>?>(null)
+    val quota get() = quotaFor(task)
     var hostFingerprint by mutableStateOf<String?>(null)
     var hostKeyAddress by mutableStateOf("")
     var hostKeyPort by mutableStateOf(0)
@@ -282,25 +285,16 @@ private class TerminalSessionState(
 
     override fun isConnected(): Boolean = isSessionConnected && controller.isConnected()
     override fun isClosed(): Boolean = controller.isClosed()
+    override fun usesCodexApproval(): Boolean = codexExecutable(task.agent.command) != null
     override fun getVisibleTail(): String = buffer.visibleTextTail(100)
     override fun sendInput(text: String): Boolean = controller.sendIfConnected(text)
 
-    override fun onAutoEnterScheduled(deadlineUptimeMillis: Long, promptSignature: String) {
+    override fun onAutoEnterScheduled(deadlineUptimeMillis: Long) {
         autoEnterDeadline = deadlineUptimeMillis
-        autoEnterPromptSignature = promptSignature
-        autoEnterEligible = true
     }
 
     override fun onAutoEnterCancelled() {
         autoEnterDeadline = null
-        autoEnterEligible = false
-        autoEnterAwaitingResponse = false
-    }
-
-    override fun onAutoEnterTriggered(promptSignature: String) {
-        autoEnterDeadline = null
-        autoEnterAwaitingResponse = true
-        handledPromptSignature = promptSignature
     }
 
     override fun onNeedsActionChanged(needsAction: Boolean) {
@@ -314,41 +308,22 @@ private class TerminalSessionState(
     }
 
     fun cancelAutoEnter() {
-        AutoConfirmEngine.cancel(task.id)
+        AutoConfirmEngine.reset(task.id)
         autoEnterDeadline = null
-        autoEnterEligible = false
-        autoEnterAwaitingResponse = false
-    }
-
-    fun pauseAutoEnter() {
-        AutoConfirmEngine.pause(task.id)
-        autoEnterDeadline = null
-        autoEnterEligible = false
-        autoEnterPromptSignature = null
-        autoEnterAwaitingResponse = false
-    }
-
-    fun onConnectionUnavailable() {
-        AutoConfirmEngine.cancel(task.id)
-        autoEnterDeadline = null
-        autoEnterAwaitingResponse = false
     }
 
     fun clearAttention() {
-        AutoConfirmEngine.markHandled(task.id, autoEnterPromptSignature)
+        AutoConfirmEngine.markHandled(task.id)
         autoEnterDeadline = null
         needsAction = false
-        autoEnterEligible = false
-        autoEnterPromptSignature = null
-        autoEnterAwaitingResponse = false
         unread = false
     }
 
     fun hasScheduledAutoEnter(): Boolean = autoEnterDeadline != null
 
-    fun resumeAutoEnter(delaySeconds: Int, enabled: Boolean) {
+    fun resumeAutoEnter(delayTenths: Int, enabled: Boolean) {
         AutoConfirmEngine.globalEnabled = enabled
-        AutoConfirmEngine.globalDelaySeconds = delaySeconds
+        AutoConfirmEngine.globalDelayTenths = delayTenths
         if (enabled && isConnected()) {
             AutoConfirmEngine.onOutputReceived(task.id)
         }
@@ -382,10 +357,11 @@ private fun RemoteTerminalApp(store: LocalStore) {
             }
         }
         var autoEnterEnabled by remember { mutableStateOf(store.loadAutoEnterEnabled()) }
-        var autoEnterDelaySeconds by remember { mutableIntStateOf(store.loadAutoEnterDelaySeconds()) }
+        var autoEnterDelayTenths by remember { mutableIntStateOf(store.loadAutoEnterDelayTenths()) }
+        var quotaIntervalSeconds by remember { mutableIntStateOf(store.loadQuotaIntervalSeconds()) }
         AutoConfirmEngine.init(appContext)
         AutoConfirmEngine.globalEnabled = autoEnterEnabled
-        AutoConfirmEngine.globalDelaySeconds = autoEnterDelaySeconds
+        AutoConfirmEngine.globalDelayTenths = autoEnterDelayTenths
         val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
         androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
             val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
@@ -419,9 +395,72 @@ private fun RemoteTerminalApp(store: LocalStore) {
         val dirtyHostProfiles = remember { store.loadDirtyHostProfiles().toMutableSet() }
         val workspaceVersions = remember { mutableMapOf<String, Int>() }
         val agentVersions = remember { mutableMapOf<String, Int>() }
+        val agentSaves = remember { mutableSetOf<String>() }
         val mainHandler = remember { Handler(Looper.getMainLooper()) }
         val selectedHost = hosts.firstOrNull { it.id == selectedHostId } ?: hosts.firstOrNull()
         val selectedAgent = agents.firstOrNull { it.id == selectedAgentId } ?: agents.firstOrNull()
+        val quotas = remember { androidx.compose.runtime.mutableStateMapOf<AgentQuotaKey, List<QuotaWindow>>() }
+        val quotaAttempts = remember { mutableMapOf<AgentQuotaKey, Long>() }
+        val quotaSuccesses = remember { mutableMapOf<AgentQuotaKey, Long>() }
+        val quotaJobs = remember { mutableSetOf<AgentQuotaKey>() }
+        val quotaTargets by rememberUpdatedState(buildMap {
+            for (session in sessions) {
+                val task = session.task
+                if (session.status.startsWith("已连接")) {
+                    quotaKey(task.host, task.agent.command)?.let { key ->
+                        if (key !in this) put(key, AgentQuotaTarget(task.host, task.agent.command, session))
+                    }
+                }
+            }
+            if (route == AppRoute.HOME && selectedHost != null) {
+                val developers = listOfNotNull(selectedAgent) + agents.filter { it.id != selectedAgent?.id }
+                for (agent in developers) {
+                    quotaKey(selectedHost, agent.command)?.let { key ->
+                        if (key !in this) put(key, AgentQuotaTarget(selectedHost, agent.command))
+                    }
+                }
+            }
+        })
+        LaunchedEffect(Unit) {
+            while (true) {
+                val now = android.os.SystemClock.elapsedRealtime()
+                val interval = quotaIntervalSeconds * 1_000L
+                val cacheLifetime = maxOf(300_000L, interval * 2)
+                quotaSuccesses.entries.removeAll { (key, lastSuccess) ->
+                    (now - lastSuccess >= cacheLifetime).also { expired -> if (expired) quotas.remove(key) }
+                }
+                val dueOrder = quotaTargets.entries.sortedBy { quotaAttempts[it.key] ?: Long.MIN_VALUE }
+                for ((key, target) in dueOrder) {
+                    if (quotaJobs.size >= 4) break
+                    val lastAttempt = quotaAttempts[key]
+                    if ((lastAttempt != null && now - lastAttempt < interval) || !quotaJobs.add(key)) continue
+                    quotaAttempts[key] = now
+                    launch {
+                        try {
+                            val result = withContext(Dispatchers.IO) {
+                                runCatching {
+                                    val session = target.session
+                                    if (session != null) session.controller.readQuota(target.command, session.task.directory.path)
+                                    else RemoteDirectoryBrowser.withSshSession(target.host, store) {
+                                        AgentQuotaReader.read(it, target.command, null)
+                                    }
+                                }.getOrNull()
+                            }
+                            if (!result.isNullOrEmpty()) {
+                                quotas[key] = result
+                                quotaSuccesses[key] = android.os.SystemClock.elapsedRealtime()
+                            }
+                        } finally {
+                            quotaJobs.remove(key)
+                        }
+                    }
+                }
+                quotaAttempts.entries.removeAll { (key, lastAttempt) ->
+                    key !in quotaJobs && now - lastAttempt >= cacheLifetime
+                }
+                kotlinx.coroutines.delay(1_000L)
+            }
+        }
         SideEffect { SyncClient.configure(syncUrl, syncToken) }
 
         fun selectHost(host: HostProfile) {
@@ -518,13 +557,32 @@ private fun RemoteTerminalApp(store: LocalStore) {
             }
         }
 
+        fun replaceAgents(ordered: List<AgentPreset>) {
+            if (agents.toList() == ordered) return
+            val previous = agents.associateBy { it.id }
+            val nextIds = ordered.mapTo(mutableSetOf()) { it.id }
+            val nextByCommand = ordered.associateBy { it.command }
+            fun updatedSelection(id: String): String =
+                if (id in nextIds) id else nextByCommand[previous[id]?.command]?.id ?: ordered.firstOrNull()?.id.orEmpty()
+
+            hosts.forEach { host ->
+                val id = store.loadHostSelectedAgent(host.id)
+                if (id.isNotBlank() && id !in nextIds) store.saveHostSelectedAgent(host.id, updatedSelection(id))
+            }
+            selectedAgentId = updatedSelection(selectedAgentId)
+            agents.clear()
+            agents.addAll(ordered)
+            store.saveAgents(ordered)
+        }
+
         fun syncAgentList(host: HostProfile, items: List<AgentPreset>) {
             if (syncUrl.isBlank()) return
             val identity = SyncClient.agentRevisionIdentity(store.loadSyncUsername())
             val version = (agentVersions[identity] ?: 0) + 1
             agentVersions[identity] = version
+            agentSaves.add(identity)
             scope.launch {
-                runCatching {
+                val result = runCatching {
                     withContext(SyncClient.dispatcher) {
                         val baseRevision = store.loadAgentRevision(identity).coerceAtLeast(0)
                         val response = SyncClient.saveAgents(host, items, baseRevision)
@@ -532,12 +590,11 @@ private fun RemoteTerminalApp(store: LocalStore) {
                         response
                     }
                 }
+                if (agentVersions[identity] == version) agentSaves.remove(identity)
+                result
                     .onSuccess { response ->
                         if (agentVersions[identity] == version) {
-                            val merged = SyncClient.agentsFromSnapshot(response)
-                            if (agents.toList() != merged) {
-                                agents.clear(); agents.addAll(merged); store.saveAgents(merged)
-                            }
+                            replaceAgents(SyncClient.agentsFromSnapshot(response))
                         }
                     }
                     .onFailure { snackbars.showSnackbar("Agent 同步失败：${it.message}") }
@@ -705,21 +762,21 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 sessionStore.save(task)
                 store.enqueueSessionSync(task, "PUT", SyncClient.sessionItem(task))
             }
-            val state = TerminalSessionState(task, mainHandler, appContext)
+            val state = TerminalSessionState(task, mainHandler, appContext) { sessionTask ->
+                quotaKey(sessionTask.host, sessionTask.agent.command)?.let(quotas::get)
+            }
             state.controller = SshTerminalController(
                 task = task, store = store, restoreOnly = restoredTask != null,
                 onStatus = { value ->
                     state.isSessionConnected = value.startsWith("已连接")
                     mainHandler.post {
                         state.status = value
-                        if (!value.startsWith("已连接")) state.codexQuota = null
                         if (value.contains("重连") || value.contains("恢复 SSH") || value == "已断开" || value.startsWith("远端终端已结束")) {
-                            state.onConnectionUnavailable()
+                            state.cancelAutoEnter()
                         }
-                        if (value.startsWith("已连接")) state.resumeAutoEnter(autoEnterDelaySeconds, autoEnterEnabled)
+                        if (value.startsWith("已连接")) state.resumeAutoEnter(autoEnterDelayTenths, autoEnterEnabled)
                     }
                 },
-                onQuota = { quota -> mainHandler.post { state.codexQuota = quota } },
                 onBytes = { bytes ->
                     state.buffer.feed(bytes)
                     AutoConfirmEngine.onOutputReceived(task.id)
@@ -886,13 +943,13 @@ private fun RemoteTerminalApp(store: LocalStore) {
                         val agentRevisionIdentity = SyncClient.agentRevisionIdentity(store.loadSyncUsername())
                         val localAgentRevision = store.loadAgentRevision(agentRevisionIdentity)
                         val remoteAgentRevision = agentsSnapshot.optInt("revision", 0)
-                        if ((!configuredAgents && agents.isNotEmpty()) || localAgentRevision < remoteAgentRevision) {
-                            syncAgentList(localHost, agents.toList())
-                        } else {
-                            if (agents.toList() != remoteAgents) {
-                                agents.clear(); agents.addAll(remoteAgents); store.saveAgents(remoteAgents)
+                        if (agentRevisionIdentity !in agentSaves) {
+                            if (!configuredAgents && agents.isNotEmpty()) {
+                                syncAgentList(localHost, agents.toList())
+                            } else if (configuredAgents && remoteAgentRevision > localAgentRevision) {
+                                replaceAgents(remoteAgents)
+                                store.saveAgentRevision(agentRevisionIdentity, remoteAgentRevision)
                             }
-                            store.saveAgentRevision(agentRevisionIdentity, remoteAgentRevision)
                         }
                         if (hostState.optBoolean("configured")) {
                             val profile = hostState.optJSONObject("state") ?: JSONObject()
@@ -940,6 +997,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
             when (route) {
                 AppRoute.HOME -> HomeScreen(
                     hosts = hosts, agents = agents, selectedHost = selectedHost, selectedAgent = selectedAgent,
+                    quotaFor = { host, agent -> quotaKey(host, agent.command)?.let(quotas::get) },
                     sessions = sessions, onSelectHost = { selectHost(it) }, onSelectAgent = { agent ->
                         selectedAgentId = agent.id
                         selectedHost?.let { host ->
@@ -970,6 +1028,13 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 AppRoute.AGENTS -> AgentsScreen(
                     agents = agents, onBack = { route = AppRoute.HOME }, onAdd = { addingAgent = true },
                     onEdit = { editingAgent = it }, onDelete = { deletingAgent = it },
+                    onMove = { index, offset ->
+                        val agent = agents.removeAt(index)
+                        agents.add(index + offset, agent)
+                        val ordered = agents.toList()
+                        store.saveAgents(ordered)
+                        selectedHost?.let { syncAgentList(it, ordered) }
+                    },
                 )
                 AppRoute.SETTINGS -> SettingsScreen(
                     store = store,
@@ -988,21 +1053,26 @@ private fun RemoteTerminalApp(store: LocalStore) {
                     },
                     onLogin = { route = AppRoute.LOGIN },
                     enabled = autoEnterEnabled,
-                    delaySeconds = autoEnterDelaySeconds,
+                    delayTenths = autoEnterDelayTenths,
+                    quotaIntervalSeconds = quotaIntervalSeconds,
+                    onQuotaIntervalChange = { seconds ->
+                        quotaIntervalSeconds = seconds
+                        store.saveQuotaIntervalSeconds(seconds)
+                    },
                     onEnabledChange = { enabled ->
                         autoEnterEnabled = enabled
                         store.saveAutoEnterEnabled(enabled)
                         AutoConfirmEngine.globalEnabled = enabled
                         sessions.forEach { session ->
-                            if (enabled) session.resumeAutoEnter(autoEnterDelaySeconds, enabled)
+                            if (enabled) session.resumeAutoEnter(autoEnterDelayTenths, enabled)
                             else session.cancelAutoEnter()
                         }
                     },
-                    onDelaySecondsChange = { seconds ->
-                        autoEnterDelaySeconds = seconds
-                        store.saveAutoEnterDelaySeconds(seconds)
-                        AutoConfirmEngine.globalDelaySeconds = seconds
-                        if (autoEnterEnabled) sessions.forEach { it.resumeAutoEnter(seconds, autoEnterEnabled) }
+                    onDelayTenthsChange = { tenths ->
+                        autoEnterDelayTenths = tenths
+                        store.saveAutoEnterDelayTenths(tenths)
+                        AutoConfirmEngine.globalDelayTenths = tenths
+                        if (autoEnterEnabled) sessions.forEach { it.resumeAutoEnter(tenths, autoEnterEnabled) }
                     },
                     onBack = { route = if (syncUrl.isNotBlank() && syncToken.isBlank()) AppRoute.LOGIN else AppRoute.HOME },
                 )
@@ -1104,7 +1174,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
             onDismiss = { deletingDirectory = null },
         ) }
         deletingAgent?.let { agent -> ConfirmDeleteDialog(
-            title = "删除 Agent？", detail = "${agent.name} 的自定义配置将被移除。",
+            title = "删除开发者？", detail = "${agent.name} 的自定义配置将被移除。",
             onConfirm = {
                 agents.removeAll { it.id == agent.id }; store.saveAgents(agents.toList())
                 selectedHost?.let { syncAgentList(it, agents.toList()) }
@@ -1148,6 +1218,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
 @Composable
 private fun HomeScreen(
     hosts: List<HostProfile>, agents: List<AgentPreset>, selectedHost: HostProfile?, selectedAgent: AgentPreset?,
+    quotaFor: (HostProfile, AgentPreset) -> List<QuotaWindow>?,
     sessions: List<TerminalSessionState>, onSelectHost: (HostProfile) -> Unit, onSelectAgent: (AgentPreset) -> Unit,
     onManage: () -> Unit, onAddHost: () -> Unit, onAddDirectory: () -> Unit, onOpenAgents: () -> Unit, onOpenSettings: () -> Unit,
     onStartTask: (HostProfile, ProjectDirectory, AgentPreset) -> Unit, onResumeSession: (Int) -> Unit,
@@ -1178,7 +1249,7 @@ private fun HomeScreen(
                 Icon(Icons.Default.Dns, contentDescription = "管理主机和目录", tint = Muted)
             }
             IconButton(onClick = onOpenAgents) {
-                Icon(Icons.Default.SmartToy, contentDescription = "Agent 配置", tint = Muted)
+                Icon(Icons.Default.SmartToy, contentDescription = "编辑开发者", tint = Muted)
             }
             IconButton(onClick = onOpenSettings) {
                 Icon(Icons.Default.Settings, contentDescription = "设置", tint = Muted)
@@ -1250,13 +1321,9 @@ private fun HomeScreen(
                                 session.needsAction -> Text("!", color = Coral, fontWeight = FontWeight.Bold)
                                 session.unread -> Box(Modifier.size(7.dp).background(Blue, CircleShape))
                             }
-                            if (codexExecutable(session.task.agent.command) != null) {
-                                val quota = session.codexQuota
+                            if (codexExecutable(session.task.agent.command) != null || antigravityExecutable(session.task.agent.command) != null) {
                                 Column(Modifier.padding(start = 10.dp), horizontalAlignment = Alignment.End) {
-                                    if (quota == null) Text("额度 --", color = Muted, fontSize = 9.sp, lineHeight = 11.sp)
-                                    else quota.take(2).forEach { (minutes, percent) ->
-                                        Text(quotaLabel(minutes, percent), color = if (percent <= 20) Coral else Muted, fontSize = 9.sp, lineHeight = 11.sp, maxLines = 1)
-                                    }
+                                    HourlyQuotaLabel(session.quota)
                                 }
                             }
                         }
@@ -1313,21 +1380,38 @@ private fun HomeScreen(
             }
             selectedHost?.let { host ->
                 Divider(color = Edge.copy(alpha = .8f))
+                Row(Modifier.fillMaxWidth().padding(top = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    SectionTitle("开发者", "")
+                    Spacer(Modifier.weight(1f))
+                    TextButton(onClick = onOpenAgents) { Text("编辑", color = Mint) }
+                }
+                if (agents.isEmpty()) {
+                    EmptyRow("还没有开发者", "添加一个启动命令，例如 codex 或 opencode。", onOpenAgents, "添加")
+                } else {
+                    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                        agents.forEach { agent ->
+                            val selected = selectedAgent?.id == agent.id
+                            Row(
+                                Modifier.fillMaxWidth().clip(RoundedCornerShape(9.dp))
+                                    .background(if (selected) PanelRaised else Color.Transparent)
+                                    .selectable(selected = selected, onClick = { onSelectAgent(agent) })
+                                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                Text("${agent.icon}  ${agent.name}", color = if (selected) White else Muted,
+                                    fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                                if (quotaExecutable(agent.command) != null) {
+                                    AgentQuotaDetails(quotaFor(host, agent))
+                                }
+                            }
+                        }
+                    }
+                }
                 Row(Modifier.fillMaxWidth().padding(top = 14.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                     SectionTitle("开发目录", "${host.directories.size} 个")
                     Spacer(Modifier.weight(1f))
                     TextButton(onClick = onAddDirectory) { Icon(Icons.Default.Add, null, tint = Mint, modifier = Modifier.size(18.dp)); Spacer(Modifier.width(3.dp)); Text("添加目录", color = Mint) }
-                }
-                if (agents.isEmpty()) {
-                    EmptyRow("还没有 Agent 配置", "添加一个命令，例如 codex 或 opencode。", onOpenAgents, "去配置")
-                } else {
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(7.dp), modifier = Modifier.padding(bottom = 13.dp)) {
-                        items(agents, key = { it.id }) { agent ->
-                            val selected = selectedAgent?.id == agent.id
-                            AssistChip(onClick = { onSelectAgent(agent) }, label = { Text("${agent.icon}  ${agent.name}", fontSize = 12.sp) },
-                                leadingIcon = if (selected) ({ Text("✓", color = Mint, fontSize = 12.sp) }) else null)
-                        }
-                    }
                 }
                 if (host.directories.isEmpty()) {
                     EmptyRow("保存你的第一个项目目录", "例如 /workspace/my-app", onAddDirectory, "添加目录")
@@ -1511,27 +1595,36 @@ private fun EmptyRow(title: String, detail: String, action: () -> Unit, label: S
 }
 
 @Composable
-private fun AgentsScreen(agents: List<AgentPreset>, onBack: () -> Unit, onAdd: () -> Unit, onEdit: (AgentPreset) -> Unit, onDelete: (AgentPreset) -> Unit) {
+private fun AgentsScreen(
+    agents: List<AgentPreset>, onBack: () -> Unit, onAdd: () -> Unit, onEdit: (AgentPreset) -> Unit,
+    onDelete: (AgentPreset) -> Unit, onMove: (Int, Int) -> Unit,
+) {
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
         Row(Modifier.fillMaxWidth().padding(top = 18.dp, bottom = 22.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, null, tint = White) }
-            Column(Modifier.weight(1f)) { Text("Agent 配置", color = White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold); Text("名称、图标和启动命令都可自定义", color = Muted, fontSize = 12.sp) }
+            Column(Modifier.weight(1f)) { Text("编辑开发者", color = White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold); Text("名称、图标和启动命令都可自定义", color = Muted, fontSize = 12.sp) }
             IconButton(onClick = onAdd) { Icon(Icons.Default.Add, null, tint = Mint) }
         }
         Text("已配置 ${agents.size} 个", color = Muted, fontSize = 12.sp, modifier = Modifier.padding(bottom = 10.dp))
         Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
-            agents.forEach { agent ->
+            agents.forEachIndexed { index, agent ->
                 Surface(color = Panel, shape = RoundedCornerShape(15.dp), border = androidx.compose.foundation.BorderStroke(1.dp, Edge)) {
                     Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 13.dp), verticalAlignment = Alignment.CenterVertically) {
                         Box(Modifier.size(39.dp).clip(RoundedCornerShape(12.dp)).background(PanelRaised), contentAlignment = Alignment.Center) { Text(agent.icon, fontSize = 19.sp) }
                         Spacer(Modifier.width(11.dp))
-                        Column(Modifier.weight(1f)) { Text(agent.name, color = White, fontWeight = FontWeight.Medium, fontSize = 14.sp); Text(agent.command, color = Mint, fontFamily = FontFamily.Monospace, fontSize = 11.sp) }
+                        Column(Modifier.weight(1f)) { Text(agent.name, color = White, fontWeight = FontWeight.Medium, fontSize = 14.sp); Text(agent.command, color = Mint, fontFamily = FontFamily.Monospace, fontSize = 11.sp, maxLines = 2, overflow = TextOverflow.Ellipsis) }
+                        IconButton(enabled = index > 0, onClick = { onMove(index, -1) }, modifier = Modifier.size(32.dp)) {
+                            Icon(Icons.Default.KeyboardArrowUp, "上移 ${agent.name}")
+                        }
+                        IconButton(enabled = index < agents.lastIndex, onClick = { onMove(index, 1) }, modifier = Modifier.size(32.dp)) {
+                            Icon(Icons.Default.KeyboardArrowDown, "下移 ${agent.name}")
+                        }
                         IconButton(onClick = { onEdit(agent) }) { Icon(Icons.Default.Edit, null, tint = Muted, modifier = Modifier.size(18.dp)) }
                         IconButton(onClick = { onDelete(agent) }) { Icon(Icons.Default.DeleteOutline, null, tint = Muted, modifier = Modifier.size(19.dp)) }
                     }
                 }
             }
-            if (agents.isEmpty()) EmptyRow("添加一个 Agent", "命令会在所选开发目录中启动。", onAdd, "添加")
+            if (agents.isEmpty()) EmptyRow("添加开发者", "命令会在所选开发目录中启动。", onAdd, "添加")
         }
     }
 }
@@ -1595,37 +1688,50 @@ private fun SessionTab(session: TerminalSessionState, selected: Boolean, onClick
     val pulse by transition.animateFloat(0.35f, 1f, infiniteRepeatable(tween(650), RepeatMode.Reverse), label = "pulse")
     val color = when { session.needsAction -> Coral; selected -> Mint; session.unread -> Blue; else -> statusTint(session.status) }
     val deadline = session.autoEnterDeadline
-    var remainingSeconds by remember(session, deadline) { mutableIntStateOf(0) }
+    var remainingTenths by remember(session, deadline) { mutableIntStateOf(0) }
     LaunchedEffect(deadline) {
         while (deadline != null) {
             val remaining = deadline - android.os.SystemClock.elapsedRealtime()
-            if (remaining <= 0) { remainingSeconds = 0; break }
-            remainingSeconds = ((remaining + 999) / 1000).toInt()
-            kotlinx.coroutines.delay((remaining - (remainingSeconds - 1) * 1000L).coerceAtLeast(1))
+            if (remaining <= 0) { remainingTenths = 0; break }
+            remainingTenths = ((remaining + 99) / 100).toInt()
+            kotlinx.coroutines.delay((remaining - (remainingTenths - 1) * 100L).coerceAtLeast(1))
         }
     }
     Surface(onClick = onClick, color = if (selected) PanelRaised else Panel, shape = CircleShape,
         border = androidx.compose.foundation.BorderStroke(1.dp, if (selected) color.copy(alpha = .7f) else Edge)) {
         Row(Modifier.padding(start = 10.dp, end = 5.dp, top = 6.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             Box(Modifier.size(7.dp).alpha(if (session.isStreaming) pulse else 1f).background(color, CircleShape))
-            val supportsQuota = codexExecutable(session.task.agent.command) != null || session.task.agent.id == "antigravity"
-            Box(Modifier.width(if (supportsQuota) 64.dp else 20.dp), contentAlignment = Alignment.Center) {
-                if (remainingSeconds > 0) {
-                    Text(remainingSeconds.toString(), color = color, fontWeight = FontWeight.Bold, fontSize = 11.sp)
-                } else if (supportsQuota) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        val quota = session.codexQuota
-                        if (quota == null) Text("额度 --", color = Muted, fontSize = 9.sp, lineHeight = 10.sp)
-                        else quota.take(2).forEach { (minutes, percent) ->
-                            Text(quotaLabel(minutes, percent), color = if (percent <= 20) Coral else Muted, fontSize = 9.sp, lineHeight = 10.sp, maxLines = 1)
-                        }
-                    }
-                }
+            val supportsQuota = codexExecutable(session.task.agent.command) != null || antigravityExecutable(session.task.agent.command) != null
+            if (remainingTenths > 0) {
+                Text(formatTenths(remainingTenths), color = color, fontWeight = FontWeight.Bold, fontSize = 11.sp)
             }
+            if (supportsQuota) HourlyQuotaLabel(session.quota)
             Text(session.task.displayName, color = if (selected) White else Muted, fontSize = 11.sp, maxLines = 1)
             IconButton(onClick = onClose, modifier = Modifier.size(20.dp)) { Icon(Icons.Default.Close, null, tint = Muted, modifier = Modifier.size(13.dp)) }
         }
     }
+}
+
+@Composable
+private fun HourlyQuotaLabel(quota: List<QuotaWindow>?) {
+    val hourly = quota.hourlyQuota()
+    val percent = hourly?.remainingPercent
+    Text(quotaLabel(hourly?.minutes ?: 300, percent), color = if (percent != null && percent <= 20) Coral else Muted,
+        fontSize = 10.sp, maxLines = 1)
+}
+
+@Composable
+private fun AgentQuotaDetails(quota: List<QuotaWindow>?) {
+    val hourly = quota.hourlyQuota()
+    val weekly = quota?.firstOrNull { it.minutes == 10080 }
+    val remaining = weekly?.resetsAt?.minus(java.time.Instant.now().epochSecond)
+    val reset = when {
+        remaining == null -> "--"
+        remaining in 1L until 86_400L -> "<1天"
+        else -> "${(remaining / 86_400L).coerceAtLeast(0)}天"
+    }
+    Text("${quotaLabel(hourly?.minutes ?: 300, hourly?.remainingPercent)} · ${quotaLabel(10080, weekly?.remainingPercent)} · 重置 $reset",
+        color = Muted, fontSize = 10.sp, maxLines = 1)
 }
 
 private data class TerminalSelection(
@@ -1887,7 +1993,11 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
                         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                         val clip = clipboard.primaryClip
                         val text = if (clip != null && clip.itemCount > 0) clip.getItemAt(0).coerceToText(context)?.toString().orEmpty() else ""
-                    if (text.isNotEmpty()) { resetInput?.invoke(); session.controller.send(session.buffer.pasteSequence(text)); session.clearAttention() }
+                        if (text.isNotEmpty()) {
+                            resetInput?.invoke()
+                            session.clearAttention()
+                            session.controller.send(session.buffer.pasteSequence(text))
+                        }
                         selection = null; selectionMenu = false; showKeyboard()
                     }) { Text("粘贴") }
                     TextButton(onClick = { selection = null; selectionMenu = false }) { Text("取消") }
@@ -1911,7 +2021,10 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
                         val removedText = previous.substring(prefix, previous.length - suffix)
                         val removed = removedText.codePointCount(0, removedText.length)
                         val added = next.substring(prefix, next.length - suffix.coerceAtMost(next.length - prefix))
-                        if (added.isNotEmpty() || removed > 0) scrollbackTopRow = null
+                        if (added.isNotEmpty() || removed > 0) {
+                            scrollbackTopRow = null
+                            session.clearAttention()
+                        }
                         if (removed > 0) {
                             val backspace = if (ctrlArmed) "\b" else "\u007f"
                             session.controller.send((if (altArmed) "\u001b" else "") + backspace.repeat(removed))
@@ -1924,15 +2037,14 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
                             session.controller.send(outgoing)
                             ctrlArmed = false; altArmed = false; shiftArmed = false
                         }
-                        if (added.isNotEmpty() || removed > 0) session.clearAttention()
                         previous = next
                     }
                 }
                 fun sendBackspace() {
                     scrollbackTopRow = null
+                    session.clearAttention()
                     session.controller.send((if (altArmed) "\u001b" else "") + if (ctrlArmed) "\b" else "\u007f")
                     ctrlArmed = false; altArmed = false; shiftArmed = false
-                    session.clearAttention()
                 }
                 fun pasteClipboard(): Boolean {
                     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
@@ -1943,8 +2055,8 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
                     if (text.isNotEmpty()) {
                         scrollbackTopRow = null
                         resetInput?.invoke()
-                        session.controller.send(session.buffer.pasteSequence(text))
                         session.clearAttention()
+                        session.controller.send(session.buffer.pasteSequence(text))
                     }
                     return true
                 }
@@ -1968,8 +2080,8 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
                                     resetInput?.invoke()
                                     if (committed.isNotEmpty()) {
                                         scrollbackTopRow = null
-                                        session.controller.send(session.buffer.pasteSequence(committed))
                                         session.clearAttention()
+                                        session.controller.send(session.buffer.pasteSequence(committed))
                                     }
                                     return true
                                 }
@@ -2020,9 +2132,9 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
                         if (enter) {
                             if (event != null && event.action != KeyEvent.ACTION_DOWN) return@setOnEditorActionListener true
                             if (event != null && event.repeatCount > 0) return@setOnEditorActionListener true
+                            session.clearAttention()
                             session.controller.send("\r")
                             ctrlArmed = false; altArmed = false; shiftArmed = false
-                            session.clearAttention()
                             ignoreChange = true
                             setText("")
                             true
@@ -2066,16 +2178,16 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
                                     if (text.isNotEmpty()) {
                                         scrollbackTopRow = null
                                         resetInput?.invoke()
-                                        session.controller.send(session.buffer.pasteSequence(text))
                                         session.clearAttention()
+                                        session.controller.send(session.buffer.pasteSequence(text))
                                     }
                                     ctrlArmed = false; altArmed = false; shiftArmed = false
                                 }
                                 "RESU" -> {
                                     resetInput?.invoke()
+                                    session.clearAttention()
                                     session.controller.send(value)
                                     ctrlArmed = false; altArmed = false; shiftArmed = false
-                                    session.clearAttention()
                                     scope.launch {
                                         kotlinx.coroutines.delay(200)
                                         inputView?.onEditorAction(EditorInfo.IME_ACTION_SEND)
@@ -2090,8 +2202,8 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
                                     if (direction == null && shiftArmed && send == "/") send = "?"
                                     if (direction == null && ctrlArmed && send.length == 1 && send[0].code in 32..126) send = (send[0].lowercaseChar().code and 0x1f).toChar().toString()
                                     if (direction == null && altArmed) send = "\u001b$send"
-                                    session.controller.send(send); ctrlArmed = false; altArmed = false; shiftArmed = false
                                     session.clearAttention()
+                                    session.controller.send(send); ctrlArmed = false; altArmed = false; shiftArmed = false
                                 }
                             }
                         }, modifier = Modifier.weight(1f).height(35.dp), color = if (armed) Color(0xFF27453F) else Panel,
@@ -2166,9 +2278,11 @@ private fun SettingsScreen(
     onSyncSettingsChange: (String, String) -> Unit,
     onLogin: () -> Unit,
     enabled: Boolean,
-    delaySeconds: Int,
+    delayTenths: Int,
+    quotaIntervalSeconds: Int,
+    onQuotaIntervalChange: (Int) -> Unit,
     onEnabledChange: (Boolean) -> Unit,
-    onDelaySecondsChange: (Int) -> Unit,
+    onDelayTenthsChange: (Int) -> Unit,
     onBack: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -2178,7 +2292,8 @@ private fun SettingsScreen(
     var keyMessage by remember { mutableStateOf("") }
     var draftSyncUrl by rememberSaveable(syncUrl) { mutableStateOf(syncUrl) }
     var draftSyncInterval by remember(syncIntervalSeconds) { mutableStateOf(syncIntervalSeconds.toFloat()) }
-    var draftDelay by remember(delaySeconds) { mutableStateOf(delaySeconds.toFloat()) }
+    var draftDelay by remember(delayTenths) { mutableStateOf(delayTenths.toFloat()) }
+    var draftQuotaInterval by remember(quotaIntervalSeconds) { mutableStateOf(quotaIntervalSeconds.toFloat()) }
     fun finish() {
         onSyncSettingsChange(draftSyncUrl.trim(), syncToken)
         onBack()
@@ -2235,6 +2350,18 @@ private fun SettingsScreen(
                 valueRange = 5f..300f,
                 steps = 58,
             )
+            Divider()
+            Text("开发者额度", color = White, fontWeight = FontWeight.SemiBold)
+            val quotaSeconds = ((draftQuotaInterval / 5f).roundToInt() * 5).coerceIn(15, 300)
+            Text("刷新周期 ${quotaSeconds} 秒", color = White, fontSize = 13.sp)
+            Slider(
+                value = draftQuotaInterval,
+                onValueChange = { draftQuotaInterval = it },
+                onValueChangeFinished = { onQuotaIntervalChange(((draftQuotaInterval / 5f).roundToInt() * 5).coerceIn(15, 300)) },
+                valueRange = 15f..300f,
+                steps = 56,
+            )
+            Divider()
             Text("自动回车", color = White, fontWeight = FontWeight.SemiBold)
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Column(Modifier.weight(1f)) {
@@ -2243,13 +2370,17 @@ private fun SettingsScreen(
                 }
                 Switch(checked = enabled, onCheckedChange = onEnabledChange)
             }
-            Text("延迟 ${draftDelay.roundToInt()} 秒", color = White, fontSize = 13.sp)
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                val tenths = draftDelay.roundToInt().coerceIn(1, 300)
+                Text("延迟 ${formatTenths(tenths)} 秒", color = White, fontSize = 13.sp, modifier = Modifier.weight(1f))
+                TextButton(enabled = tenths > 1, onClick = { onDelayTenthsChange(tenths - 1) }) { Text("−0.1") }
+                TextButton(enabled = tenths < 300, onClick = { onDelayTenthsChange(tenths + 1) }) { Text("+0.1") }
+            }
             Slider(
                 value = draftDelay,
                 onValueChange = { draftDelay = it },
-                onValueChangeFinished = { onDelaySecondsChange(draftDelay.roundToInt().coerceIn(1, 30)) },
-                valueRange = 1f..30f,
-                steps = 28,
+                onValueChangeFinished = { onDelayTenthsChange(draftDelay.roundToInt().coerceIn(1, 300)) },
+                valueRange = 1f..300f,
             )
             Text("倒计时期间手动输入或操作会取消自动回车。", color = Muted, fontSize = 11.sp)
             Divider()
@@ -2513,7 +2644,7 @@ private fun AgentEditorDialog(initial: AgentPreset?, onDismiss: () -> Unit, onSa
     var name by remember(initial?.id) { mutableStateOf(initial?.name.orEmpty()) }
     var command by remember(initial?.id) { mutableStateOf(initial?.command.orEmpty()) }
     var icon by remember(initial?.id) { mutableStateOf(initial?.icon ?: "✳") }
-    EditorDialogFrame(if (initial == null) "添加 Agent" else "编辑 Agent", onDismiss, canSave = name.isNotBlank() && command.isNotBlank(), onConfirm = {
+    EditorDialogFrame(if (initial == null) "添加开发者" else "编辑开发者", onDismiss, canSave = name.isNotBlank() && command.isNotBlank(), onConfirm = {
         onSave(AgentPreset(initial?.id ?: UUID.randomUUID().toString(), name.trim(), command.trim(), icon.ifBlank { "✳" }))
     }) {
         OutlinedTextField(name, { name = it }, label = { Text("显示名称") }, placeholder = { Text("例如：Codex") }, singleLine = true, modifier = Modifier.fillMaxWidth())

@@ -2,6 +2,7 @@ import importlib
 from pathlib import Path
 import sys
 import unittest
+from unittest.mock import patch
 
 
 class DesktopUIEnhancementsTest(unittest.TestCase):
@@ -64,11 +65,22 @@ class DesktopUIEnhancementsTest(unittest.TestCase):
             py_file = (Path(__file__).resolve().parents[1] / platform / "remote-dev-terminal.py").read_text(encoding="utf-8")
             self.assertIn('label.set_xalign(0.0)', py_file)
 
-    def test_omarchy_agent_edit_mode_shows_and_hides_row_actions(self):
+    def test_omarchy_developer_menu_quota_and_reordering(self):
         app = self.app_mod.App()
         try:
-            app.data["hosts"] = [{"id": "host", "name": "Host", "address": "127.0.0.1", "port": 2200, "username": "dev"}]
-            app.data["agents"] = [{"id": "codex", "name": "Codex", "command": "codex"}]
+            host = {"id": "host", "name": "Host", "address": "127.0.0.1", "port": 2200, "username": "dev", "selected_agent": 0}
+            other = {**host, "id": "other", "selected_agent": 1}
+            app.persist = lambda: None
+            app.data["hosts"] = [host, other]
+            app.data["agents"] = [
+                {"id": "codex", "name": "Codex", "command": "codex"},
+                {"id": "agy", "name": "Gemini", "command": "agy"},
+            ]
+            app.quota_pending.add(self.app_mod.quota_key(host, "codex"))
+            app.quota_pending.add(self.app_mod.quota_key(host, "agy"))
+            app.quota_cache[self.app_mod.quota_key(host, "codex")] = (
+                self.app_mod.time.monotonic(), [(300, 75, None), (10080, 40, "3d")],
+            )
             app.refresh()
             app.show_all()
             app.edit_toggle.set_active(True)
@@ -76,14 +88,85 @@ class DesktopUIEnhancementsTest(unittest.TestCase):
                 self.app_mod.Gtk.main_iteration()
             row = app.agents_list.get_children()[0]
             children = row.get_children()
-            self.assertEqual(len(children), 2)
-            self.assertEqual([button.get_label() for button in children[1].get_children()], ["✎", "×"])
+            self.assertEqual([button.get_label() for button in children[1].get_children()], ["↑", "↓", "✎", "×"])
+            self.assertEqual(row.developer_quota.get_text(), "5时 75% · 周 40%\n重置 3天")
+            self.assertEqual(app.agents_list.get_children()[1].developer_quota.get_text(), "5时 -- · 周 --\n重置 --")
+            self.assertFalse(children[1].get_children()[0].get_sensitive())
+            children[1].get_children()[1].clicked()
+            self.assertEqual([item["command"] for item in app.data["agents"]], ["agy", "codex"])
+            self.assertEqual(app.agents.get_active(), 1)
+            self.assertEqual((host["selected_agent"], other["selected_agent"]), (1, 0))
             app.edit_toggle.set_active(False)
-            self.assertEqual(len(app.agents_list.get_children()[0].get_children()), 1)
+            self.assertEqual(len(app.agents_list.get_children()[1].get_children()), 2)
         finally:
             app.sync_executor.shutdown(wait=True)
             app.disconnect_by_func(self.app_mod.Gtk.main_quit)
             app.destroy()
+
+    def test_developer_quota_refresh_reuses_live_ssh_and_observes_interval(self):
+        app = self.app_mod.App()
+        try:
+            host = {"id": "host", "name": "Host", "address": "127.0.0.1", "port": 2200, "username": "dev"}
+            app.data["hosts"] = [host]
+            app.data["agents"] = [
+                {"id": "codex", "name": "Codex", "command": "codex"},
+                {"id": "resume", "name": "Resume", "command": "codex resume"},
+            ]
+            app.data["agent_quota_interval_seconds"] = 45
+            app.refresh()
+            app.show_all()
+            session = {"host": host, "item": {"agent_command": "codex", "directory_path": "/project"},
+                       "state": {"connected": True}, "socket_path": "/tmp/rdt-control", "update_quota": lambda _: None}
+            app.sessions = [session, session.copy()]
+            key = self.app_mod.quota_key(host, "codex")
+
+            with patch.object(self.app_mod.threading, "Thread") as worker, \
+                    patch.object(self.app_mod.time, "monotonic", return_value=100) as clock:
+                app.refresh_quotas()
+                self.assertEqual(worker.call_count, 1)
+                self.assertEqual(worker.call_args.kwargs["args"], (key, (host, "codex", "/project", "/tmp/rdt-control")))
+                clock.return_value = 144.9
+                app.quota_pending.clear()
+                app.refresh_quotas()
+                self.assertEqual(worker.call_count, 1)
+                clock.return_value = 145
+                app.refresh_quotas()
+                self.assertEqual(worker.call_count, 2)
+        finally:
+            app.sessions = []
+            app.sync_executor.shutdown(wait=True)
+            app.disconnect_by_func(self.app_mod.Gtk.main_quit)
+            app.destroy()
+
+    def test_codex_approval_reads_live_rows_with_hidden_cursor_or_scroll_history(self):
+        gtk, vte, glib = self.app_mod.Gtk, self.app_mod.Vte, self.app_mod.GLib
+        window = gtk.Window()
+        terminal = vte.Terminal()
+        window.add(terminal)
+        window.show_all()
+        self.addCleanup(window.destroy)
+
+        def flush_terminal():
+            loop = glib.MainLoop()
+            glib.timeout_add(80, lambda: (loop.quit(), False)[1])
+            loop.run()
+
+        approval = (
+            "Would you like to run the following command?\r\n"
+            "› 1. Yes, proceed (y)\r\n"
+            "  2. No\r\n"
+            "Press enter to confirm or esc to cancel"
+        )
+        terminal.feed((approval + "\x1b[?25l\x1b[1;1H").encode())
+        flush_terminal()
+        detect = self.app_mod.auto_enter_signature
+        self.assertIsNotNone(detect(self.app_mod.live_terminal_text(terminal), codex=True))
+        terminal.feed(("\x1b[4;40H\r\n" + "idle output\r\n" * 80).encode())
+        flush_terminal()
+        adjustment = terminal.get_vadjustment()
+        adjustment.set_value(adjustment.get_lower())
+        flush_terminal()
+        self.assertIsNone(detect(self.app_mod.live_terminal_text(terminal), codex=True))
 
     def test_session_changes_queue_until_sync_and_merge_over_pulled_list(self):
         app = self.app_mod.App()

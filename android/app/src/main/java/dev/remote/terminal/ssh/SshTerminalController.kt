@@ -2,7 +2,6 @@ package dev.remote.terminal.ssh
 
 import com.jcraft.jsch.ChannelShell
 import com.jcraft.jsch.ChannelExec
-import org.json.JSONObject
 import com.jcraft.jsch.HostKeyRepository
 import com.jcraft.jsch.JSch
 import com.jcraft.jsch.Session
@@ -10,9 +9,9 @@ import com.jcraft.jsch.UserInfo
 import dev.remote.terminal.data.HostRoute
 import dev.remote.terminal.data.HostRouteResolver
 import dev.remote.terminal.data.LocalStore
+import dev.remote.terminal.data.QuotaWindow
 import dev.remote.terminal.data.endpoints
 import dev.remote.terminal.data.TerminalTask
-import dev.remote.terminal.data.codexExecutable
 import android.os.SystemClock
 import java.io.IOException
 import java.io.InputStreamReader
@@ -33,7 +32,6 @@ class SshTerminalController(
     private val onStatus: (String) -> Unit,
     private val onBytes: (String) -> Unit,
     private val onHostKey: (String, Int, String, (Boolean) -> Unit) -> Unit,
-    private val onQuota: (List<Pair<Int, Int>>?) -> Unit,
 ) {
     private data class ActiveConnection(
         val session: Session,
@@ -214,114 +212,9 @@ class SshTerminalController(
             "elif command -v screen >/dev/null 2>&1; then screen -S $sessionName -X quit 2>/dev/null || true; fi"
     }
 
-    private fun quotaLoop(connection: ActiveConnection) {
-        while (running.get() && activeConnection.get() === connection && connection.session.isConnected) {
-            val result = runCatching {
-                val codexCommand = codexExecutable(task.agent.command)
-                when {
-                    codexCommand != null -> readCodexQuota(connection.session, codexCommand)
-                    task.agent.id == "antigravity" -> readAntigravityQuota(connection.session)
-                    else -> null
-                }
-            }.getOrNull()
-            if (activeConnection.get() !== connection || !running.get()) break
-            onQuota(result)
-            repeat(60) {
-                if (!running.get() || activeConnection.get() !== connection) return
-                Thread.sleep(1_000)
-            }
-        }
-    }
-
-    private fun readCodexQuota(session: Session, executable: String): List<Pair<Int, Int>>? {
-        val channel = session.openChannel("exec") as ChannelExec
-        try {
-            // Leave simple command names unquoted so the login shell can expand aliases.
-            val invocation = if (executable.matches(Regex("[A-Za-z0-9_]+"))) executable else shellQuote(executable)
-            val quotaCommand = "$invocation app-server --listen stdio://"
-            channel.setCommand("cd -- ${shellQuote(task.directory.path)} && \"${'$'}{SHELL:-/bin/bash}\" -l -i -c ${shellQuote(quotaCommand)}")
-            val output = channel.outputStream
-            val input = channel.inputStream
-            channel.connect(10_000)
-            output.write(("{\"id\":1,\"method\":\"initialize\",\"params\":{\"clientInfo\":{\"name\":\"remote_dev_terminal\",\"version\":\"1.0\"}}}\n").toByteArray())
-            output.flush()
-            val deadline = SystemClock.elapsedRealtime() + 15_000
-            val pending = StringBuilder()
-            var requested = false
-            while (SystemClock.elapsedRealtime() < deadline && !channel.isClosed && running.get()) {
-                if (input.available() == 0) { Thread.sleep(50); continue }
-                val byte = input.read()
-                if (byte < 0) break
-                if (byte != 10) {
-                    if (pending.length < 1_000_000) pending.append(byte.toChar()) else return null
-                    continue
-                }
-                val message = runCatching { JSONObject(pending.toString()) }.getOrNull()
-                pending.setLength(0)
-                if (message?.optInt("id", -1) == 1 && !requested) {
-                    if (message.has("error")) return null
-                    output.write(("{\"method\":\"initialized\",\"params\":{}}\n" +
-                        "{\"id\":2,\"method\":\"account/rateLimits/read\",\"params\":{}}\n").toByteArray())
-                    output.flush()
-                    requested = true
-                } else if (message?.optInt("id", -1) == 2) {
-                    val snapshot = message.optJSONObject("result")?.optJSONObject("rateLimits") ?: return null
-                    return listOf("primary", "secondary").mapNotNull { name ->
-                        val window = snapshot.optJSONObject(name) ?: return@mapNotNull null
-                        if (!window.has("usedPercent") || window.isNull("usedPercent") ||
-                            !window.has("windowDurationMins") || window.isNull("windowDurationMins")) return@mapNotNull null
-                        val minutes = window.optInt("windowDurationMins", 0)
-                        if (minutes <= 0) return@mapNotNull null
-                        minutes to (100 - window.optInt("usedPercent")).coerceIn(0, 100)
-                    }.takeIf { it.isNotEmpty() }
-                }
-            }
-            return null
-        } finally {
-            channel.disconnect()
-        }
-    }
-
-    private fun readAntigravityQuota(session: Session): List<Pair<Int, Int>>? {
-        val channel = session.openChannel("exec") as ChannelExec
-        try {
-            channel.setCommand("bash -lc 'agy -p \"/usage\" --output-format json'")
-            channel.connect(10_000)
-            val input = channel.inputStream
-            val output = StringBuilder()
-            val deadline = SystemClock.elapsedRealtime() + 15_000
-            while (SystemClock.elapsedRealtime() < deadline && !channel.isClosed && running.get()) {
-                if (input.available() == 0) { Thread.sleep(50); continue }
-                val byte = input.read()
-                if (byte < 0) break
-                if (output.length >= 1_000_000) return null
-                output.append(byte.toChar())
-            }
-            val root = runCatching { JSONObject(output.toString()) }.getOrNull() ?: return null
-            val groups = root.optJSONObject("command")?.optJSONObject("data")?.optJSONArray("groups") ?: return null
-            val quota = linkedMapOf<String, Int>()
-            for (groupIndex in 0 until groups.length()) {
-                val group = groups.optJSONObject(groupIndex) ?: continue
-                val buckets = group.optJSONArray("buckets") ?: continue
-                for (bucketIndex in 0 until buckets.length()) {
-                    val bucket = buckets.optJSONObject(bucketIndex) ?: continue
-                    val id = bucket.optString("id").lowercase()
-                    if (!id.contains("gemini")) continue
-                    val minutes = when {
-                        id.contains("weekly") || id.contains("7d") -> 10080
-                        id.contains("5h") || id.contains("session") -> 300
-                        else -> continue
-                    }
-                    val remaining = bucket.optDouble("remaining_fraction", Double.NaN)
-                    if (!remaining.isFinite()) continue
-                    quota[if (minutes == 300) "hour" else "week"] = (remaining * 100).toInt().coerceIn(0, 100)
-                }
-            }
-            return listOfNotNull(quota["hour"]?.let { 300 to it }, quota["week"]?.let { 10080 to it })
-                .takeIf { it.isNotEmpty() }
-        } finally {
-            channel.disconnect()
-        }
+    fun readQuota(command: String, directory: String? = null): List<QuotaWindow>? {
+        val session = activeConnection.get()?.session ?: return null
+        return AgentQuotaReader.read(session, command, directory)
     }
 
     /** All keystrokes go through one writer. A stale stream can only invalidate its own channel. */
@@ -437,10 +330,6 @@ class SshTerminalController(
                 connectedAt = SystemClock.elapsedRealtime()
                 onStatus("已连接 · ${task.host.username}@$currentAddress:$currentPort (${if (currentIsLan) "内网" else "外网"})")
                 HostRouteResolver.updateRoute(task.host.id, HostRoute(currentAddress, currentPort, currentIsLan, reachable = true))
-                if (codexExecutable(task.agent.command) != null ||
-                    (task.agent.id == "antigravity" && task.agent.command.trim().matches(Regex("^agy(?:\\s.*)?$")))) {
-                    Thread({ quotaLoop(connection) }, "codex-quota-${task.id.take(8)}").apply { isDaemon = true; start() }
-                }
                 val textReader = InputStreamReader(reader, Charsets.UTF_8)
                 val buffer = CharArray(4096)
                 var remoteTerminalEnded = false

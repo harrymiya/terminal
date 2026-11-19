@@ -17,20 +17,29 @@ class DesktopQuotaTest(unittest.TestCase):
     def test_agy_and_agy2_quota_agent_and_reset_days(self):
         future_weekly = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 3 * 86400 + 3600))
         future_5h = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 7200))
+        argon_group = {
+            "name": "Gemini Argon",
+            "buckets": [
+                {"id": "gemini-weekly", "remaining_fraction": 0.9, "reset_time": future_5h},
+            ],
+        }
         sample = {
             "command": {
                 "data": {
                     "groups": [
                         {
+                            "name": "Gemini Models",
                             "buckets": [
                                 {"id": "gemini-5h", "remaining_fraction": 0.75, "reset_time": future_5h},
                                 {"id": "gemini-weekly", "remaining_fraction": 0.4, "reset_time": future_weekly},
                             ]
-                        }
+                        },
+                        argon_group,
                     ]
                 }
             }
         }
+        argon_only = {"command": {"data": {"groups": [argon_group]}}}
         for folder in ("omarchy", "ubuntu", "windows"):
             core = load_core(folder)
             self.assertEqual(core.quota_agent("agy"), ("agy", "agy"), folder)
@@ -39,6 +48,7 @@ class DesktopQuotaTest(unittest.TestCase):
             parsed = dict((m, (pct, days)) for m, pct, days in core.quota_from_agy(sample))
             self.assertEqual(parsed[300], (75, "<1d"), folder)
             self.assertEqual(parsed[10080], (40, "3d"), folder)
+            self.assertEqual(core.quota_from_agy(argon_only), [], folder)
             remote_cmd = core.quota_remote_command("/home/dev/proj", "agy2", '-p "/usage" --output-format json')
             self.assertIn("-l -i -c", remote_cmd, folder)
             self.assertIn('agy2 -p "/usage" --output-format json', remote_cmd, folder)

@@ -28,6 +28,9 @@ provider.load_from_data(b"""
     button:hover { background-color: #213548; }
 """)
 Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+if os.environ.get("RDT_SSH_NONINTERACTIVE") == "1":
+    sys.exit(1)
+
 dialog = Gtk.Dialog(title="SSH", modal=True)
 dialog.add_buttons("取消", Gtk.ResponseType.CANCEL, "确定", Gtk.ResponseType.OK)
 box = dialog.get_content_area()
