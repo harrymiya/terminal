@@ -419,11 +419,10 @@ class LocalStore(context: Context) {
         preferences.edit().putBoolean("auto_enter_enabled", enabled).apply()
     }
 
-    fun loadAutoEnterDelayTenths(): Int =
-        preferences.getInt("auto_enter_delay_tenths", preferences.getInt("auto_enter_delay_seconds", 3) * 10).coerceIn(1, 300)
+    fun loadAutoEnterDelaySeconds(): Int = preferences.getInt("auto_enter_delay_seconds", 3).coerceIn(1, 30)
 
-    fun saveAutoEnterDelayTenths(tenths: Int) {
-        preferences.edit().putInt("auto_enter_delay_tenths", tenths.coerceIn(1, 300)).apply()
+    fun saveAutoEnterDelaySeconds(seconds: Int) {
+        preferences.edit().putInt("auto_enter_delay_seconds", seconds.coerceIn(1, 30)).apply()
     }
 
     fun loadQuotaIntervalSeconds(): Int = preferences.getInt("agent_quota_interval_seconds", 60).coerceIn(15, 300)

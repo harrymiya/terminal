@@ -90,18 +90,23 @@ class DesktopUIEnhancementsTest(unittest.TestCase):
             children = row.get_children()
             self.assertEqual([button.get_label() for button in children[1].get_children()], ["↑", "↓", "✎", "×"])
             quota = children[0].get_child().get_children()[1]
-            self.assertIsInstance(quota, self.app_mod.Gtk.Grid)
+            self.assertIsInstance(quota, self.app_mod.Gtk.Box)
             self.assertTrue(quota.is_ancestor(children[0]))
-            self.assertEqual(quota.get_child_at(0, 0).get_text(), "5时")
-            self.assertEqual(quota.get_child_at(0, 1).get_text(), "周")
-            for line, percent in enumerate((75, 40)):
-                battery, value = quota.get_child_at(1, line).get_children()
+            self.assertEqual(quota.get_orientation(), self.app_mod.Gtk.Orientation.HORIZONTAL)
+            hourly, weekly, reset = quota.get_children()
+            for indicator, percent in ((hourly, 75), (weekly, 40)):
+                battery, value = indicator.get_children()
                 self.assertEqual(battery.get_children()[0].get_value(), percent)
-                self.assertEqual(value.get_text(), f"{percent}%")
-            self.assertEqual(quota.get_child_at(2, 1).get_text(), "重置 3天")
+                self.assertEqual(value.get_text(), str(percent))
+            self.assertEqual(reset.get_text(), "3")
+            row.update_developer_quota([(300, 100, None), (10080, 0, "<1d")])
+            self.assertEqual(hourly.get_children()[1].get_text(), "100")
+            self.assertEqual(weekly.get_children()[1].get_text(), "0")
+            self.assertEqual(reset.get_text(), "<1")
             gemini = app.agents_list.get_children()[1].get_children()[0].get_child().get_children()[1]
-            self.assertEqual(gemini.get_child_at(1, 0).get_children()[1].get_text(), "--")
-            self.assertEqual(gemini.get_child_at(2, 1).get_text(), "重置 --")
+            bundle = gemini.get_children()
+            self.assertEqual(bundle[0].get_children()[1].get_text(), "--")
+            self.assertEqual(bundle[2].get_text(), "--")
             self.assertFalse(children[1].get_children()[0].get_sensitive())
             children[1].get_children()[1].clicked()
             self.assertEqual([item["command"] for item in app.data["agents"]], ["agy", "codex"])
@@ -149,35 +154,6 @@ class DesktopUIEnhancementsTest(unittest.TestCase):
             app.disconnect_by_func(self.app_mod.Gtk.main_quit)
             app.destroy()
 
-    def test_codex_approval_reads_live_rows_with_hidden_cursor_or_scroll_history(self):
-        gtk, vte, glib = self.app_mod.Gtk, self.app_mod.Vte, self.app_mod.GLib
-        window = gtk.Window()
-        terminal = vte.Terminal()
-        window.add(terminal)
-        window.show_all()
-        self.addCleanup(window.destroy)
-
-        def flush_terminal():
-            loop = glib.MainLoop()
-            glib.timeout_add(80, lambda: (loop.quit(), False)[1])
-            loop.run()
-
-        approval = (
-            "Would you like to run the following command?\r\n"
-            "› 1. Yes, proceed (y)\r\n"
-            "  2. No\r\n"
-            "Press enter to confirm or esc to cancel"
-        )
-        terminal.feed((approval + "\x1b[?25l\x1b[1;1H").encode())
-        flush_terminal()
-        detect = self.app_mod.auto_enter_signature
-        self.assertIsNotNone(detect(self.app_mod.live_terminal_text(terminal), codex=True))
-        terminal.feed(("\x1b[4;40H\r\n" + "idle output\r\n" * 80).encode())
-        flush_terminal()
-        adjustment = terminal.get_vadjustment()
-        adjustment.set_value(adjustment.get_lower())
-        flush_terminal()
-        self.assertIsNone(detect(self.app_mod.live_terminal_text(terminal), codex=True))
 
     def test_session_changes_queue_until_sync_and_merge_over_pulled_list(self):
         app = self.app_mod.App()

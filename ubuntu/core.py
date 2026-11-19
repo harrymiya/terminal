@@ -366,92 +366,33 @@ def _normalize_signature(sig):
     return sig.strip()
 
 
-
-_CODEX_FOOTER = re.compile(r"^press\s+(?:enter|return)\s+to\s+confirm\s+or\s+(?:esc|escape)\s+to\s+cancel\b", re.I)
-_CODEX_TITLE = re.compile(
-    r"^(?:would you like to (?:run|send input|grant|make)|"
-    r"do you want to (?:approve network access|make)|.+ needs your approval\.)", re.I
-)
-_EXPLICIT_CURSOR = re.compile(r"^(?:[›❯●◉]|> |\[[xX*]\]|\([xX*]\))")
-_NUMBERED_OPTION = re.compile(r"^(?:[›❯>]\s*)?\d+[.)]\s*")
-_CODEX_ONCE = re.compile(
-    r"yes(?:,\s*(?:proceed|just this once|grant these permissions for this turn|"
-    r"grant for this turn with strict auto review))?\s*(?:\([^)]*\)|\[[^]]*\])?", re.I
-)
-_CODEX_OTHER_CHOICE = re.compile(
-    r"don['’]t ask again|(?:for|in) this session|for this conversation|in the future|provide the requested info|^(?:always|no|deny|cancel)\b",
-    re.I,
-)
-
-
-def _codex_approval_signature(lines, option):
-    footer = next(
-        (i for i in range(len(lines) - 1, max(-1, len(lines) - 7), -1)
-         if _CODEX_FOOTER.match(" ".join(lines[i:i + 3]))),
-        None,
-    )
-    end = len(lines) if footer is None else footer
-    selected = next((i for i in range(end - 1, max(-1, end - 46), -1)
-                     if _EXPLICIT_CURSOR.match(lines[i])), None)
-    title = None if selected is None else next(
-        (i for i in range(selected - 1, -1, -1) if _CODEX_TITLE.match(lines[i])), None,
-    )
-    # A recognized Codex menu owns the decision, including a rejected selection.
-    # Other terminal prompts continue through the ordinary detector.
-    if footer is None and title is None:
-        return False, None
-    if selected is None:
-        return True, None
-    parts = [option.match(lines[selected]).group(1)]
-    for line in lines[selected + 1:min(end, selected + 4)]:
-        if _NUMBERED_OPTION.match(line):
-            break
-        parts.append(line)
-    label = " ".join(" ".join(parts).split())
-    approve_once = _CODEX_ONCE.fullmatch(label)
-    if footer is None and not approve_once and not _CODEX_OTHER_CHOICE.search(label):
-        return False, None
-    if not approve_once or (title is None and "," not in label):
-        return True, None
-
-    start = max(title if title is not None else 0, selected - 2)
-    heading = [lines[title]] if title is not None and title < start else []
-    return True, "\n".join(heading + lines[start:selected] + [label])
-
-
-def auto_enter_signature(text, codex=False):
+def auto_enter_signature(text):
     """Identify a currently visible, explicitly affirmative Enter action."""
     if not text:
         return None
     lines = []
     for raw in text.splitlines():
         line = raw.strip().strip("│┃║| ").strip()
-        if not line or all(char in "─━═╭╮╰╯┌┐└┘+ " for char in line) or re.match(r"^\[(?:rdt_[0-9a-fA-F]+|\d+)\]\s+\d+:\S+", line):
+        if not line or re.match(r"^\[(?:rdt_[0-9a-fA-F]+|\d+)\]\s+\d+:\S+", line):
             continue
         lines.append(line)
     if not lines:
         return None
 
+    return _classic_auto_enter_signature(lines) or _wrapped_approval_signature(lines)
+
+
+def _classic_auto_enter_signature(lines):
     # Only a capital Y indicates that Enter selects yes. A lowercase y/N or
     # ambiguous y/n must not be silently answered with Enter.
     enter_prompt = re.compile(r"(?i)(?:press\s+(?:enter|return)\s+to\s+(?:continue|confirm|approve)|按\s*(?:回车|enter)\s*(?:继续|确认|批准|同意))[:\s?.!]*$")
-    yes_default = re.compile(r"(?:\[Y/(?:n|no)\]|\(Y/(?:n|no)\)|\[Yes/no\]|\(Yes/no\)|\[Y\]/n)[:\s?？.>›❯!]*$")
-    yes_no = re.compile(yes_default.pattern, re.I)
+    yes_default = re.compile(r"(?:\[Y/(?:n|no)\]|\(Y/(?:n|no)\)|\[Yes/no\]|\(Yes/no\))[:\s?.]*$")
     option = re.compile(r"^\s*(?:[›❯>➜→*●◉]|\[[xX*]\]|\([xX*]\))\s*(?:\d+[.)]\s*)?(.*)$")
     explicit_cursor = re.compile(r"^\s*(?:[›❯●◉]|\[[xX*]\]|\([xX*]\))")
     affirmative = re.compile(r"(?i)^(?:yes\b|allow\b|approve\b|proceed\b|continue\b|always\b|允许|批准|同意|继续|确认|总是)")
     request = re.compile(r"(?i)(?:approv(?:e|al)|allow|would you like|do you want|proceed|continue|permission|confirm|execute|apply|install|run|resume|recover|restore|授权|批准|是否允许|需要确认|是否继续|确认执行|\?|？)")
-    if yes_no.search(lines[-1]):
-        return _normalize_signature("\n".join(lines[-5:])) if yes_default.search(lines[-1]) else None
-    if codex:
-        recognized, signature = _codex_approval_signature(lines, option)
-        if recognized:
-            return signature
-
     # Recent selected option wins, including a selected rejection.
     for index in range(len(lines) - 1, max(-1, len(lines) - 45), -1):
-        if index >= len(lines) - 20 and yes_no.search(lines[index]):
-            return _normalize_signature("\n".join(lines[max(0, index - 4):index + 1])) if yes_default.search(lines[index]) else None
         match = option.match(lines[index])
         if not match:
             continue
@@ -467,11 +408,46 @@ def auto_enter_signature(text, codex=False):
             return _normalize_signature("\n".join(lines[start:index + 1]))
         return None
     for index in range(len(lines) - 1, max(-1, len(lines) - 20), -1):
-        if enter_prompt.search(lines[index]):
+        if yes_default.search(lines[index]) or enter_prompt.search(lines[index]):
             start = max(0, index - 4)
             return _normalize_signature("\n".join(lines[start:index + 1]))
 
     return None
+
+
+_WRAPPED_APPROVAL_FOOTER = re.compile(
+    r"press\s+(?:enter|return)\s+to\s+confirm\s+or\s+(?:esc|escape)\s+to\s+cancel[.!]?", re.I,
+)
+_APPROVAL_CURSOR = re.compile(r"^(?:[›❯➜●◉]|>\s*\d+[.)])")
+_APPROVAL_CHOICE = re.compile(r"^(?:[›❯>➜●◉]\s*)?\d+[.)]\s*(.*)$")
+_APPROVE_ONCE = re.compile(
+    r"(?:yes,\s*(?:proceed|just this once|grant these permissions for this turn|"
+    r"grant for this turn with strict auto review)|allow once)\s*(?:\([a-z]\))?", re.I,
+)
+
+
+def _wrapped_approval_signature(lines):
+    """Recover a wrapped approval choice when the classic prompt detector found none."""
+    lines = [line for line in lines if not all(char in "─━═╭╮╰╯┌┐└┘+ " for char in line)]
+    footer = next((i for i in range(len(lines) - 1, max(-1, len(lines) - 5), -1)
+                   if _WRAPPED_APPROVAL_FOOTER.fullmatch(" ".join(lines[i:]))), None)
+    if footer is None:
+        return None
+    selected = next((i for i in range(footer - 1, -1, -1) if _APPROVAL_CURSOR.match(lines[i])), None)
+    if selected is None:
+        return None
+    choice = _APPROVAL_CHOICE.fullmatch(lines[selected])
+    if choice is None:
+        return None
+    parts = [choice.group(1)]
+    for line in lines[selected + 1:min(footer, selected + 6)]:
+        if _APPROVAL_CHOICE.match(line):
+            break
+        parts.append(line)
+    label = " ".join(" ".join(parts).split())
+    if len(parts) == 1 or not _APPROVE_ONCE.fullmatch(label):
+        return None
+    return _normalize_signature("\n".join(lines[max(0, selected - 2):selected] + [label]))
 
 
 class AutoEnterController:
@@ -498,7 +474,7 @@ class AutoEnterController:
             self.detected_at = now
             self.handled = False
             return False
-        if not self.handled and now >= self.detected_at + max(0.1, delay):
+        if not self.handled and now - self.detected_at >= max(1, delay):
             self.handled = True
             return True
         return False

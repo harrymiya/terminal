@@ -102,71 +102,33 @@ class DesktopAutoConfirmTest(unittest.TestCase):
                 for text in cases:
                     self.assertIsNotNone(detect(text), text[:80])
 
-    def test_codex_approval_uses_the_visible_one_time_choice(self):
-        body = "\n".join(f"$ command argument {i}" for i in range(65))
-        menu = (
-            "\n› 1. Yes, grant these\n"
-            "     permissions for this turn (y)\n"
-            "  2. Yes, grant these permissions for this session\n"
-            "  3. No, continue without permissions\n"
-            "Press enter\n"
-            "to confirm or esc to cancel\n"
-            "[rdt_1234] 0:codex*"
+    def test_wrapped_approval_is_a_fallback_for_the_visible_selected_choice(self):
+        body = "\n".join(f"  $ command argument {i}" for i in range(100))
+        approval = (
+            "› 1.\n"
+            "  Yes, grant these\n"
+            "  permissions for this turn (y)\n"
+            "  2. Yes, and don't ask again\n"
+            "  3. No, cancel\n"
+            "Press enter to\n"
+            "confirm or esc to cancel"
         )
-        for platform in ('omarchy', 'ubuntu', 'windows'):
+        for platform in ("omarchy", "ubuntu", "windows"):
             with self.subTest(platform=platform):
-                detect = load_core(platform).auto_enter_signature
-                prompt = body + menu
-                signature = detect(prompt, codex=True)
-                self.assertIsNotNone(signature)
-                self.assertEqual(detect("• Working (12s)\n" + prompt, codex=True), signature)
-                self.assertNotEqual(detect(prompt.replace("argument 64", "argument 99"), codex=True), signature)
-                for selection in (
-                    menu.replace("› 1.", "  1.").replace("  2.", "› 2."),
-                    menu.replace("› 1.", "  1.").replace("  3.", "› 3."),
-                    menu.replace("› 1.", "  1."),
-                    "\n› 1. Yes\n  2. No\nPress enter to confirm or esc to cancel",
-                    "\n› 1. Yes, provide the requested info\n  2. No\nPress enter to confirm or esc to cancel",
+                core = load_core(platform)
+                prompt = body + "\n" + approval
+                self.assertIsNone(core._classic_auto_enter_signature(prompt.splitlines()))
+                signature = core.auto_enter_signature(prompt)
+                self.assertIn("Yes, grant these permissions for this turn (y)", signature)
+                self.assertEqual(core.auto_enter_signature("Preparing...\n" + prompt), signature)
+                for rejected in (
+                    approval.replace("  Yes, grant these\n  permissions for this turn (y)", "  No, cancel"),
+                    approval.replace("  permissions for this turn (y)", "  permissions for this session"),
+                    approval.replace("› 1.", "  1."),
+                    approval.split("Press enter to")[0],
+                    approval + "\nContinue? [y/N]",
                 ):
-                    self.assertIsNone(detect(body + selection, codex=True))
-
-    def test_codex_sessions_still_handle_ordinary_confirmations(self):
-        prior_menu = (
-            "Would you like to run the following command?\n"
-            "  1. Yes, proceed\n"
-            "› 2. No\n"
-            "Press enter to confirm or esc to cancel\n"
-        )
-        for platform in ('omarchy', 'ubuntu', 'windows'):
-            with self.subTest(platform=platform):
-                detect = load_core(platform).auto_enter_signature
-                for text in (
-                    "Press Enter to confirm",
-                    "Press enter to continue",
-                    "按回车继续",
-                    "Do you trust the contents of this directory?\n› 1. Yes, I trust this folder\n  2. No\nPress enter to continue",
-                    "Permission required\n● 1. Allow once\n○ 2. No",
-                    "Would you like to run this command?\n❯ 1. Allow once\n  2. No\nPress Enter to confirm",
-                    prior_menu + "Continue? [Y/n]",
-                ):
-                    self.assertIsNotNone(detect(text, codex=True), text)
-                for text in (
-                    prior_menu + "Continue? [y/N]",
-                    "Continue? [y/n]",
-                    "Would you like to run the following command?\n  1. Yes, proceed\n› 2. Yes, and don't ask again\nPress enter to confirm",
-                ):
-                    self.assertIsNone(detect(text, codex=True), text)
-
-    def test_auto_enter_delay_accepts_tenths_and_clamps_to_one_tenth(self):
-        for platform in ('omarchy', 'ubuntu', 'windows'):
-            with self.subTest(platform=platform):
-                controller = load_core(platform).AutoEnterController()
-                for delay in (0.1, 0.01):
-                    controller.reset()
-                    self.assertFalse(controller.observe('approval', 10, delay))
-                    self.assertFalse(controller.observe('approval', 10.099, delay))
-                    self.assertTrue(controller.observe('approval', 10.1, delay))
-                    self.assertFalse(controller.observe('approval', 10.2, delay))
+                    self.assertIsNone(core.auto_enter_signature(body + "\n" + rejected))
 
 
 if __name__ == '__main__':

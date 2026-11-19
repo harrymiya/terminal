@@ -127,6 +127,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.graphics.Brush
@@ -196,9 +198,6 @@ private val Coral = Color(0xFFFF8278)
 private fun quotaPeriod(minutes: Int): String =
     if (minutes % 60 == 0) "${minutes / 60}小时" else "${minutes}分"
 
-private fun formatTenths(tenths: Int): String =
-    if (tenths % 10 == 0) (tenths / 10).toString() else "${tenths / 10}.${tenths % 10}"
-
 private data class AgentQuotaKey(
     val hostId: String,
     val username: String,
@@ -263,6 +262,10 @@ private class TerminalSessionState(
     var unread by mutableStateOf(false)
     var needsAction by mutableStateOf(false)
     var confirmationAlerted = false
+    var autoEnterEligible by mutableStateOf(false)
+    var autoEnterPromptSignature by mutableStateOf<String?>(null)
+    var handledPromptSignature by mutableStateOf<String?>(null)
+    var autoEnterAwaitingResponse = false
     var lastOutputAt by mutableStateOf(0L)
     val startedAt = android.os.SystemClock.elapsedRealtime()
     var isStreaming by mutableStateOf(false)
@@ -278,16 +281,25 @@ private class TerminalSessionState(
 
     override fun isConnected(): Boolean = isSessionConnected && controller.isConnected()
     override fun isClosed(): Boolean = controller.isClosed()
-    override fun usesCodexApproval(): Boolean = codexExecutable(task.agent.command) != null
     override fun getVisibleTail(): String = buffer.visibleTextTail(100)
     override fun sendInput(text: String): Boolean = controller.sendIfConnected(text)
 
-    override fun onAutoEnterScheduled(deadlineUptimeMillis: Long) {
+    override fun onAutoEnterScheduled(deadlineUptimeMillis: Long, promptSignature: String) {
         autoEnterDeadline = deadlineUptimeMillis
+        autoEnterPromptSignature = promptSignature
+        autoEnterEligible = true
     }
 
     override fun onAutoEnterCancelled() {
         autoEnterDeadline = null
+        autoEnterEligible = false
+        autoEnterAwaitingResponse = false
+    }
+
+    override fun onAutoEnterTriggered(promptSignature: String) {
+        autoEnterDeadline = null
+        autoEnterAwaitingResponse = true
+        handledPromptSignature = promptSignature
     }
 
     override fun onNeedsActionChanged(needsAction: Boolean) {
@@ -301,22 +313,41 @@ private class TerminalSessionState(
     }
 
     fun cancelAutoEnter() {
-        AutoConfirmEngine.reset(task.id)
+        AutoConfirmEngine.cancel(task.id)
         autoEnterDeadline = null
+        autoEnterEligible = false
+        autoEnterAwaitingResponse = false
+    }
+
+    fun pauseAutoEnter() {
+        AutoConfirmEngine.pause(task.id)
+        autoEnterDeadline = null
+        autoEnterEligible = false
+        autoEnterPromptSignature = null
+        autoEnterAwaitingResponse = false
+    }
+
+    fun onConnectionUnavailable() {
+        AutoConfirmEngine.cancel(task.id)
+        autoEnterDeadline = null
+        autoEnterAwaitingResponse = false
     }
 
     fun clearAttention() {
-        AutoConfirmEngine.markHandled(task.id)
+        AutoConfirmEngine.markHandled(task.id, autoEnterPromptSignature)
         autoEnterDeadline = null
         needsAction = false
+        autoEnterEligible = false
+        autoEnterPromptSignature = null
+        autoEnterAwaitingResponse = false
         unread = false
     }
 
     fun hasScheduledAutoEnter(): Boolean = autoEnterDeadline != null
 
-    fun resumeAutoEnter(delayTenths: Int, enabled: Boolean) {
+    fun resumeAutoEnter(delaySeconds: Int, enabled: Boolean) {
         AutoConfirmEngine.globalEnabled = enabled
-        AutoConfirmEngine.globalDelayTenths = delayTenths
+        AutoConfirmEngine.globalDelaySeconds = delaySeconds
         if (enabled && isConnected()) {
             AutoConfirmEngine.onOutputReceived(task.id)
         }
@@ -350,11 +381,11 @@ private fun RemoteTerminalApp(store: LocalStore) {
             }
         }
         var autoEnterEnabled by remember { mutableStateOf(store.loadAutoEnterEnabled()) }
-        var autoEnterDelayTenths by remember { mutableIntStateOf(store.loadAutoEnterDelayTenths()) }
+        var autoEnterDelaySeconds by remember { mutableIntStateOf(store.loadAutoEnterDelaySeconds()) }
         var quotaIntervalSeconds by remember { mutableIntStateOf(store.loadQuotaIntervalSeconds()) }
         AutoConfirmEngine.init(appContext)
         AutoConfirmEngine.globalEnabled = autoEnterEnabled
-        AutoConfirmEngine.globalDelayTenths = autoEnterDelayTenths
+        AutoConfirmEngine.globalDelaySeconds = autoEnterDelaySeconds
         val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
         androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
             val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
@@ -765,9 +796,9 @@ private fun RemoteTerminalApp(store: LocalStore) {
                     mainHandler.post {
                         state.status = value
                         if (value.contains("重连") || value.contains("恢复 SSH") || value == "已断开" || value.startsWith("远端终端已结束")) {
-                            state.cancelAutoEnter()
+                            state.onConnectionUnavailable()
                         }
-                        if (value.startsWith("已连接")) state.resumeAutoEnter(autoEnterDelayTenths, autoEnterEnabled)
+                        if (value.startsWith("已连接")) state.resumeAutoEnter(autoEnterDelaySeconds, autoEnterEnabled)
                     }
                 },
                 onBytes = { bytes ->
@@ -1046,7 +1077,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
                     },
                     onLogin = { route = AppRoute.LOGIN },
                     enabled = autoEnterEnabled,
-                    delayTenths = autoEnterDelayTenths,
+                    delaySeconds = autoEnterDelaySeconds,
                     quotaIntervalSeconds = quotaIntervalSeconds,
                     onQuotaIntervalChange = { seconds ->
                         quotaIntervalSeconds = seconds
@@ -1057,15 +1088,15 @@ private fun RemoteTerminalApp(store: LocalStore) {
                         store.saveAutoEnterEnabled(enabled)
                         AutoConfirmEngine.globalEnabled = enabled
                         sessions.forEach { session ->
-                            if (enabled) session.resumeAutoEnter(autoEnterDelayTenths, enabled)
+                            if (enabled) session.resumeAutoEnter(autoEnterDelaySeconds, enabled)
                             else session.cancelAutoEnter()
                         }
                     },
-                    onDelayTenthsChange = { tenths ->
-                        autoEnterDelayTenths = tenths
-                        store.saveAutoEnterDelayTenths(tenths)
-                        AutoConfirmEngine.globalDelayTenths = tenths
-                        if (autoEnterEnabled) sessions.forEach { it.resumeAutoEnter(tenths, autoEnterEnabled) }
+                    onDelaySecondsChange = { seconds ->
+                        autoEnterDelaySeconds = seconds
+                        store.saveAutoEnterDelaySeconds(seconds)
+                        AutoConfirmEngine.globalDelaySeconds = seconds
+                        if (autoEnterEnabled) sessions.forEach { it.resumeAutoEnter(seconds, autoEnterEnabled) }
                     },
                     onBack = { route = if (syncUrl.isNotBlank() && syncToken.isBlank()) AppRoute.LOGIN else AppRoute.HOME },
                 )
@@ -1681,13 +1712,13 @@ private fun SessionTab(session: TerminalSessionState, selected: Boolean, onClick
     val pulse by transition.animateFloat(0.35f, 1f, infiniteRepeatable(tween(650), RepeatMode.Reverse), label = "pulse")
     val color = when { session.needsAction -> Coral; selected -> Mint; session.unread -> Blue; else -> statusTint(session.status) }
     val deadline = session.autoEnterDeadline
-    var remainingTenths by remember(session, deadline) { mutableIntStateOf(0) }
+    var remainingSeconds by remember(session, deadline) { mutableIntStateOf(0) }
     LaunchedEffect(deadline) {
         while (deadline != null) {
             val remaining = deadline - android.os.SystemClock.elapsedRealtime()
-            if (remaining <= 0) { remainingTenths = 0; break }
-            remainingTenths = ((remaining + 99) / 100).toInt()
-            kotlinx.coroutines.delay((remaining - (remainingTenths - 1) * 100L).coerceAtLeast(1))
+            if (remaining <= 0) { remainingSeconds = 0; break }
+            remainingSeconds = ((remaining + 999) / 1000).toInt()
+            kotlinx.coroutines.delay((remaining - (remainingSeconds - 1) * 1000L).coerceAtLeast(1))
         }
     }
     Surface(onClick = onClick, color = if (selected) PanelRaised else Panel, shape = CircleShape,
@@ -1695,8 +1726,8 @@ private fun SessionTab(session: TerminalSessionState, selected: Boolean, onClick
         Row(Modifier.padding(start = 10.dp, end = 5.dp, top = 6.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             Box(Modifier.size(7.dp).alpha(if (session.isStreaming) pulse else 1f).background(color, CircleShape))
             val supportsQuota = codexExecutable(session.task.agent.command) != null || antigravityExecutable(session.task.agent.command) != null
-            if (remainingTenths > 0) {
-                Text(formatTenths(remainingTenths), color = color, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+            if (remainingSeconds > 0) {
+                Text(remainingSeconds.toString(), color = color, fontWeight = FontWeight.Bold, fontSize = 11.sp)
             }
             if (supportsQuota) HourlyQuotaLabel(session.quota)
             Text(session.task.displayName, color = if (selected) White else Muted, fontSize = 11.sp, maxLines = 1)
@@ -1712,15 +1743,18 @@ private fun HourlyQuotaLabel(quota: List<QuotaWindow>?) {
 }
 
 @Composable
-private fun QuotaBattery(period: String, percent: Int?, periodWidth: androidx.compose.ui.unit.Dp = 0.dp) {
+private fun QuotaBattery(period: String, percent: Int?, compact: Boolean = false) {
     val fill = when {
         percent == null -> Color.Transparent
         percent < 5 -> Coral
         percent < 20 -> Color(0xFFFF9E20)
         else -> Mint
     }
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text(period, color = Muted, fontSize = 10.sp, maxLines = 1, modifier = Modifier.widthIn(min = periodWidth))
+    val description = if (compact) Modifier.clearAndSetSemantics {
+        contentDescription = "${period}剩余额度 ${percent?.let { "$it%" } ?: "未知"}"
+    } else Modifier
+    Row(description, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        if (!compact) Text(period, color = Muted, fontSize = 10.sp, maxLines = 1)
         Row(verticalAlignment = Alignment.CenterVertically) {
             Surface(
                 modifier = Modifier.size(28.dp, 11.dp),
@@ -1735,7 +1769,8 @@ private fun QuotaBattery(period: String, percent: Int?, periodWidth: androidx.co
             }
             Box(Modifier.size(3.dp, 5.dp).background(Muted, RoundedCornerShape(1.dp)))
         }
-        Text(percent?.let { "$it%" } ?: "--", color = White, fontSize = 10.sp, maxLines = 1)
+        val value = percent?.let { if (compact) it.toString() else "$it%" } ?: "--"
+        Text(value, color = White, fontSize = 10.sp, maxLines = 1)
     }
 }
 
@@ -1746,15 +1781,15 @@ private fun AgentQuotaDetails(quota: List<QuotaWindow>?) {
     val remaining = weekly?.resetsAt?.minus(java.time.Instant.now().epochSecond)
     val reset = when {
         remaining == null -> "--"
-        remaining in 1L until 86_400L -> "<1天"
-        else -> "${(remaining / 86_400L).coerceAtLeast(0)}天"
+        remaining in 1L until 86_400L -> "<1"
+        else -> (remaining / 86_400L).coerceAtLeast(0).toString()
     }
-    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        QuotaBattery(quotaPeriod(hourly?.minutes ?: 300), hourly?.remainingPercent, periodWidth = 30.dp)
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            QuotaBattery("周", weekly?.remainingPercent, periodWidth = 30.dp)
-            Text("重置 $reset", color = Muted, fontSize = 10.sp, maxLines = 1)
-        }
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        QuotaBattery(quotaPeriod(hourly?.minutes ?: 300), hourly?.remainingPercent, compact = true)
+        QuotaBattery("周", weekly?.remainingPercent, compact = true)
+        Text(reset, color = Muted, fontSize = 10.sp, maxLines = 1, modifier = Modifier.clearAndSetSemantics {
+            contentDescription = "周额度重置 ${if (remaining == null) "未知" else "${reset}天"}"
+        })
     }
 }
 
@@ -2017,11 +2052,7 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
                         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                         val clip = clipboard.primaryClip
                         val text = if (clip != null && clip.itemCount > 0) clip.getItemAt(0).coerceToText(context)?.toString().orEmpty() else ""
-                        if (text.isNotEmpty()) {
-                            resetInput?.invoke()
-                            session.clearAttention()
-                            session.controller.send(session.buffer.pasteSequence(text))
-                        }
+                    if (text.isNotEmpty()) { resetInput?.invoke(); session.controller.send(session.buffer.pasteSequence(text)); session.clearAttention() }
                         selection = null; selectionMenu = false; showKeyboard()
                     }) { Text("粘贴") }
                     TextButton(onClick = { selection = null; selectionMenu = false }) { Text("取消") }
@@ -2045,10 +2076,7 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
                         val removedText = previous.substring(prefix, previous.length - suffix)
                         val removed = removedText.codePointCount(0, removedText.length)
                         val added = next.substring(prefix, next.length - suffix.coerceAtMost(next.length - prefix))
-                        if (added.isNotEmpty() || removed > 0) {
-                            scrollbackTopRow = null
-                            session.clearAttention()
-                        }
+                        if (added.isNotEmpty() || removed > 0) scrollbackTopRow = null
                         if (removed > 0) {
                             val backspace = if (ctrlArmed) "\b" else "\u007f"
                             session.controller.send((if (altArmed) "\u001b" else "") + backspace.repeat(removed))
@@ -2061,14 +2089,15 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
                             session.controller.send(outgoing)
                             ctrlArmed = false; altArmed = false; shiftArmed = false
                         }
+                        if (added.isNotEmpty() || removed > 0) session.clearAttention()
                         previous = next
                     }
                 }
                 fun sendBackspace() {
                     scrollbackTopRow = null
-                    session.clearAttention()
                     session.controller.send((if (altArmed) "\u001b" else "") + if (ctrlArmed) "\b" else "\u007f")
                     ctrlArmed = false; altArmed = false; shiftArmed = false
+                    session.clearAttention()
                 }
                 fun pasteClipboard(): Boolean {
                     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
@@ -2079,8 +2108,8 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
                     if (text.isNotEmpty()) {
                         scrollbackTopRow = null
                         resetInput?.invoke()
-                        session.clearAttention()
                         session.controller.send(session.buffer.pasteSequence(text))
+                        session.clearAttention()
                     }
                     return true
                 }
@@ -2104,8 +2133,8 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
                                     resetInput?.invoke()
                                     if (committed.isNotEmpty()) {
                                         scrollbackTopRow = null
-                                        session.clearAttention()
                                         session.controller.send(session.buffer.pasteSequence(committed))
+                                        session.clearAttention()
                                     }
                                     return true
                                 }
@@ -2156,9 +2185,9 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
                         if (enter) {
                             if (event != null && event.action != KeyEvent.ACTION_DOWN) return@setOnEditorActionListener true
                             if (event != null && event.repeatCount > 0) return@setOnEditorActionListener true
-                            session.clearAttention()
                             session.controller.send("\r")
                             ctrlArmed = false; altArmed = false; shiftArmed = false
+                            session.clearAttention()
                             ignoreChange = true
                             setText("")
                             true
@@ -2202,16 +2231,16 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
                                     if (text.isNotEmpty()) {
                                         scrollbackTopRow = null
                                         resetInput?.invoke()
-                                        session.clearAttention()
                                         session.controller.send(session.buffer.pasteSequence(text))
+                                        session.clearAttention()
                                     }
                                     ctrlArmed = false; altArmed = false; shiftArmed = false
                                 }
                                 "RESU" -> {
                                     resetInput?.invoke()
-                                    session.clearAttention()
                                     session.controller.send(value)
                                     ctrlArmed = false; altArmed = false; shiftArmed = false
+                                    session.clearAttention()
                                     scope.launch {
                                         kotlinx.coroutines.delay(200)
                                         inputView?.onEditorAction(EditorInfo.IME_ACTION_SEND)
@@ -2226,8 +2255,8 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
                                     if (direction == null && shiftArmed && send == "/") send = "?"
                                     if (direction == null && ctrlArmed && send.length == 1 && send[0].code in 32..126) send = (send[0].lowercaseChar().code and 0x1f).toChar().toString()
                                     if (direction == null && altArmed) send = "\u001b$send"
-                                    session.clearAttention()
                                     session.controller.send(send); ctrlArmed = false; altArmed = false; shiftArmed = false
+                                    session.clearAttention()
                                 }
                             }
                         }, modifier = Modifier.weight(1f).height(35.dp), color = if (armed) Color(0xFF27453F) else Panel,
@@ -2302,11 +2331,11 @@ private fun SettingsScreen(
     onSyncSettingsChange: (String, String) -> Unit,
     onLogin: () -> Unit,
     enabled: Boolean,
-    delayTenths: Int,
+    delaySeconds: Int,
     quotaIntervalSeconds: Int,
     onQuotaIntervalChange: (Int) -> Unit,
     onEnabledChange: (Boolean) -> Unit,
-    onDelayTenthsChange: (Int) -> Unit,
+    onDelaySecondsChange: (Int) -> Unit,
     onBack: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -2316,7 +2345,7 @@ private fun SettingsScreen(
     var keyMessage by remember { mutableStateOf("") }
     var draftSyncUrl by rememberSaveable(syncUrl) { mutableStateOf(syncUrl) }
     var draftSyncInterval by remember(syncIntervalSeconds) { mutableStateOf(syncIntervalSeconds.toFloat()) }
-    var draftDelay by remember(delayTenths) { mutableStateOf(delayTenths.toFloat()) }
+    var draftDelay by remember(delaySeconds) { mutableStateOf(delaySeconds.toFloat()) }
     var draftQuotaInterval by remember(quotaIntervalSeconds) { mutableStateOf(quotaIntervalSeconds.toFloat()) }
     fun finish() {
         onSyncSettingsChange(draftSyncUrl.trim(), syncToken)
@@ -2394,17 +2423,13 @@ private fun SettingsScreen(
                 }
                 Switch(checked = enabled, onCheckedChange = onEnabledChange)
             }
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                val tenths = draftDelay.roundToInt().coerceIn(1, 300)
-                Text("延迟 ${formatTenths(tenths)} 秒", color = White, fontSize = 13.sp, modifier = Modifier.weight(1f))
-                TextButton(enabled = tenths > 1, onClick = { onDelayTenthsChange(tenths - 1) }) { Text("−0.1") }
-                TextButton(enabled = tenths < 300, onClick = { onDelayTenthsChange(tenths + 1) }) { Text("+0.1") }
-            }
+            Text("延迟 ${draftDelay.roundToInt()} 秒", color = White, fontSize = 13.sp)
             Slider(
                 value = draftDelay,
                 onValueChange = { draftDelay = it },
-                onValueChangeFinished = { onDelayTenthsChange(draftDelay.roundToInt().coerceIn(1, 300)) },
-                valueRange = 1f..300f,
+                onValueChangeFinished = { onDelaySecondsChange(draftDelay.roundToInt().coerceIn(1, 30)) },
+                valueRange = 1f..30f,
+                steps = 28,
             )
             Text("倒计时期间手动输入或操作会取消自动回车。", color = Muted, fontSize = 11.sp)
             Divider()

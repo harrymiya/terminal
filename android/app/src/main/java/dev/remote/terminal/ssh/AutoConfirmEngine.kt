@@ -39,9 +39,8 @@ object AutoConfirmEngine {
 
     // 默认回车选择 Yes 的形式（支持 [Y/n], (Y/n), [Yes/no], [Y]/n 以及末尾带标点或光标符号）
     private val YesDefaultRegex = Regex(
-        """(?:\[Y/(?:n|no)\]|\(Y/(?:n|no)\)|\[Yes/no\]|\(Yes/no\)|\[Y\]/n)\s*[:?？>›❯.!]*\s*$"""
+        """(?i)(?:\[Y/(?:n|no)\]|\(Y/(?:n|no)\)|\[Yes/no\]|\(Yes/no\)|\[Y\]/n)\s*[:?？>›❯.!]*\s*$"""
     )
-    private val YesNoPromptRegex = Regex(YesDefaultRegex.pattern, RegexOption.IGNORE_CASE)
 
     // 多选菜单的光标选项
     private val OptionRegex = Regex(
@@ -51,23 +50,10 @@ object AutoConfirmEngine {
     private val ExplicitCursorRegex = Regex(
         """^\s*(?:[›❯●◉]|\[[xX*]\]|\([xX*]\))"""
     )
-    private val CodexFooter = Regex(
-        """(?i)^press\s+(?:enter|return)\s+to\s+confirm\s+or\s+(?:esc|escape)\s+to\s+cancel\b"""
-    )
-    private val CodexTitle = Regex(
-        """(?i)^(?:would you like to (?:run|send input|grant|make)|do you want to (?:approve network access|make)|.+ needs your approval\.)"""
-    )
-    private val NumberedOption = Regex("""^(?:[›❯>]\s*)?\d+[.)]\s*""")
-    private val CodexOnce = Regex(
-        """(?i)^yes(?:,\s*(?:proceed|just this once|grant these permissions for this turn|grant for this turn with strict auto review))?\s*(?:\([^)]*\)|\[[^]]*\])?$"""
-    )
-    private val CodexOtherChoice = Regex(
-        """(?i)don['’]t ask again|(?:for|in) this session|for this conversation|in the future|provide the requested info|^(?:always|no|deny|cancel)\b"""
-    )
 
     // 积极肯定的选项文字（包含 Yes, Allow, Approve, Proceed, Continue, Resume, Restore, 允许, 确认, 恢复 等）
     private val AffirmativeRegex = Regex(
-        """(?i)^(?:yes\b|allow\b|approve\b|proceed\b|continue\b|resume\b|restore\b|confirm\b|authorize\b|authorise\b|grant\b|always\b|accept\b|apply\b|run\b|execute\b|ok\b|允许|批准|同意|继续|确认|总是|恢复|执行|确定|应用|授权)"""
+        "(?i)^(?:yes\b|allow\b|approve\b|proceed\b|continue\b|resume\b|restore\b|confirm\b|always\b|accept\b|apply\b|run\b|execute\b|ok\b|允许|批准|同意|继续|确认|总是|恢复|执行|确定|应用)"
     )
 
     fun init(context: Context) {
@@ -89,6 +75,12 @@ object AutoConfirmEngine {
         }
     }
 
+    private fun releaseWakeLock() {
+        runCatching {
+            if (wakeLock?.isHeld == true) wakeLock?.release()
+        }
+    }
+
     /** 去除时钟、耗时、动效旋转字符等动态噪点，避免 spinner 导致 signature 抖动重置倒计时 */
     fun normalizeSignature(sig: String?): String {
         if (sig.isNullOrBlank()) return ""
@@ -103,28 +95,21 @@ object AutoConfirmEngine {
     }
 
     /** 从终端可见文本中识别当前待确认提示的签名 */
-    fun detectPromptSignature(text: String, codex: Boolean = false): String? {
+    fun detectPromptSignature(text: String): String? {
         val visibleText = text.trimEnd()
         val rawLines = visibleText.lineSequence()
             .map { it.trim().trim('│', '┃', '║', '|', ' ') }
-            .filter { it.isNotBlank() && !it.all { char -> char in "─━═╭╮╰╯┌┐└┘+ " } &&
-                !Regex("""^\[(?:rdt_[0-9a-fA-F]+|\d+)\]\s+\d+:\S+""").containsMatchIn(it) }
+            .filter { it.isNotBlank() && !Regex("""^\[(?:rdt_[0-9a-fA-F]+|\d+)\]\s+\d+:\S+""").containsMatchIn(it) }
             .toList()
         if (rawLines.isEmpty()) return null
-        val lastLine = rawLines.last()
-        if (YesNoPromptRegex.containsMatchIn(lastLine)) {
-            return if (YesDefaultRegex.containsMatchIn(lastLine)) normalizeSignature(rawLines.takeLast(5).joinToString("\n")) else null
-        }
-        if (codex) detectCodexApproval(rawLines)?.let { return it.signature }
+        return detectClassicPromptSignature(rawLines) ?: detectWrappedApprovalSignature(rawLines)
+    }
 
-        // An inline yes/no prompt can follow an older menu still on screen.
+    private fun detectClassicPromptSignature(rawLines: List<String>): String? {
+        // 1. 优先匹配交互式多选菜单（必须在单行 Enter 提示前检查，避免选中 "❯ No" 时误触发下方的 "Press enter to confirm"）
         val optionWindowStart = maxOf(0, rawLines.size - 45)
         for (i in (rawLines.size - 1) downTo optionWindowStart) {
             val line = rawLines[i]
-            if (i >= rawLines.size - 20 && YesNoPromptRegex.containsMatchIn(line)) {
-                if (!YesDefaultRegex.containsMatchIn(line)) return null
-                return normalizeSignature(rawLines.subList(maxOf(0, i - 4), i + 1).joinToString("\n"))
-            }
             val match = OptionRegex.find(line) ?: continue
             val optionText = match.groupValues.getOrNull(1)?.trim().orEmpty()
             if (AffirmativeRegex.containsMatchIn(optionText)) {
@@ -143,10 +128,10 @@ object AutoConfirmEngine {
             }
         }
 
-        // Check menu selections first because an Enter hint can appear below a rejection.
+        // 2. 匹配后 20 行内的 [Y/n] 或 Press enter to continue/confirm/resume
         for (i in (rawLines.size - 1) downTo maxOf(0, rawLines.size - 20)) {
             val line = rawLines[i]
-            if (EnterPromptRegex.containsMatchIn(line)) {
+            if (YesDefaultRegex.containsMatchIn(line) || EnterPromptRegex.containsMatchIn(line)) {
                 val start = maxOf(0, i - 4)
                 return normalizeSignature(rawLines.subList(start, i + 1).joinToString("\n"))
             }
@@ -155,160 +140,190 @@ object AutoConfirmEngine {
         return null
     }
 
-    // A recognized menu can have no affirmative selection. Only an unrecognized
-    // screen falls through to the ordinary terminal prompt detector.
-    private data class CodexApproval(val signature: String? = null)
+    private val WrappedApprovalFooter = Regex(
+        """(?i)press\s+(?:enter|return)\s+to\s+confirm\s+or\s+(?:esc|escape)\s+to\s+cancel[.!]?"""
+    )
+    private val ApprovalCursor = Regex("""^(?:[›❯➜●◉]|>\s*\d+[.)])""")
+    private val ApprovalChoice = Regex("""^(?:[›❯>➜●◉]\s*)?\d+[.)]\s*(.*)$""")
+    private val ApproveOnce = Regex(
+        """(?i)(?:yes,\s*(?:proceed|just this once|grant these permissions for this turn|grant for this turn with strict auto review)|allow once)\s*(?:\([a-z]\))?"""
+    )
 
-    private fun detectCodexApproval(lines: List<String>): CodexApproval? {
-        val footer = (lines.lastIndex downTo maxOf(0, lines.size - 6)).firstOrNull { index ->
-            CodexFooter.containsMatchIn(lines.drop(index).take(3).joinToString(" "))
-        }
-        val end = footer ?: lines.size
-        val selected = (end - 1 downTo maxOf(0, end - 45)).firstOrNull {
-            ExplicitCursorRegex.containsMatchIn(lines[it]) || lines[it].startsWith("> ")
-        }
-        val title = selected?.let { (it - 1 downTo 0).firstOrNull { index -> CodexTitle.containsMatchIn(lines[index]) } }
-        if (footer == null && title == null) return null
-        if (selected == null) return CodexApproval()
-        val option = OptionRegex.find(lines[selected]) ?: return CodexApproval()
-        val parts = listOf(option.groupValues[1].trim()) +
-            lines.subList(selected + 1, end).take(3).takeWhile { !NumberedOption.containsMatchIn(it) }
-        val label = parts.joinToString(" ").replace(Regex("""\s+"""), " ").trim()
-        val approveOnce = CodexOnce.matches(label)
-        if (footer == null && !approveOnce && !CodexOtherChoice.containsMatchIn(label)) return null
-        if (!approveOnce || (title == null && ',' !in label)) return CodexApproval()
-
-        // Use the approval text next to the choices. Output elsewhere in the viewport
-        // can be repainted while Codex is still waiting on the same request.
-        val start = maxOf(title ?: 0, selected - 2)
-        val signature = (listOfNotNull(title?.takeIf { it < start }?.let(lines::get)) +
-            lines.subList(start, selected) + label).joinToString("\n")
-        return CodexApproval(signature)
+    private fun detectWrappedApprovalSignature(rawLines: List<String>): String? {
+        val lines = rawLines.filterNot { it.all { char -> char in "─━═╭╮╰╯┌┐└┘+ " } }
+        val footer = (lines.lastIndex downTo maxOf(0, lines.size - 4)).firstOrNull {
+            WrappedApprovalFooter.matches(lines.subList(it, lines.size).joinToString(" "))
+        } ?: return null
+        val selected = (footer - 1 downTo 0).firstOrNull { ApprovalCursor.containsMatchIn(lines[it]) } ?: return null
+        val choice = ApprovalChoice.matchEntire(lines[selected]) ?: return null
+        val continuation = lines.subList(selected + 1, minOf(footer, selected + 6))
+            .takeWhile { !ApprovalChoice.containsMatchIn(it) }
+        if (continuation.isEmpty()) return null
+        val label = (listOf(choice.groupValues[1]) + continuation)
+            .joinToString(" ").replace(Regex("""\s+"""), " ").trim()
+        if (!ApproveOnce.matches(label)) return null
+        return normalizeSignature((lines.subList(maxOf(0, selected - 2), selected) + label).joinToString("\n"))
     }
 
     interface SessionCallback {
         fun isConnected(): Boolean
         fun isClosed(): Boolean
-        fun usesCodexApproval(): Boolean
         fun getVisibleTail(): String
         fun sendInput(text: String): Boolean
-        fun onAutoEnterScheduled(deadlineUptimeMillis: Long)
+        fun onAutoEnterScheduled(deadlineUptimeMillis: Long, promptSignature: String)
         fun onAutoEnterCancelled()
+        fun onAutoEnterTriggered(promptSignature: String)
         fun onNeedsActionChanged(needsAction: Boolean)
     }
 
     private class SessionState(
-        val callback: SessionCallback,
         var signature: String? = null,
         var detectedAtUptime: Long = 0L,
-        var handled: Boolean = false,
+        var handledSignature: String? = null,
+        var awaitingResponse: Boolean = false,
         var deadlineUptime: Long? = null,
-        var timer: ScheduledFuture<*>? = null,
     )
 
-    private val sessions = ConcurrentHashMap<String, SessionState>()
+    private val sessions = ConcurrentHashMap<String, SessionCallback>()
+    private val sessionStates = ConcurrentHashMap<String, SessionState>()
 
     @Volatile var globalEnabled: Boolean = true
-    @Volatile var globalDelayTenths: Int = 30
+    @Volatile var globalDelaySeconds: Int = 3
 
     init {
         // 后台看门狗，每 300ms 扫描一次已连接会话，确保即便在熄屏或休眠下也不漏掉任何确认
         scheduler.scheduleWithFixedDelay({
-            sessions.forEach { (id, state) ->
-                runCatching { processSession(id, state) }
+            runCatching {
+                sessions.forEach { (id, callback) ->
+                    if (callback.isConnected() && !callback.isClosed()) {
+                        processSession(id, callback)
+                    }
+                }
             }
         }, 500L, 300L, TimeUnit.MILLISECONDS)
     }
 
     fun registerSession(sessionId: String, callback: SessionCallback) {
-        sessions[sessionId] = SessionState(callback)
+        sessions[sessionId] = callback
+        sessionStates.putIfAbsent(sessionId, SessionState())
     }
 
     fun unregisterSession(sessionId: String) {
-        sessions.remove(sessionId)?.let { state -> synchronized(state) { clearDeadline(state) } }
+        sessions.remove(sessionId)
+        sessionStates.remove(sessionId)
+        releaseWakeLock()
     }
 
     fun onOutputReceived(sessionId: String) {
-        val state = sessions[sessionId] ?: return
+        val callback = sessions[sessionId] ?: return
         scheduler.execute {
-            processSession(sessionId, state)
+            processSession(sessionId, callback)
         }
     }
 
-    fun markHandled(sessionId: String) {
-        val state = sessions[sessionId] ?: return
-        synchronized(state) {
-            state.signature = detectPromptSignature(state.callback.getVisibleTail(), state.callback.usesCodexApproval())
-            state.handled = true
-            clearDeadline(state)
-        }
-    }
-
-    fun reset(sessionId: String) {
-        val state = sessions[sessionId] ?: return
-        synchronized(state) {
-            state.signature = null
-            state.handled = false
-            clearDeadline(state)
-        }
-    }
-
-    private fun clearDeadline(state: SessionState) {
-        state.timer?.cancel(false)
-        state.timer = null
-        if (state.deadlineUptime == null) return
+    fun markHandled(sessionId: String, signature: String?) {
+        val state = sessionStates[sessionId] ?: return
+        state.handledSignature = signature ?: state.signature
         state.deadlineUptime = null
-        mainHandler.post { state.callback.onAutoEnterCancelled() }
+        state.awaitingResponse = false
+        releaseWakeLock()
+        sessions[sessionId]?.let { callback ->
+            mainHandler.post { callback.onAutoEnterCancelled() }
+        }
     }
 
-    private fun processSession(sessionId: String, state: SessionState) {
-        synchronized(state) {
-            if (sessions[sessionId] !== state) return
-            val callback = state.callback
-            if (!globalEnabled || !callback.isConnected() || callback.isClosed()) {
+    fun cancel(sessionId: String) {
+        val state = sessionStates[sessionId] ?: return
+        state.deadlineUptime = null
+        state.awaitingResponse = false
+        releaseWakeLock()
+        sessions[sessionId]?.let { callback ->
+            mainHandler.post { callback.onAutoEnterCancelled() }
+        }
+    }
+
+    fun pause(sessionId: String) {
+        cancel(sessionId)
+        val state = sessionStates[sessionId] ?: return
+        state.handledSignature = null
+        state.signature = null
+    }
+
+    private fun processSession(sessionId: String, callback: SessionCallback) {
+        if (!globalEnabled || !callback.isConnected() || callback.isClosed()) {
+            val state = sessionStates[sessionId]
+            if (state?.deadlineUptime != null) {
+                state.deadlineUptime = null
+                mainHandler.post { callback.onAutoEnterCancelled() }
+            }
+            return
+        }
+
+        val state = sessionStates.getOrPut(sessionId) { SessionState() }
+        val tail = callback.getVisibleTail()
+        val detectedSig = detectPromptSignature(tail)
+        val hasRequest = detectedSig != null || ActionRequestRegex.containsMatchIn(tail)
+
+        mainHandler.post { callback.onNeedsActionChanged(hasRequest) }
+
+        if (detectedSig == null) {
+            // 终端提示已消失（例如上一条命令已继续执行或已被清屏）
+            if (state.deadlineUptime != null || state.signature != null) {
                 state.signature = null
-                state.handled = false
-                clearDeadline(state)
-                return
+                state.handledSignature = null
+                state.awaitingResponse = false
+                state.deadlineUptime = null
+                mainHandler.post { callback.onAutoEnterCancelled() }
             }
+            return
+        }
 
-            val tail = callback.getVisibleTail()
-            val codex = callback.usesCodexApproval()
-            val detectedSig = detectPromptSignature(tail, codex)
-            val hasRequest = detectedSig != null || ActionRequestRegex.containsMatchIn(tail)
-            mainHandler.post { callback.onNeedsActionChanged(hasRequest) }
+        if (detectedSig == state.handledSignature) {
+            // 该 prompt 已处理完毕或已被用户主动操作忽略
+            return
+        }
 
-            if (detectedSig == null) {
-                state.signature = null
-                state.handled = false
-                clearDeadline(state)
-                return
+        if (state.awaitingResponse) {
+            // 已发送回车，等待远端响应变动
+            return
+        }
+
+        val now = SystemClock.elapsedRealtime()
+        val delayMillis = globalDelaySeconds.coerceIn(1, 30) * 1_000L
+
+        if (state.signature != detectedSig) {
+            // 首次检测到该提示或提示内容发生变化，开始倒计时
+            state.signature = detectedSig
+            state.detectedAtUptime = now
+            val deadline = now + delayMillis
+            state.deadlineUptime = deadline
+
+            // 持有 CPU WakeLock，防止手机在倒数期间进入 Deep Sleep
+            acquireWakeLock(delayMillis + 3_000L)
+
+            mainHandler.post {
+                callback.onAutoEnterScheduled(deadline, detectedSig)
             }
-            val now = SystemClock.elapsedRealtime()
-            if (state.signature != detectedSig) {
-                // An agent can replace one prompt with the next in a single redraw.
-                state.signature = detectedSig
-                state.detectedAtUptime = now
-                state.handled = false
-            }
-            if (state.handled) return
+            return
+        }
 
-            val deadline = state.detectedAtUptime + globalDelayTenths.coerceIn(1, 300) * 100L
-            if (now < deadline) {
-                if (state.deadlineUptime != deadline) {
-                    state.timer?.cancel(false)
-                    state.timer = scheduler.schedule({ processSession(sessionId, state) }, deadline - now, TimeUnit.MILLISECONDS)
-                    state.deadlineUptime = deadline
-                    acquireWakeLock(deadline - now + 3_000L)
-                    mainHandler.post { callback.onAutoEnterScheduled(deadline) }
+        // signature 一致，检查倒计时是否到达
+        val elapsed = now - state.detectedAtUptime
+        if (elapsed >= delayMillis) {
+            // 倒计时已满，直接在后台发送回车！
+            try {
+                acquireWakeLock(5_000L)
+                val sent = callback.sendInput("\r")
+                if (sent) {
+                    state.handledSignature = detectedSig
+                    state.awaitingResponse = true
+                    state.deadlineUptime = null
+                    mainHandler.post {
+                        callback.onAutoEnterTriggered(detectedSig)
+                    }
                 }
-                return
-            }
-            // Check the visible selection again before sending Enter.
-            if (globalEnabled && callback.isConnected() && sessions[sessionId] === state &&
-                detectPromptSignature(callback.getVisibleTail(), codex) == detectedSig && callback.sendInput("\r")) {
-                state.handled = true
-                clearDeadline(state)
+            } finally {
+                releaseWakeLock()
             }
         }
     }

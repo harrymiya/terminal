@@ -8,7 +8,6 @@ import subprocess
 import tempfile
 import threading
 import uuid
-import math
 import time
 import shutil
 import re
@@ -22,19 +21,6 @@ from gi.repository import Gtk, Vte, GLib, Gdk, GdkPixbuf, Pango
 from core import load_config, save_config, ssh_argv, close_remote_session_command, auto_enter_signature, AutoEnterController, quota_agent, quota_key, read_agent_quota, hourly_quota, upload_image, MAX_IMAGE_BYTES, sync_request, sync_data_request, sync_host_key, legacy_sync_keys, ssh_address, ssh_port, ssh_host_fingerprint, sync_auth_request, save_sync_password, load_sync_password, clear_sync_password, render_battery_pixbuf, save_host_password, load_host_password, clear_host_password, ssh_auth_environment
 from version import VERSION
 from mcp_server import EmbeddedMCPServer
-
-
-def live_terminal_text(terminal):
-    # The visible viewport can be scrolled into history and the cursor can be
-    # hidden above the approval choices. Read the live rows by absolute position.
-    end = max(0, int(terminal.get_vadjustment().get_upper()) - 1)
-    start = max(0, end - terminal.get_row_count() + 1)
-    last_column = terminal.get_column_count() - 1
-    if hasattr(terminal, "get_text_range_format"):
-        text, _ = terminal.get_text_range_format(Vte.Format.TEXT, start, 0, end, last_column)
-    else:
-        text, _ = terminal.get_text_range(start, 0, end, last_column, None, None)
-    return text or ""
 
 
 def make_quota_indicator():
@@ -78,32 +64,28 @@ def make_quota_indicator():
 
 
 def make_developer_quota_indicator():
-    grid = Gtk.Grid(column_spacing=4, row_spacing=2, valign=Gtk.Align.CENTER)
-    hourly_period = Gtk.Label(xalign=1)
-    week_period = Gtk.Label(label="周", xalign=1)
-    reset = Gtk.Label(xalign=1)
-    reset.set_tooltip_text("周额度重置")
-    for label in (hourly_period, week_period, reset):
-        label.get_style_context().add_class("subtitle")
+    row = Gtk.Box(spacing=6, valign=Gtk.Align.CENTER)
     hourly, update_hourly = make_quota_indicator()
     weekly, update_weekly = make_quota_indicator()
-    grid.attach(hourly_period, 0, 0, 1, 1)
-    grid.attach(hourly, 1, 0, 1, 1)
-    grid.attach(week_period, 0, 1, 1, 1)
-    grid.attach(weekly, 1, 1, 1, 1)
-    grid.attach(reset, 2, 1, 1, 1)
+    hourly.set_show_percent(False)
+    weekly.set_show_percent(False)
+    weekly.set_tooltip_text("周剩余额度")
+    reset = Gtk.Label(single_line_mode=True)
+    reset.get_style_context().add_class("subtitle")
+    reset.set_tooltip_text("周额度重置天数")
+    for widget in (hourly, weekly, reset):
+        row.pack_start(widget, False, False, 0)
 
     def update(quota):
         minutes, hourly_percent, *_ = hourly_quota(quota)
         _, weekly_percent, days = next((window for window in quota if window[0] == 10080), (10080, None, None))
-        period = f"{minutes // 60}时" if minutes % 60 == 0 else f"{minutes}分"
-        hourly_period.set_text(period)
+        period = f"{minutes // 60}小时" if minutes % 60 == 0 else f"{minutes}分钟"
+        hourly.set_tooltip_text(f"{period}剩余额度")
         update_hourly(hourly_percent)
         update_weekly(weekly_percent)
-        remaining = days.replace("d", "天") if days else "--"
-        reset.set_text(f"重置 {remaining}")
+        reset.set_text(days.removesuffix("d") if days else "--")
 
-    return grid, update
+    return row, update
 
 
 class App(Gtk.Window):
@@ -492,9 +474,7 @@ class App(Gtk.Window):
         self.auto_enter = Gtk.CheckButton(label="自动回车")
         self.auto_enter.set_active(self.data.get("auto_enter", False))
         self.auto_enter.connect("toggled", self.save_settings)
-        self.delay = Gtk.SpinButton.new_with_range(0.1, 30, 0.1)
-        self.delay.set_digits(1)
-        self.delay.set_snap_to_ticks(True)
+        self.delay = Gtk.SpinButton.new_with_range(1, 30, 1)
         self.delay.set_value(self.data.get("auto_enter_delay", 3))
         self.delay.connect("value-changed", self.save_settings)
         workspace = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -1028,7 +1008,7 @@ class App(Gtk.Window):
 
     def save_settings(self, *_):
         self.data["auto_enter"] = self.auto_enter.get_active()
-        self.data["auto_enter_delay"] = self.delay.get_value()
+        self.data["auto_enter_delay"] = self.delay.get_value_as_int()
         self.persist()
 
     def manage_sync_users(self, parent=None):
@@ -2796,7 +2776,6 @@ class App(Gtk.Window):
         image_button.connect("clicked", lambda *_: self.send_image_dialog(host, socket_path, terminal, state))
         def close_tab(*_):
             state["closed"] = True
-            stop_prompt_timer()
             if not state.get("closed_by_sync"):
                 self.sync_async(host, "DELETE", session_id)
             if state["watchdog_timer"]:
@@ -2863,40 +2842,27 @@ class App(Gtk.Window):
 
         def visible_signature():
             try:
-                return auto_enter_signature(live_terminal_text(terminal), codex=kind == "codex")
+                # Only inspect the visible screen, not old prompts in scrollback.
+                if hasattr(terminal, "get_text_format"):
+                    text = terminal.get_text_format(Vte.Format.TEXT)
+                else:
+                    _, row = terminal.get_cursor_position()
+                    text, _ = terminal.get_text_range_format(
+                        Vte.Format.TEXT, max(0, row - terminal.get_row_count() + 1), 0,
+                        row, terminal.get_column_count() - 1)
+                return auto_enter_signature(text or "")
             except (AttributeError, TypeError, ValueError):
                 return None
 
-        prompt_timer = None
-
-        def stop_prompt_timer():
-            nonlocal prompt_timer
-            if prompt_timer is not None:
-                GLib.source_remove(prompt_timer)
-                prompt_timer = None
-
         def check_prompt():
-            nonlocal prompt_timer
             enabled = state["connected"] and self.auto_enter.get_active() and not state["closed"]
             signature = visible_signature() if enabled else None
-            now = time.monotonic()
-            delay = self.delay.get_value()
-            if auto_confirm.observe(signature, now, delay, enabled):
+            if auto_confirm.observe(signature, time.monotonic(), self.delay.get_value_as_int(), enabled):
+                # A changed selection or prompt must start a fresh countdown.
                 if visible_signature() == signature:
                     terminal.feed_child(b"\r")
                 else:
                     auto_confirm.reset()
-            stop_prompt_timer()
-            if signature and not auto_confirm.handled:
-                remaining_ms = max(1, math.ceil((auto_confirm.detected_at + delay - now) * 1000))
-
-                def at_deadline():
-                    nonlocal prompt_timer
-                    prompt_timer = None
-                    check_prompt()
-                    return False
-
-                prompt_timer = GLib.timeout_add(remaining_ms, at_deadline)
 
         def changed(*_):
             state["last_output_at"] = time.monotonic()
@@ -2955,7 +2921,6 @@ class App(Gtk.Window):
         reconnect.connect("clicked", start)
         def child_exited(_terminal, status):
             state["connected"] = False
-            stop_prompt_timer()
             auto_confirm.reset()
             if state["closed"]:
                 return
