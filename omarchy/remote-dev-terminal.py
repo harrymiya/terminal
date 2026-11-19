@@ -28,27 +28,30 @@ from mcp_server import EmbeddedMCPServer
 def make_host_metric(label, is_cpu=False):
     box = Gtk.Box(spacing=3, valign=Gtk.Align.CENTER)
     chart = Gtk.Image()
-    value = Gtk.Label(label=f"{label} --", single_line_mode=True)
+    value = Gtk.Label(label=label, single_line_mode=True)
     value.get_style_context().add_class("subtitle")
     def update(pct):
         remaining = (100 - pct if is_cpu else pct) if pct is not None else None
         color = (255, 158, 33) if remaining is not None and remaining < 20 else (135, 219, 184)
+        size = 64
+        center = (size - 1) / 2
+        radius = size / 2 - 1
         pixels = bytearray()
-        for y in range(16):
-            for x in range(16):
-                dx, dy = x - 7.5, y - 7.5
+        for y in range(size):
+            for x in range(size):
+                dx, dy = x - center, y - center
                 distance = math.hypot(dx, dy)
                 angle = (math.atan2(dy, dx) + math.pi / 2) % (2 * math.pi)
-                if distance > 7.5:
+                if distance > radius:
                     pixels.extend((0, 0, 0, 0))
-                elif pct is not None and (angle < 2 * math.pi * pct / 100 or (remaining < 20 and distance > 6.5)):
+                elif pct is not None and (angle < 2 * math.pi * pct / 100 or (remaining < 20 and distance > radius * 13 / 15)):
                     pixels.extend((*color, 255))
                 else:
                     pixels.extend((56, 74, 87, 255))
-        pixbuf = GdkPixbuf.Pixbuf.new_from_bytes(GLib.Bytes.new(bytes(pixels)), GdkPixbuf.Colorspace.RGB, True, 8, 16, 16, 64)
-        chart.set_from_pixbuf(pixbuf)
-        value.set_text(f"{label} --" if pct is None else f"{label} {round(pct)}%")
-        box.set_tooltip_text(("CPU 占用率" if is_cpu else "内存可用比例") + ("：暂无数据" if pct is None else f"：{pct:.1f}%"))
+        pixbuf = GdkPixbuf.Pixbuf.new_from_bytes(GLib.Bytes.new(bytes(pixels)), GdkPixbuf.Colorspace.RGB, True, 8, size, size, size * 4)
+        chart.set_from_pixbuf(pixbuf.scale_simple(16, 16, GdkPixbuf.InterpType.BILINEAR))
+        value.set_text(label)
+        box.set_tooltip_text("CPU 占用率" if is_cpu else "内存余量")
 
     box.pack_start(chart, False, False, 0)
     box.pack_start(value, False, False, 0)
@@ -1768,16 +1771,18 @@ class App(Gtk.Window):
             button.connect("toggled", lambda radio, i=index: self.hosts.set_active(i) if radio.get_active() else None)
             row.pack_start(button, True, True, 0)
             metrics = Gtk.Box(spacing=5, valign=Gtk.Align.CENTER)
-            memory, update_memory = make_host_metric("内存")
+            memory, update_memory = make_host_metric("MEM")
             cpu, update_cpu = make_host_metric("CPU", is_cpu=True)
             metrics.pack_start(memory, False, False, 0)
             metrics.pack_start(cpu, False, False, 0)
+            button.set_image(metrics)
+            button.set_image_position(Gtk.PositionType.RIGHT)
+            button.set_always_show_image(True)
             key = metrics_key(item)
             self.metrics_rows[key] = (update_memory, update_cpu)
             values = self.metrics_cache.get(key)
             update_memory(values[0] if values else None)
             update_cpu(values[1] if values else None)
-            row.pack_start(metrics, False, False, 0)
             if self.edit_mode:
                 actions = Gtk.Box(spacing=4)
                 actions.set_halign(Gtk.Align.END)
