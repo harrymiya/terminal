@@ -305,6 +305,74 @@ class UbuntuWindowAndTabsTest(unittest.TestCase):
             overlay = outline.get_parent()
             self.assertTrue(overlay.get_overlay_pass_through(outline))
 
+    def test_tiled_card_drag_and_drop_reorders_and_wraps_next_row(self):
+        self.app.persist = lambda: None
+        self.app.tiled = True
+        self.app.tile_layout = "grid"
+        a, _ = self.make_session("a")
+        b, _ = self.make_session("b")
+        c, _ = self.make_session("c")
+        d, _ = self.make_session("d")
+        self.app.show_all()
+        self.app.rebuild_view()
+
+        def grid_rows():
+            root = self.app.grid.get_children()[0]
+            rows = []
+            for paned in (root.get_child1(), root.get_child2()):
+                row = []
+                for frame in (paned.get_child1(), paned.get_child2()):
+                    row.append(frame.get_children()[1])
+                rows.append(row)
+            return rows
+
+        self.assertEqual(grid_rows(), [[a["terminal"], b["terminal"]], [c["terminal"], d["terminal"]]])
+
+        context = app_module.Gdk.DragContext()
+        with patch.object(app_module.Gdk, "drag_status"), \
+             patch.object(app_module.Gtk, "drag_finish"), \
+             patch.object(app_module.Gtk, "drag_set_icon_pixbuf") as set_icon:
+            c_frame = c["terminal"]._tile_frame
+            c_header = c_frame.get_children()[0]
+            a_frame = a["terminal"]._tile_frame
+            a_header = a_frame.get_children()[0]
+            c_header.emit("drag-begin", context)
+            self.assertTrue(c_frame.get_style_context().has_class("tile-dragging"))
+            self.assertEqual(set_icon.call_count, 1)
+            c_header.emit("drag-end", context)
+            self.assertFalse(c_frame.get_style_context().has_class("tile-dragging"))
+
+            c_header.emit("drag-begin", context)
+            self.assertTrue(c_frame.get_style_context().has_class("tile-dragging"))
+            # Hovering over card a's header or terminal highlights card a without flicker.
+            self.assertTrue(a_header.emit("drag-motion", context, 10, 10, 0))
+            self.assertTrue(a_frame.get_style_context().has_class("tile-drop-target"))
+            self.assertTrue(a["terminal"].emit("drag-motion", context, 10, 10, 0))
+            a_header.emit("drag-leave", context, 0)
+            self.assertTrue(a_frame.get_style_context().has_class("tile-drop-target"))
+            a["terminal"].emit("drag-leave", context, 0)
+            self.assertFalse(a_frame.get_style_context().has_class("tile-drop-target"))
+            a["terminal"].emit("drag-drop", context, 10, 10, 0)
+            self.assertFalse(c["terminal"]._tile_frame.get_style_context().has_class("tile-dragging"))
+
+        # c moves to a's slot; a shifts right; b wraps down to the start of row 2.
+        self.assertEqual([s["item"]["directory_name"] for s in self.app.sessions], ["c", "a", "b", "d"])
+        self.assertEqual(grid_rows(), [[c["terminal"], a["terminal"]], [b["terminal"], d["terminal"]]])
+
+        # Dragging d onto a (end of row 1) puts d at row 1 col 2 and wraps a to row 2 col 1.
+        with patch.object(app_module.Gdk, "drag_status"), patch.object(app_module.Gtk, "drag_finish"):
+            d_frame = d["terminal"]._tile_frame
+            d_header = d_frame.get_children()[0]
+            a_frame = a["terminal"]._tile_frame
+            d_header.emit("drag-begin", context)
+            d_frame.emit("drag-drop", context, 10, 10, 0)  # self-drop is a no-op
+            self.assertEqual([s["item"]["directory_name"] for s in self.app.sessions], ["c", "a", "b", "d"])
+            a_frame.emit("drag-drop", context, 10, 10, 0)
+            d_header.emit("drag-end", context)
+
+        self.assertEqual([s["item"]["directory_name"] for s in self.app.sessions], ["c", "d", "a", "b"])
+        self.assertEqual(grid_rows(), [[c["terminal"], d["terminal"]], [a["terminal"], b["terminal"]]])
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -524,6 +524,10 @@ class App(Gtk.Window):
             .tile-header button { background-image: none; background-color: transparent; border: none; box-shadow: none; min-height: 0; padding: 1px 3px; color: #8fa2b4; }
             .tile-header button:hover { background-image: none; background-color: rgba(255, 255, 255, 0.15); color: #ffffff; }
             .tile-focused .tile-header { background: #203e36; }
+            .tile-dragging { opacity: 0.55; }
+            .tile-drop-target { border: 1px solid #2ee878; background: #18382c; }
+            .tile-drop-target .tile-header { background: #235340; }
+            .tile-drop-target > * { opacity: 0.88; }
             paned.sidebar-paned > separator { background-color: #243546; min-width: 4px; }
             paned.sidebar-paned > separator:hover { background-color: #86dbb8; }
             paned.tile-paned > separator { background-color: #243546; margin: 0; padding: 0; }
@@ -1104,6 +1108,10 @@ class App(Gtk.Window):
 
     def detach_session_widgets(self, session):
         label, terminal = session["label"], session["terminal"]
+        for handler_id in getattr(terminal, "_tile_dnd_handlers", ()):
+            if terminal.handler_is_connected(handler_id):
+                terminal.disconnect(handler_id)
+        terminal._tile_dnd_handlers = ()
         parent = label.get_parent()
         if parent is not None:
             parent.remove(label)
@@ -1218,6 +1226,105 @@ class App(Gtk.Window):
         session["terminal"]._running_outline = outline
         return header
 
+    def move_tiled_session(self, source, target):
+        if source is None or target is None or source is target:
+            return False
+        if source not in self.sessions or target not in self.sessions:
+            return False
+        target_index = self.sessions.index(target)
+        self.sessions.remove(source)
+        self.sessions.insert(target_index, source)
+        self.rebuild_view()
+        terminal = source.get("terminal")
+        if terminal is not None and terminal.get_can_focus():
+            terminal.grab_focus()
+        return True
+
+    def enable_tile_drag_and_drop(self, session, frame, header):
+        terminal = session["terminal"]
+        targets = [Gtk.TargetEntry.new("RDT_TILE_CARD", Gtk.TargetFlags.SAME_APP, 0)]
+        header.drag_source_set(Gdk.ModifierType.BUTTON1_MASK, targets, Gdk.DragAction.MOVE)
+        frame.drag_dest_set(0, targets, Gdk.DragAction.MOVE)
+        header.drag_dest_set(0, targets, Gdk.DragAction.MOVE)
+        target_list = terminal.drag_dest_get_target_list()
+        if target_list is None:
+            terminal.drag_dest_set(0, targets, Gdk.DragAction.MOVE)
+        else:
+            target_list.add(Gdk.Atom.intern("RDT_TILE_CARD", False), Gtk.TargetFlags.SAME_APP, 0)
+
+        drag_anchor = [0, 0]
+        hover_widgets = set()
+
+        def on_button_press(_widget, event):
+            if event.button == 1:
+                drag_anchor[0] = int(event.x)
+                drag_anchor[1] = int(event.y)
+            return False
+
+        def on_drag_begin(_widget, context):
+            self._dragging_session = session
+            frame.get_style_context().add_class("tile-dragging")
+            alloc = header.get_allocation()
+            win = header.get_window()
+            if win is not None and alloc.width > 0 and alloc.height > 0:
+                pixbuf = Gdk.pixbuf_get_from_window(win, 0, 0, alloc.width, alloc.height)
+                if pixbuf is not None:
+                    hot_x = max(0, min(alloc.width - 1, drag_anchor[0] or alloc.width // 2))
+                    hot_y = max(0, min(alloc.height - 1, drag_anchor[1] or alloc.height // 2))
+                    Gtk.drag_set_icon_pixbuf(context, pixbuf, hot_x, hot_y)
+
+        def on_drag_end(_widget, _context):
+            hover_widgets.clear()
+            frame.get_style_context().remove_class("tile-dragging")
+            frame.get_style_context().remove_class("tile-drop-target")
+            if getattr(self, "_dragging_session", None) is session:
+                self._dragging_session = None
+
+        def on_drag_motion(widget, context, _x, _y, time_ms):
+            source = getattr(self, "_dragging_session", None)
+            if source is None:
+                return False
+            if source is session:
+                Gdk.drag_status(context, 0, time_ms)
+                return widget is terminal
+            hover_widgets.add(widget)
+            frame.get_style_context().add_class("tile-drop-target")
+            Gdk.drag_status(context, Gdk.DragAction.MOVE, time_ms)
+            return True
+
+        def on_drag_leave(widget, _context, _time_ms):
+            hover_widgets.discard(widget)
+            if not hover_widgets:
+                frame.get_style_context().remove_class("tile-drop-target")
+
+        def on_drag_drop(widget, context, _x, _y, time_ms):
+            source = getattr(self, "_dragging_session", None)
+            if source is None:
+                return False
+            hover_widgets.clear()
+            frame.get_style_context().remove_class("tile-drop-target")
+            if source is session:
+                Gtk.drag_finish(context, False, False, time_ms)
+                return widget is terminal
+            Gtk.drag_finish(context, True, False, time_ms)
+            self._dragging_session = None
+            self.move_tiled_session(source, session)
+            return True
+
+        header.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
+        header.connect("button-press-event", on_button_press)
+        header.connect("drag-begin", on_drag_begin)
+        header.connect("drag-end", on_drag_end)
+        for drop_widget in (frame, header):
+            drop_widget.connect("drag-motion", on_drag_motion)
+            drop_widget.connect("drag-leave", on_drag_leave)
+            drop_widget.connect("drag-drop", on_drag_drop)
+        terminal._tile_dnd_handlers = (
+            terminal.connect("drag-motion", on_drag_motion),
+            terminal.connect("drag-leave", on_drag_leave),
+            terminal.connect("drag-drop", on_drag_drop),
+        )
+
     def make_tile_card(self, session):
         frame = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True, vexpand=True)
         frame.get_style_context().add_class("tile")
@@ -1231,6 +1338,7 @@ class App(Gtk.Window):
         header.add(self.make_session_header(session))
         frame.pack_start(header, False, False, 0)
         frame.pack_start(terminal, True, True, 0)
+        self.enable_tile_drag_and_drop(session, frame, header)
         return frame, header
 
     def _animate_running_headers(self):
