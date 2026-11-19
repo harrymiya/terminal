@@ -638,11 +638,12 @@ class App(Gtk.Window):
         self._edit_sidebar_width = None
         self._restoring_sidebar_width = False
         saved_width = self.data.get("sidebar_width")
-        self.sidebar_width = saved_width if isinstance(saved_width, int) and 200 <= saved_width <= 2000 else self.sidebar_target_width() + 32
+        minimum_sidebar_width = self.sidebar_target_width() + 32
+        self.sidebar_width = max(minimum_sidebar_width, saved_width) if isinstance(saved_width, int) and 200 <= saved_width <= 2000 else minimum_sidebar_width
         self.add(root)
         self.sidebar_revealer = Gtk.Revealer(reveal_child=True)
         self.sidebar_revealer.set_transition_type(Gtk.RevealerTransitionType.SLIDE_RIGHT)
-        root.pack1(self.sidebar_revealer, resize=False, shrink=True)
+        root.pack1(self.sidebar_revealer, resize=False, shrink=False)
         sidebar_frame = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         sidebar_frame.get_style_context().add_class("sidebar")
         self.sidebar_revealer.add(sidebar_frame)
@@ -854,7 +855,7 @@ class App(Gtk.Window):
         if self._restoring_sidebar_width or not self.sidebar_revealer.get_visible() or not paned.get_mapped():
             return
         width = paned.get_position()
-        minimum = max(200, paned.get_property("min-position"))
+        minimum = max(self.sidebar_target_width() + 32, paned.get_property("min-position"))
         if width < minimum:
             paned.set_position(minimum)
             return
@@ -2018,6 +2019,7 @@ class App(Gtk.Window):
         if self.sidebar_width_timer:
             GLib.source_remove(self.sidebar_width_timer)
             self.sidebar_width_timer = None
+        width = max(self.sidebar_target_width() + 32, self.sidebar_paned.get_property("min-position"), width)
         self._restoring_sidebar_width = True
         self.sidebar_paned.set_position(width)
         self.sidebar_width = width
