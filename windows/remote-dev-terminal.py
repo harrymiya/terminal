@@ -1174,6 +1174,10 @@ class App(Gtk.Window):
     def move_tiled_session(self, source, target):
         if source is None or target is None or source is target:
             return False
+        if source.get("floating_window") is not None or target.get("floating_window") is not None:
+            return False
+        if source.get("minimized_button") is not None or target.get("minimized_button") is not None:
+            return False
         if source not in self.sessions or target not in self.sessions:
             return False
         target_index = self.sessions.index(target)
@@ -1207,6 +1211,8 @@ class App(Gtk.Window):
             return False
 
         def on_drag_begin(_widget, context):
+            if session.get("floating_window") is not None:
+                return
             self._dragging_session = session
             frame.get_style_context().add_class("tile-dragging")
             alloc = header.get_allocation()
@@ -1214,8 +1220,13 @@ class App(Gtk.Window):
             if win is not None and alloc.width > 0 and alloc.height > 0:
                 pixbuf = Gdk.pixbuf_get_from_window(win, 0, 0, alloc.width, alloc.height)
                 if pixbuf is not None:
-                    hot_x = max(0, min(alloc.width - 1, drag_anchor[0] or alloc.width // 2))
-                    hot_y = max(0, min(alloc.height - 1, drag_anchor[1] or alloc.height // 2))
+                    scaled_w = max(1, alloc.width // 4)
+                    scaled_h = max(1, round(alloc.height * (scaled_w / alloc.width)))
+                    scaled = pixbuf.scale_simple(scaled_w, scaled_h, GdkPixbuf.InterpType.BILINEAR)
+                    if scaled is not None:
+                        pixbuf = scaled
+                    hot_x = max(0, min(scaled_w - 1, round(drag_anchor[0] * (scaled_w / alloc.width)) if drag_anchor[0] else scaled_w // 2))
+                    hot_y = max(0, min(scaled_h - 1, round(drag_anchor[1] * (scaled_h / alloc.height)) if drag_anchor[1] else scaled_h // 2))
                     Gtk.drag_set_icon_pixbuf(context, pixbuf, hot_x, hot_y)
 
         def on_drag_end(_widget, _context):
@@ -1229,7 +1240,7 @@ class App(Gtk.Window):
             source = getattr(self, "_dragging_session", None)
             if source is None:
                 return False
-            if source is session:
+            if source is session or source.get("floating_window") is not None or session.get("floating_window") is not None:
                 Gdk.drag_status(context, 0, time_ms)
                 return widget is terminal
             hover_widgets.add(widget)
@@ -1248,7 +1259,7 @@ class App(Gtk.Window):
                 return False
             hover_widgets.clear()
             frame.get_style_context().remove_class("tile-drop-target")
-            if source is session:
+            if source is session or source.get("floating_window") is not None or session.get("floating_window") is not None:
                 Gtk.drag_finish(context, False, False, time_ms)
                 return widget is terminal
             Gtk.drag_finish(context, True, False, time_ms)
