@@ -61,11 +61,64 @@ class UbuntuWindowAndTabsTest(unittest.TestCase):
             self.assertEqual(indicator.get_children()[1].get_text(), '85' if tiled else '85%')
             if not tiled:
                 self.assertEqual(self.app.tabs.get_n_pages(), 1)
-                self.assertIsNotNone(self.app.tabs.get_tab_label(terminal))
+                self.assertFalse(self.app.tabs.get_show_tabs())
+                self.assertTrue(self.app.instances_section.get_visible())
+                self.assertEqual(len(self.app.instances_list.get_children()), 1)
                 while Gtk.events_pending():
                     Gtk.main_iteration()
-                self.assertTrue(name.get_mapped(), 'tab name must actually be displayed')
-                self.assertTrue(quota.get_mapped(), 'tab quota must actually be displayed')
+            else:
+                self.assertFalse(self.app.instances_section.get_visible())
+
+    def test_tab_mode_shows_instances_below_hosts_with_full_name_image_and_close(self):
+        Gtk, Pango = app_module.Gtk, app_module.Pango
+        self.app.persist = lambda: None
+        sidebar_children = self.app.sidebar.get_children()
+        sync_idx = sidebar_children.index(self.app.sync_status)
+        inst_idx = sidebar_children.index(self.app.instances_section)
+        agents_idx = sidebar_children.index(self.app.agents_list)
+        self.assertEqual(inst_idx, sync_idx + 1)
+        self.assertLess(inst_idx, agents_idx)
+
+        first, _ = self.make_session("very-long-workspace-name-for-full-display")
+        second, _ = self.make_session("second-workspace")
+        first["item"]["display_name"] = "very-long-workspace-name-for-full-display · Codex"
+        second["item"]["display_name"] = "second-workspace · Antigravity"
+        clicked = []
+        for tag, s in (("first", first), ("second", second)):
+            img_btn = Gtk.Button()
+            img_btn.connect("clicked", lambda *_, t=tag: clicked.append(("image", t)))
+            cls_btn = Gtk.Button()
+            cls_btn.connect("clicked", lambda *_, t=tag: clicked.append(("close", t)))
+            s["image_button"] = img_btn
+            s["close_button"] = cls_btn
+
+        self.app.show_all()
+        self.assertFalse(self.app.instances_section.get_visible())
+
+        self.app.view_button.set_active(False)
+        self.assertTrue(self.app.instances_section.get_visible())
+        self.assertEqual(self.app.instances_heading.get_text(), "工作实例")
+        rows = self.app.instances_list.get_children()
+        self.assertEqual(len(rows), 2)
+
+        row_children = rows[0].get_children()
+        self.assertEqual(len(row_children), 3)
+        tab_btn, img_btn, close_btn = row_children
+        label = tab_btn.get_child()
+        self.assertEqual(label.get_text(), "very-long-workspace-name-for-full-display · Codex")
+        self.assertEqual(label.get_ellipsize(), Pango.EllipsizeMode.NONE)
+        self.assertTrue(label.get_line_wrap())
+
+        # Clicking second tab switches active page and updates highlight
+        second_btn = rows[1].get_children()[0]
+        second_btn.clicked()
+        self.assertEqual(self.app.tabs.get_current_page(), 1)
+        self.assertTrue(second_btn.get_style_context().has_class("host-selected"))
+        self.assertFalse(tab_btn.get_style_context().has_class("host-selected"))
+
+        img_btn.clicked()
+        close_btn.clicked()
+        self.assertEqual(clicked, [("image", "first"), ("close", "first")])
 
     def make_session(self, name):
         Gtk, Vte = app_module.Gtk, app_module.Vte

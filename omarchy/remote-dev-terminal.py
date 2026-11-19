@@ -1033,6 +1033,15 @@ class App(Gtk.Window):
                 self.sync_status.get_style_context().add_class("subtitle")
                 self.sync_status.set_tooltip_text("会话、开发者、工作区和主机状态按系统设置周期同步")
                 sidebar.pack_start(self.sync_status, False, False, 0)
+                self.instances_section = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+                self.instances_section.set_no_show_all(True)
+                self.instances_heading = Gtk.Label(label="工作实例", xalign=0)
+                self.instances_heading.get_style_context().add_class("section")
+                self.instances_section.pack_start(self.instances_heading, False, False, 0)
+                self.instances_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+                self.instances_section.pack_start(self.instances_list, False, False, 0)
+                self.instance_buttons = []
+                sidebar.pack_start(self.instances_section, False, False, 0)
         self.hosts.connect("changed", self.host_changed)
         self.agents.connect("changed", self.agent_changed)
         self.auto_enter = Gtk.CheckButton(label="自动回车")
@@ -1122,6 +1131,9 @@ class App(Gtk.Window):
         self.views.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
         workspace.pack_start(self.views, True, True, 0)
         self.tabs = Gtk.Notebook(scrollable=True)
+        self.tabs.set_show_tabs(False)
+        self.tabs.set_show_border(False)
+        self.tabs.connect("switch-page", self.on_tab_switched)
         self.views.add_named(self.tabs, "tabs")
         self.grid = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.grid.get_style_context().add_class("tile-grid")
@@ -1144,6 +1156,7 @@ class App(Gtk.Window):
         self.metrics_timer = GLib.timeout_add_seconds(1, self.refresh_host_metrics)
         self.connect("destroy", self.stop_quota_refresh)
         self.refresh()
+        self.rebuild_instances_sidebar()
         self.refresh_all_shared()
         self.sync_poll_source = None
         self.configure_sync_polling()
@@ -1849,12 +1862,14 @@ class App(Gtk.Window):
         self.layout_button.set_visible(self.tiled)
         self.layout_button.set_sensitive(len(docked) >= 2)
         if not docked:
+            self.rebuild_instances_sidebar([])
             text = ("终端已最小化或悬浮。" if self.sessions else
                     "选择左侧主机和开发者，然后点击工作区直达终端。")
             self.empty.set_text(text)
             self.views.set_visible_child_name("empty")
             return
         if self.tiled:
+            self.rebuild_instances_sidebar([])
             self.grid._proportions_applied = False
             frames = [self.make_tile_card(session)[0] for session in docked]
             self.grid.pack_start(self.build_tile_layout(frames), True, True, 0)
@@ -1862,18 +1877,85 @@ class App(Gtk.Window):
             self.views.set_visible_child_name("grid")
         else:
             for session in docked:
-                tab = self.make_session_header(session)
-                tab.set_size_request(-1, 25)
-                tab.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
-                tab.connect("button-press-event", self.activate_tab_from_label, session["terminal"])
-                tab.show_all()
-                self.tabs.append_page(session["terminal"], tab)
+                self.tabs.append_page(session["terminal"], None)
             self.tabs.show_all()
             self.views.set_visible_child_name("tabs")
             if selected is not None:
                 index = self.tabs.page_num(selected)
                 if index >= 0:
                     self.tabs.set_current_page(index)
+            self.rebuild_instances_sidebar(docked)
+
+    def rebuild_instances_sidebar(self, docked=None):
+        if docked is None:
+            docked = [
+                s for s in self.sessions
+                if s.get("floating_window") is None and s.get("minimized_button") is None
+            ]
+        self.instance_buttons = []
+        for child in self.instances_list.get_children():
+            self.instances_list.remove(child)
+        if self.tiled:
+            self.instances_section.hide()
+            return
+        self.instances_heading.show()
+        self.instances_section.show()
+        if not docked:
+            hint = Gtk.Label(label="暂无工作实例", xalign=0)
+            hint.get_style_context().add_class("subtitle")
+            self.instances_list.pack_start(hint, False, False, 0)
+            self.instances_list.show_all()
+            return
+        current_page = self.tabs.get_current_page()
+        active_terminal = self.tabs.get_nth_page(current_page) if current_page >= 0 else None
+        for session in docked:
+            terminal = session["terminal"]
+            item = session.get("item") or {}
+            display_name = item.get("display_name") or item.get("directory_name") or "终端"
+            row = Gtk.Box(spacing=4)
+            row.set_hexpand(True)
+            button = Gtk.Button()
+            button.set_hexpand(True)
+            button.get_style_context().add_class("host-button")
+            if terminal is active_terminal:
+                button.get_style_context().add_class("host-selected")
+            button.set_tooltip_text(display_name)
+            title = Gtk.Label(label=display_name, xalign=0)
+            title.set_line_wrap(True)
+            title.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+            title.set_hexpand(True)
+            button.add(title)
+            button.connect("clicked", self.activate_instance_tab, terminal)
+            row.pack_start(button, True, True, 0)
+            self.instance_buttons.append((button, terminal))
+            image_btn = Gtk.Button.new_from_icon_name("image-x-generic-symbolic", Gtk.IconSize.MENU)
+            image_btn.get_style_context().add_class("manage-button")
+            image_btn.set_tooltip_text("发送图片给此终端的 Agent")
+            image_btn.set_valign(Gtk.Align.CENTER)
+            if session.get("image_button") is not None:
+                image_btn.connect("clicked", lambda *_, s=session: s["image_button"].clicked())
+            row.pack_start(image_btn, False, False, 0)
+            close_btn = Gtk.Button.new_from_icon_name("window-close-symbolic", Gtk.IconSize.MENU)
+            close_btn.get_style_context().add_class("manage-button")
+            close_btn.set_tooltip_text("关闭终端")
+            close_btn.set_valign(Gtk.Align.CENTER)
+            if session.get("close_button") is not None:
+                close_btn.connect("clicked", lambda *_, s=session: s["close_button"].clicked())
+            row.pack_start(close_btn, False, False, 0)
+            self.instances_list.pack_start(row, False, False, 0)
+            self.scale_layout(row)
+        self.instances_list.show_all()
+
+    def activate_instance_tab(self, _button, terminal):
+        page = self.tabs.page_num(terminal)
+        if page >= 0:
+            self.tabs.set_current_page(page)
+        terminal.grab_focus()
+
+    def on_tab_switched(self, _notebook, page, _page_num):
+        for button, terminal in self.instance_buttons:
+            ctx = button.get_style_context()
+            (ctx.add_class if terminal is page else ctx.remove_class)("host-selected")
 
     def draw_running_outline(self, widget, cr):
         allocation = widget.get_allocation()
@@ -3929,7 +4011,8 @@ class App(Gtk.Window):
             threading.Thread(target=cleanup_remote, daemon=True).start()
         close.connect("clicked", close_tab)
         session = {"terminal": terminal, "label": label, "key": key, "id": session_id, "host": host, "state": state,
-                              "item": item, "socket_path": socket_path, "close_button": close, "started_at": time.monotonic(),
+                              "item": item, "socket_path": socket_path, "close_button": close, "image_button": image_button,
+                              "started_at": time.monotonic(),
                               "quota_indicators": (hourly_img, weekly_img) if kind else (),
                               "update_quota": update_quota_display}
         session["float_button"] = float_button
