@@ -343,6 +343,409 @@ class FloatingSession(Gtk.Window):
             self.session["terminal"].disconnect(self.focus_handler)
 
 
+THEMES = {
+    "cyberpunk": {
+        "label": "赛博朋克",
+        "win_bg": "#080a14",
+        "fg": "#e6f7ff",
+        "surface": "#0e1224",
+        "sidebar_bg": "#0b0f1f",
+        "toolbar_bg": "#0d1122",
+        "popup_bg": "#11162b",
+        "control_bg": "#151b33",
+        "control_fg": "#d8ecff",
+        "control_hover": "#1f294d",
+        "control_active": "#102e42",
+        "border": "#2b3563",
+        "border_subtle": "#1f2647",
+        "accent": "#00f0ff",
+        "accent_text": "#050914",
+        "accent_bg": "#102d42",
+        "accent_bg_hover": "#163e59",
+        "accent_fg": "#b8fcff",
+        "brand": "#00f0ff",
+        "subtitle": "#8294c4",
+        "section": "#ff5ca8",
+        "manage_fg": "#9bb4e0",
+        "tab_fg": "#7f93c4",
+        "tile_grid_bg": "#1b2240",
+        "tile_header_bg": "#141930",
+        "tile_focused_bg": "#102d42",
+        "drop_border": "#ff2a85",
+        "drop_bg": "#2b1029",
+        "drop_header": "#3d1638",
+        "hover_overlay": "rgba(0, 240, 255, 0.14)",
+        "quota_ok": "#00f0ff",
+        "quota_warn": "#fcee0a",
+        "quota_low": "#ff2a85",
+        "dot_idle": "#00f0ff",
+        "dot_run": "#ff2a85",
+        "dot_wait": "#fcee0a",
+        "term_bg": "#080a14",
+        "term_fg": "#e6f7ff",
+    },
+    "light": {
+        "label": "浅色主题",
+        "win_bg": "#f5f7fb",
+        "fg": "#182230",
+        "surface": "#ffffff",
+        "sidebar_bg": "#edf1f7",
+        "toolbar_bg": "#ffffff",
+        "popup_bg": "#ffffff",
+        "control_bg": "#e9eef6",
+        "control_fg": "#1e293b",
+        "control_hover": "#dce5f2",
+        "control_active": "#cfe2f7",
+        "border": "#c5d1e0",
+        "border_subtle": "#d8e1ec",
+        "accent": "#0284c7",
+        "accent_text": "#ffffff",
+        "accent_bg": "#dff0fe",
+        "accent_bg_hover": "#cce6fc",
+        "accent_fg": "#035388",
+        "brand": "#0284c7",
+        "subtitle": "#5c6b7f",
+        "section": "#475569",
+        "manage_fg": "#475569",
+        "tab_fg": "#5c6b7f",
+        "tile_grid_bg": "#d8e1ec",
+        "tile_header_bg": "#eef2f8",
+        "tile_focused_bg": "#e0f2fe",
+        "drop_border": "#0d9488",
+        "drop_bg": "#ccfbf1",
+        "drop_header": "#99f6e4",
+        "hover_overlay": "rgba(2, 132, 199, 0.12)",
+        "quota_ok": "#0d9488",
+        "quota_warn": "#d97706",
+        "quota_low": "#dc2626",
+        "dot_idle": "#10b981",
+        "dot_run": "#0284c7",
+        "dot_wait": "#f59e0b",
+        "term_bg": "#ffffff",
+        "term_fg": "#182230",
+    },
+    "classic": {
+        "label": "经典深色",
+        "win_bg": "#0c1119",
+        "fg": "#e8eef6",
+        "surface": "#101823",
+        "sidebar_bg": "#131b26",
+        "toolbar_bg": "#101823",
+        "popup_bg": "#141f2b",
+        "control_bg": "#16222f",
+        "control_fg": "#d0e1ed",
+        "control_hover": "#213548",
+        "control_active": "#203e36",
+        "border": "#2b3e51",
+        "border_subtle": "#243546",
+        "accent": "#86dbb8",
+        "accent_text": "#101c1a",
+        "accent_bg": "#203e36",
+        "accent_bg_hover": "#274b42",
+        "accent_fg": "#d8fff0",
+        "brand": "#a2e8cc",
+        "subtitle": "#8fa2b4",
+        "section": "#9bb0c3",
+        "manage_fg": "#b3c7d6",
+        "tab_fg": "#8fa2b4",
+        "tile_grid_bg": "#263647",
+        "tile_header_bg": "#16222f",
+        "tile_focused_bg": "#203e36",
+        "drop_border": "#2ee878",
+        "drop_bg": "#18382c",
+        "drop_header": "#235340",
+        "hover_overlay": "rgba(255, 255, 255, 0.15)",
+        "quota_ok": "#86dbb8",
+        "quota_warn": "#ff9e20",
+        "quota_low": "#ff4d4d",
+        "dot_idle": "#6bd18f",
+        "dot_run": "#3da1ff",
+        "dot_wait": "#ffc745",
+        "term_bg": "#0c1119",
+        "term_fg": "#e8eef6",
+    },
+}
+
+
+def build_theme_css(theme_name):
+    t = THEMES.get(theme_name, THEMES["cyberpunk"])
+    return f"""
+        * {{ font-size: 13px; }}
+        window, dialog, messagedialog, filechooser {{ background-color: {t["win_bg"]}; color: {t["fg"]}; }}
+        scrolledwindow, scrolledwindow > viewport, scrolledwindow > undershoot,
+        scrolledwindow > overshoot, frame > border {{
+            background-image: none;
+            border-color: {t["border_subtle"]};
+            box-shadow: none;
+        }}
+        paned > separator {{ background-image: none; border: none; box-shadow: none; }}
+        button:not(.titlebutton):focus, entry:focus, spinbutton:focus, combobox:focus, notebook tab:focus {{
+            outline-color: {t["accent"]};
+        }}
+        window:backdrop {{ color: {t["fg"]}; }}
+        label:backdrop {{ color: inherit; }}
+        button:not(.titlebutton):backdrop {{ color: {t["control_fg"]}; }}
+        .brand:backdrop {{ color: {t["brand"]}; }}
+        .subtitle:backdrop, .empty:backdrop {{ color: {t["subtitle"]}; }}
+        .section:backdrop {{ color: {t["section"]}; }}
+        .primary:backdrop {{ color: {t["accent_text"]}; }}
+        .host-selected:backdrop, notebook tab:checked:backdrop {{ color: {t["accent_fg"]}; }}
+        notebook tab:checked:backdrop label {{ color: {t["accent_fg"]}; }}
+        dialog > box, messagedialog > box, dialog .dialog-action-area, dialog headerbar {{
+            background-image: none;
+            background-color: {t["surface"]};
+            color: {t["fg"]};
+        }}
+        dialog list, dialog row, dialog treeview, dialog viewport {{ background-color: {t["surface"]}; color: {t["fg"]}; }}
+        dialog row:selected, dialog treeview:selected {{ background-color: {t["accent_bg"]}; color: {t["accent_fg"]}; }}
+        dialog treeview.user-table header button {{
+            background-image: none; background-color: {t["control_bg"]}; color: {t["section"]};
+            border: none; border-bottom: 1px solid {t["border"]}; border-radius: 0;
+            padding: 7px 10px; box-shadow: none; font-weight: bold;
+        }}
+        button:not(.titlebutton), entry, spinbutton, combobox, combobox button, .menu-toggle, .host-button, .project-button, .manage-button {{
+            min-height: 24px;
+            padding: 2px 8px;
+        }}
+        button:not(.titlebutton) {{
+            background-image: none;
+            background-color: {t["control_bg"]};
+            color: {t["control_fg"]};
+            border: 1px solid {t["border"]};
+            border-radius: 6px;
+            padding: 2px 8px;
+            box-shadow: none;
+            min-height: 24px;
+        }}
+        button:not(.titlebutton):hover {{ background-image: none; background-color: {t["control_hover"]}; border-color: {t["accent"]}; color: {t["fg"]}; box-shadow: none; }}
+        button:not(.titlebutton):active {{ background-image: none; background-color: {t["control_active"]}; border-color: {t["accent"]}; color: {t["accent_fg"]}; box-shadow: none; }}
+        button:not(.titlebutton):disabled {{ background-image: none; background-color: {t["surface"]}; color: {t["subtitle"]}; border-color: {t["border_subtle"]}; opacity: 0.6; }}
+        entry {{
+            background-color: {t["control_bg"]};
+            color: {t["fg"]};
+            border: 1px solid {t["border"]};
+            border-radius: 6px;
+            padding: 2px 8px;
+            min-height: 24px;
+        }}
+        entry:focus {{ border-color: {t["accent"]}; }}
+        spinbutton {{
+            background-color: {t["control_bg"]};
+            color: {t["fg"]};
+            border: 1px solid {t["border"]};
+            border-radius: 6px;
+            padding: 0;
+            min-height: 24px;
+        }}
+        spinbutton entry {{
+            background-color: transparent;
+            border: none;
+            box-shadow: none;
+            color: {t["fg"]};
+            min-height: 24px;
+            padding: 2px 6px;
+        }}
+        spinbutton button,
+        spinbutton.horizontal button,
+        spinbutton.horizontal > button,
+        spinbutton button:hover,
+        spinbutton button:active,
+        spinbutton button:focus,
+        spinbutton.horizontal > button:hover,
+        spinbutton.horizontal > button:active {{
+            background-image: none;
+            background-color: transparent;
+            border: none;
+            border-width: 0;
+            border-style: none;
+            border-color: transparent;
+            box-shadow: none;
+            color: {t["manage_fg"]};
+            border-radius: 4px;
+            padding: 0 4px;
+            margin: 0;
+            min-height: 11px;
+        }}
+        spinbutton button:hover,
+        spinbutton.horizontal button:hover,
+        spinbutton.horizontal > button:hover {{
+            background-color: {t["control_hover"]};
+            color: {t["accent"]};
+            border: none;
+            border-width: 0;
+            box-shadow: none;
+        }}
+        spinbutton button:active,
+        spinbutton.horizontal button:active,
+        spinbutton.horizontal > button:active {{
+            background-color: {t["accent_bg"]};
+            color: {t["accent_fg"]};
+            border: none;
+            border-width: 0;
+            box-shadow: none;
+        }}
+        combobox {{ min-height: 24px; padding: 0; }}
+        combobox button.combo, combobox button {{
+            background-image: none;
+            background-color: {t["control_bg"]};
+            color: {t["control_fg"]};
+            border: 1px solid {t["border"]};
+            border-radius: 6px;
+            padding: 2px 8px;
+            box-shadow: none;
+            min-height: 24px;
+        }}
+        combobox button.combo:hover, combobox button:hover {{ background-image: none; background-color: {t["control_hover"]}; border-color: {t["accent"]}; color: {t["fg"]}; }}
+        combobox menu, combobox window.popup {{ background-color: {t["popup_bg"]}; color: {t["fg"]}; border: 1px solid {t["border"]}; }}
+        combobox menu menuitem:hover {{ background-color: {t["accent_bg"]}; color: {t["accent_fg"]}; }}
+        checkbutton {{ min-height: 24px; padding: 2px 0; color: {t["fg"]}; }}
+        checkbutton check {{ background-image: none; background-color: {t["control_bg"]}; border: 1px solid {t["border"]}; border-radius: 4px; box-shadow: none; min-width: 16px; min-height: 16px; }}
+        checkbutton check:checked {{ background-image: none; background-color: {t["accent_bg"]}; border-color: {t["accent"]}; color: {t["accent"]}; }}
+        levelbar.quota-battery trough {{ background-image: none; background-color: {t["surface"]}; border: 1px solid {t["subtitle"]}; border-radius: 3px; padding: 1px; min-height: 8px; }}
+        levelbar.quota-battery block {{ border: none; border-radius: 1px; min-height: 6px; }}
+        levelbar.quota-battery block.empty {{ background-color: transparent; }}
+        levelbar.quota-battery.quota-ok block.filled {{ background-color: {t["quota_ok"]}; }}
+        levelbar.quota-battery.quota-warning block.filled {{ background-color: {t["quota_warn"]}; }}
+        levelbar.quota-battery.quota-low block.filled {{ background-color: {t["quota_low"]}; }}
+        .quota-battery-cap {{ background-color: {t["subtitle"]}; border-radius: 1px; }}
+        .quota-value {{ color: {t["fg"]}; font-size: 12px; font-weight: bold; }}
+        .quota-value:backdrop {{ color: {t["fg"]}; }}
+        .quota-number {{ font-family: monospace; }}
+        notebook {{ background-color: {t["win_bg"]}; border: none; }}
+        notebook > header {{ background-color: {t["surface"]}; border-bottom: 1px solid {t["border_subtle"]}; min-height: 25px; padding: 0 4px; }}
+        notebook tab {{
+            background-image: none;
+            background-color: {t["control_bg"]};
+            color: {t["tab_fg"]};
+            border: 1px solid {t["border_subtle"]};
+            border-bottom: none;
+            border-radius: 0;
+            padding: 0 12px;
+            margin: 0 2px;
+            box-shadow: none;
+            min-height: 25px;
+        }}
+        notebook tab:hover {{ background-image: none; background-color: {t["control_hover"]}; color: {t["fg"]}; }}
+        notebook tab:checked {{
+            background-image: none;
+            background-color: {t["accent_bg"]};
+            color: {t["accent_fg"]};
+            border-color: {t["accent"]};
+            box-shadow: none;
+        }}
+        notebook tab:checked label {{ font-weight: bold; color: {t["accent_fg"]}; }}
+        notebook tab:focus,
+        notebook tab button:focus {{
+            outline-style: none;
+            outline-width: 0;
+            outline-color: transparent;
+            box-shadow: none;
+        }}
+        notebook tab button {{
+            background-image: none;
+            background-color: transparent;
+            border: none;
+            box-shadow: none;
+            min-height: 0;
+            padding: 1px 3px;
+            color: {t["tab_fg"]};
+        }}
+        notebook tab button:hover {{ background-image: none; background-color: {t["hover_overlay"]}; color: {t["fg"]}; }}
+        .sidebar {{ background: {t["sidebar_bg"]}; }}
+        .sidebar button {{
+            background-image: none;
+            background-color: {t["control_bg"]};
+            color: {t["control_fg"]};
+            border: 1px solid {t["border"]};
+            border-radius: 6px;
+            box-shadow: none;
+            min-height: 24px;
+            padding: 2px 8px;
+        }}
+        .sidebar button:hover {{ background-image: none; background-color: {t["control_hover"]}; border-color: {t["accent"]}; color: {t["fg"]}; box-shadow: none; }}
+        .sidebar button:active {{ background-image: none; background-color: {t["control_active"]}; border-color: {t["accent"]}; color: {t["accent_fg"]}; box-shadow: none; }}
+        .brand {{ font-size: 19px; font-weight: bold; color: {t["brand"]}; }}
+        .subtitle {{ color: {t["subtitle"]}; font-size: 11px; }}
+        .section {{ color: {t["section"]}; font-weight: bold; margin-top: 12px; }}
+        .toolbar {{ background: {t["toolbar_bg"]}; border-bottom: 1px solid {t["border_subtle"]}; padding: 6px 12px; }}
+        .menu-toggle {{
+            background-image: none;
+            background-color: {t["control_bg"]};
+            color: {t["control_fg"]};
+            border: 1px solid {t["border"]};
+            border-radius: 6px;
+            padding: 2px 10px;
+            box-shadow: none;
+            min-height: 24px;
+        }}
+        .menu-toggle:hover {{ background-color: {t["control_hover"]}; border-color: {t["accent"]}; color: {t["fg"]}; }}
+        .menu-toggle:checked {{ background-color: {t["accent_bg"]}; border-color: {t["accent"]}; color: {t["accent_fg"]}; }}
+        .menu-toggle:checked:hover {{ background-color: {t["accent_bg_hover"]}; }}
+        .menu-toggle:focus {{ outline-color: {t["accent"]}; }}
+        .workspace-title {{ font-weight: bold; font-size: 15px; color: {t["fg"]}; }}
+        .primary {{ background: {t["accent"]}; color: {t["accent_text"]}; font-weight: bold; border: 0; }}
+        .primary:hover {{ background: {t["accent_bg_hover"]}; color: {t["accent_fg"]}; border: 1px solid {t["accent"]}; }}
+        .tile-grid {{ background: {t["tile_grid_bg"]}; }}
+        .tile {{ background: {t["surface"]}; }}
+        .tile-header {{ padding: 0 8px; background: {t["tile_header_bg"]}; border-bottom: 1px solid {t["border_subtle"]}; min-height: 25px; color: {t["fg"]}; }}
+        .running-outline {{ margin: 3px; }}
+        .tile-header button {{ background-image: none; background-color: transparent; border: none; box-shadow: none; min-height: 0; padding: 1px 3px; color: {t["tab_fg"]}; }}
+        .tile-header button:hover {{ background-image: none; background-color: {t["hover_overlay"]}; color: {t["fg"]}; }}
+        .tile-focused .tile-header {{ background: {t["tile_focused_bg"]}; border-bottom-color: {t["accent"]}; }}
+        .tile-dragging {{ opacity: 0.55; }}
+        .tile-drop-target {{ border: 1px solid {t["drop_border"]}; background: {t["drop_bg"]}; }}
+        .tile-drop-target .tile-header {{ background: {t["drop_header"]}; }}
+        .tile-drop-target > * {{ opacity: 0.88; }}
+        paned.sidebar-paned > separator {{ background-color: {t["border_subtle"]}; min-width: 4px; }}
+        paned.sidebar-paned > separator:hover {{ background-color: {t["accent"]}; }}
+        paned.tile-paned > separator {{ background-color: {t["border_subtle"]}; margin: 0; padding: 0; }}
+        paned.tile-paned.horizontal > separator {{ min-width: 2px; }}
+        paned.tile-paned.vertical > separator {{ min-height: 2px; }}
+        paned.tile-paned > separator:hover, paned.tile-paned > separator:active {{ background-color: {t["accent"]}; }}
+        .floating-session {{ background: {t["border_subtle"]}; }}
+        .session-header-action {{ padding-left: 4px; padding-right: 4px; }}
+        .minimized-dot {{ border-radius: 8px; background: {t["dot_idle"]}; }}
+        .minimized-dot.running {{ background: {t["dot_run"]}; }}
+        .minimized-dot.waiting {{ background: {t["dot_wait"]}; }}
+        .empty {{ color: {t["subtitle"]}; font-size: 15px; }}
+        .host-button {{
+            background-image: none;
+            background-color: {t["control_bg"]};
+            border: 1px solid {t["border"]};
+            border-radius: 6px;
+            padding: 2px 8px;
+            color: {t["control_fg"]};
+            box-shadow: none;
+            min-height: 24px;
+        }}
+        .host-button:hover, .host-button.agent-selected {{ background-image: none; background-color: {t["control_hover"]}; border-color: {t["accent"]}; color: {t["fg"]}; }}
+        .host-selected {{ background-image: none; background-color: {t["accent_bg"]}; border-color: {t["accent"]}; color: {t["accent_fg"]}; font-weight: bold; }}
+        .project-button {{
+            background-image: none;
+            background-color: {t["control_bg"]};
+            border: 1px solid {t["border"]};
+            border-radius: 6px;
+            padding: 2px 8px;
+            color: {t["fg"]};
+            box-shadow: none;
+            min-height: 24px;
+        }}
+        .project-button:hover {{ background-image: none; background-color: {t["control_hover"]}; border-color: {t["accent"]}; color: {t["fg"]}; }}
+        .manage-button {{
+            background-image: none;
+            background-color: {t["control_bg"]};
+            color: {t["manage_fg"]};
+            border: 1px solid {t["border"]};
+            border-radius: 5px;
+            padding: 2px 6px;
+            font-weight: bold;
+            box-shadow: none;
+            min-height: 24px;
+        }}
+        .manage-button:hover {{ background-image: none; background-color: {t["control_hover"]}; border-color: {t["accent"]}; color: {t["fg"]}; }}
+    """
+
+
 class App(Gtk.Window):
     def __init__(self):
         super().__init__(title="Remote Dev Terminal")
@@ -365,6 +768,7 @@ class App(Gtk.Window):
         self.sync_pending = set()
         self.workspace_versions = {}
         self.workspace_dirty = set()
+        self.workspace_sync_in_flight = set()
         self.dirty_host_profiles = set()
         self.host_profile_sync_pending = False
         self.refresh_sessions_after_host_profiles = False
@@ -378,260 +782,13 @@ class App(Gtk.Window):
         self.data.setdefault("auto_sync_enabled", False)
         self.data.setdefault("sync_interval_seconds", 5)
         self.dirty_host_profiles = set(self.data.get("dirty_host_profiles", []))
+        self.workspace_dirty = set(self.data.get("dirty_workspaces", []))
         self.tiled = self.data.get("tiled", True)
         self.scale = self.data.get("ui_scale", 100)
         if not isinstance(self.scale, int) or isinstance(self.scale, bool) or not 50 <= self.scale <= 200:
             self.scale = 100
         self.css = Gtk.CssProvider()
-        self.base_css = '''
-            * { font-size: 13px; }
-            window { background: #0c1119; color: #e8eef6; }
-            button, entry, spinbutton, combobox, combobox button, .menu-toggle, .host-button, .project-button, .manage-button {
-                min-height: 24px;
-                padding: 2px 8px;
-            }
-            button {
-                background-image: none;
-                background-color: #16222f;
-                color: #d0e1ed;
-                border: 1px solid #2b3e51;
-                border-radius: 6px;
-                padding: 2px 8px;
-                box-shadow: none;
-                min-height: 24px;
-            }
-            button:hover { background-image: none; background-color: #213548; border-color: #86dbb8; color: #ffffff; box-shadow: none; }
-            button:active { background-image: none; background-color: #203e36; border-color: #86dbb8; color: #d8fff0; box-shadow: none; }
-            entry {
-                background-color: #16222f;
-                color: #e8eef6;
-                border: 1px solid #2b3e51;
-                border-radius: 6px;
-                padding: 2px 8px;
-                min-height: 24px;
-            }
-            entry:focus { border-color: #86dbb8; }
-            spinbutton {
-                background-color: #16222f;
-                color: #e8eef6;
-                border: 1px solid #2b3e51;
-                border-radius: 6px;
-                padding: 0;
-                min-height: 24px;
-            }
-            spinbutton entry {
-                background-color: transparent;
-                border: none;
-                box-shadow: none;
-                color: #e8eef6;
-                min-height: 24px;
-                padding: 2px 6px;
-            }
-            spinbutton button,
-            spinbutton.horizontal button,
-            spinbutton.horizontal > button,
-            spinbutton button:hover,
-            spinbutton button:active,
-            spinbutton button:focus,
-            spinbutton.horizontal > button:hover,
-            spinbutton.horizontal > button:active {
-                background-image: none;
-                background-color: transparent;
-                border: none;
-                border-width: 0;
-                border-style: none;
-                border-color: transparent;
-                box-shadow: none;
-                color: #a6bacb;
-                border-radius: 4px;
-                padding: 0 4px;
-                margin: 0;
-                min-height: 11px;
-            }
-            spinbutton button:hover,
-            spinbutton.horizontal button:hover,
-            spinbutton.horizontal > button:hover {
-                background-color: #213548;
-                color: #86dbb8;
-                border: none;
-                border-width: 0;
-                box-shadow: none;
-            }
-            spinbutton button:active,
-            spinbutton.horizontal button:active,
-            spinbutton.horizontal > button:active {
-                background-color: #203e36;
-                color: #d8fff0;
-                border: none;
-                border-width: 0;
-                box-shadow: none;
-            }
-            combobox { min-height: 24px; padding: 0; }
-            combobox button.combo, combobox button {
-                background-image: none;
-                background-color: #16222f;
-                color: #d6e3ee;
-                border: 1px solid #2b3e51;
-                border-radius: 6px;
-                padding: 2px 8px;
-                box-shadow: none;
-                min-height: 24px;
-            }
-            combobox button.combo:hover, combobox button:hover { background-image: none; background-color: #213548; border-color: #86dbb8; color: #ffffff; }
-            combobox menu, combobox window.popup { background-color: #141f2b; color: #e8eef6; border: 1px solid #2b3e51; }
-            combobox menu menuitem:hover { background-color: #203e36; color: #bdf5dd; }
-            checkbutton { min-height: 24px; padding: 2px 0; }
-            checkbutton check { background-image: none; background-color: #16222f; border: 1px solid #2b3e51; border-radius: 4px; box-shadow: none; min-width: 16px; min-height: 16px; }
-            checkbutton check:checked { background-image: none; background-color: #203e36; border-color: #86dbb8; color: #86dbb8; }
-            levelbar.quota-battery trough { background-image: none; background-color: #101823; border: 1px solid #8fa2b4; border-radius: 3px; padding: 1px; min-height: 8px; }
-            levelbar.quota-battery block { border: none; border-radius: 1px; min-height: 6px; }
-            levelbar.quota-battery block.empty { background-color: transparent; }
-            levelbar.quota-battery.quota-ok block.filled { background-color: #86dbb8; }
-            levelbar.quota-battery.quota-warning block.filled { background-color: #ff9e20; }
-            levelbar.quota-battery.quota-low block.filled { background-color: #ff4d4d; }
-            .quota-battery-cap { background-color: #8fa2b4; border-radius: 1px; }
-            .quota-value { color: #e8eef6; font-size: 12px; font-weight: bold; }
-            .quota-value:backdrop { color: #e8eef6; }
-            .quota-number { font-family: monospace; }
-            notebook { background-color: #0c1119; border: none; }
-            notebook > header { background-color: #101823; border-bottom: 1px solid #243546; min-height: 25px; padding: 0 4px; }
-            notebook tab {
-                background-image: none;
-                background-color: #16222f;
-                color: #8fa2b4;
-                border: 1px solid #243546;
-                border-bottom: none;
-                border-radius: 0;
-                padding: 0 12px;
-                margin: 0 2px;
-                box-shadow: none;
-                min-height: 25px;
-            }
-            notebook tab:hover { background-image: none; background-color: #213548; color: #ffffff; }
-            notebook tab:checked {
-                background-image: none;
-                background-color: #203e36;
-                color: #86dbb8;
-                border-color: #243546;
-                box-shadow: none;
-            }
-            notebook tab:checked label { font-weight: bold; color: #86dbb8; }
-            notebook tab:focus,
-            notebook tab button:focus {
-                outline-style: none;
-                outline-width: 0;
-                outline-color: transparent;
-                box-shadow: none;
-            }
-            notebook tab button {
-                background-image: none;
-                background-color: transparent;
-                border: none;
-                box-shadow: none;
-                min-height: 0;
-                padding: 1px 3px;
-                color: #8fa2b4;
-            }
-            notebook tab button:hover { background-image: none; background-color: rgba(255, 255, 255, 0.15); color: #ffffff; }
-            .sidebar { background: #131b26; border-right: 1px solid #243546; }
-            .sidebar button {
-                background-image: none;
-                background-color: #16222f;
-                color: #d0e1ed;
-                border: 1px solid #2b3e51;
-                border-radius: 6px;
-                box-shadow: none;
-                min-height: 24px;
-                padding: 2px 8px;
-            }
-            .sidebar button:hover { background-image: none; background-color: #213548; border-color: #86dbb8; color: #ffffff; box-shadow: none; }
-            .sidebar button:active { background-image: none; background-color: #203e36; border-color: #86dbb8; color: #d8fff0; box-shadow: none; }
-            .brand { font-size: 19px; font-weight: bold; color: #a2e8cc; }
-            .subtitle { color: #8fa2b4; font-size: 11px; }
-            .section { color: #9bb0c3; font-weight: bold; margin-top: 12px; }
-            .toolbar { background: #101823; border-bottom: 1px solid #243546; padding: 6px 12px; }
-            .menu-toggle {
-                background-image: none;
-                background-color: #16222f;
-                color: #d0e1ed;
-                border: 1px solid #2b3e51;
-                border-radius: 6px;
-                padding: 2px 10px;
-                box-shadow: none;
-                min-height: 24px;
-            }
-            .menu-toggle:hover { background-color: #213548; border-color: #86dbb8; color: #ffffff; }
-            .menu-toggle:checked { background-color: #203e36; border-color: #86dbb8; color: #d8fff0; }
-            .menu-toggle:checked:hover { background-color: #274b42; }
-            .menu-toggle:focus { outline-color: #86dbb8; }
-            .workspace-title { font-weight: bold; font-size: 15px; }
-            .primary { background: #86dbb8; color: #101c1a; font-weight: bold; border: 0; }
-            .tile-grid { background: #263647; }
-            dialog treeview.user-table { background-color: #101823; color: #e8eef6; }
-            dialog treeview.user-table:selected { background-color: #203e36; color: #d8fff0; }
-            dialog treeview.user-table header button {
-                background-image: none; background-color: #16222f; color: #9bb0c3;
-                border: none; border-bottom: 1px solid #2b3e51; border-radius: 0;
-                padding: 7px 10px; box-shadow: none; font-weight: bold;
-            }
-            .tile { background: #101823; }
-            .tile-header { padding: 0 8px; background: #16222f; border-bottom: 1px solid #243546; min-height: 25px; }
-            .running-outline { margin: 3px; }
-            .tile-header button { background-image: none; background-color: transparent; border: none; box-shadow: none; min-height: 0; padding: 1px 3px; color: #8fa2b4; }
-            .tile-header button:hover { background-image: none; background-color: rgba(255, 255, 255, 0.15); color: #ffffff; }
-            .tile-focused .tile-header { background: #203e36; }
-            .tile-dragging { opacity: 0.55; }
-            .tile-drop-target { border: 1px solid #2ee878; background: #18382c; }
-            .tile-drop-target .tile-header { background: #235340; }
-            .tile-drop-target > * { opacity: 0.88; }
-            paned.sidebar-paned > separator { background-color: #243546; min-width: 6px; }
-            paned.sidebar-paned > separator:hover { background-color: #86dbb8; }
-            paned.tile-paned > separator { background-color: #243546; margin: 0; padding: 0; }
-            paned.tile-paned.horizontal > separator { min-width: 2px; }
-            paned.tile-paned.vertical > separator { min-height: 2px; }
-            paned.tile-paned > separator:hover, paned.tile-paned > separator:active { background-color: #86dbb8; }
-            .floating-session { background: #243546; }
-            .session-header-action { padding-left: 4px; padding-right: 4px; }
-            .minimized-dot { border-radius: 8px; background: #6bd18f; }
-            .minimized-dot.running { background: #3da1ff; }
-            .minimized-dot.waiting { background: #ffc745; }
-            .empty { color: #8fa2b4; font-size: 15px; }
-            .host-button {
-                background-image: none;
-                background-color: #16222f;
-                border: 1px solid #2b3e51;
-                border-radius: 6px;
-                padding: 2px 8px;
-                color: #d6e3ee;
-                box-shadow: none;
-                min-height: 24px;
-            }
-            .host-button:hover, .host-button.agent-selected { background-image: none; background-color: #213548; border-color: #86dbb8; color: #ffffff; }
-            .host-selected { background-image: none; background-color: #203c34; border-color: #86dbb8; color: #d8fff0; font-weight: bold; }
-            .project-button {
-                background-image: none;
-                background-color: #16222f;
-                border: 1px solid #2b3e51;
-                border-radius: 6px;
-                padding: 2px 8px;
-                color: #e2edf7;
-                box-shadow: none;
-                min-height: 24px;
-            }
-            .project-button:hover { background-image: none; background-color: #213548; border-color: #86dbb8; color: #ffffff; }
-            .manage-button {
-                background-image: none;
-                background-color: #16222f;
-                color: #b3c7d6;
-                border: 1px solid #2b3e51;
-                border-radius: 5px;
-                padding: 2px 6px;
-                font-weight: bold;
-                box-shadow: none;
-                min-height: 24px;
-            }
-            .manage-button:hover { background-image: none; background-color: #213548; border-color: #86dbb8; color: #ffffff; }
-        '''
+        self.apply_theme(apply_css=False)
         self.apply_scale_css()
         Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), self.css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         root = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
@@ -951,6 +1108,27 @@ class App(Gtk.Window):
         css = re.sub(r"([\w-]+)\s*:\s*([^;]+)(?=[;}])", replace_decl, self.base_css)
         # VTE applies its own font scale, so keep its CSS font size unscaled.
         self.css.load_from_data((css + "\nterminal { font-size: 13px; }").encode("utf-8"))
+
+    def current_theme(self):
+        name = self.data.get("theme", "cyberpunk")
+        return name if name in THEMES else "cyberpunk"
+
+    def apply_terminal_theme(self, terminal):
+        palette = THEMES[self.current_theme()]
+        fg = Gdk.RGBA()
+        fg.parse(palette["term_fg"])
+        bg = Gdk.RGBA()
+        bg.parse(palette["term_bg"])
+        terminal.set_colors(fg, bg, None)
+
+    def apply_theme(self, apply_css=True):
+        self.base_css = build_theme_css(self.current_theme())
+        if apply_css:
+            self.apply_scale_css()
+        for session in getattr(self, "sessions", []):
+            terminal = session.get("terminal")
+            if terminal is not None:
+                self.apply_terminal_theme(terminal)
 
     @staticmethod
     def apply_hand_cursor(widget):
@@ -1732,9 +1910,15 @@ class App(Gtk.Window):
         metrics_row.pack_start(metrics_interval, False, False, 0)
         metrics_row.pack_start(Gtk.Label(label="秒（5–300）"), False, False, 0)
         grid.attach(metrics_row, 0, 7, 2, 1)
+        theme_combo = Gtk.ComboBoxText()
+        for theme_id, palette in THEMES.items():
+            theme_combo.append(theme_id, palette["label"])
+        theme_combo.set_active_id(self.current_theme())
+        grid.attach(Gtk.Label(label="界面主题", xalign=0), 0, 8, 1, 1)
+        grid.attach(theme_combo, 1, 8, 1, 1)
         mcp_button = Gtk.Button(label="MCP 接入说明")
         mcp_button.connect("clicked", lambda *_: self.show_mcp_guide(dialog))
-        grid.attach(mcp_button, 0, 8, 2, 1)
+        grid.attach(mcp_button, 0, 9, 2, 1)
         key_path = Path.home() / ".ssh" / "id_ed25519.pub"
         key_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         key_label = Gtk.Label(label=key_path.read_text(encoding="utf-8").strip() if key_path.exists() else "尚未生成本地 SSH 密钥", xalign=0)
@@ -1764,10 +1948,10 @@ class App(Gtk.Window):
         key_buttons.pack_start(generate, False, False, 0)
         key_buttons.pack_start(copy, False, False, 0)
         key_box.pack_start(key_buttons, False, False, 0)
-        grid.attach(Gtk.Label(label="本机 SSH 公钥", xalign=0), 0, 9, 2, 1)
-        grid.attach(key_box, 0, 10, 2, 1)
+        grid.attach(Gtk.Label(label="本机 SSH 公钥", xalign=0), 0, 10, 2, 1)
+        grid.attach(key_box, 0, 11, 2, 1)
         if self.data.get("sync_is_admin"):
-            grid.attach(self.manage_sync_users(dialog), 0, 11, 2, 2)
+            grid.attach(self.manage_sync_users(dialog), 0, 12, 2, 2)
         self.scale_layout(dialog)
         dialog.show_all()
         if dialog.run() == Gtk.ResponseType.OK:
@@ -1778,6 +1962,10 @@ class App(Gtk.Window):
             self.data["sync_interval_seconds"] = sync_interval.get_value_as_int()
             self.data["agent_quota_interval_seconds"] = quota_interval.get_value_as_int()
             self.data["host_metrics_interval_seconds"] = metrics_interval.get_value_as_int()
+            chosen_theme = theme_combo.get_active_id()
+            if chosen_theme in THEMES:
+                self.data["theme"] = chosen_theme
+                self.apply_theme()
             self.metrics_attempts.clear()
             self.refresh_host_metrics()
             self.refresh_quotas()
@@ -2783,6 +2971,11 @@ class App(Gtk.Window):
         version = self.workspace_versions.get(key, 0) + 1
         self.workspace_versions[key] = version
         self.workspace_dirty.add(key)
+        self.data["dirty_workspaces"] = sorted(self.workspace_dirty)
+        self.persist()
+        if key in self.workspace_sync_in_flight:
+            return
+        self.workspace_sync_in_flight.add(key)
         items = []
         for directory in host.get("directories", []):
             path = directory.get("path", "")
@@ -2811,23 +3004,29 @@ class App(Gtk.Window):
                         error = True
                         break
             def finish():
-                if self.workspace_versions.get(key) == version:
-                    if error:
-                        if key not in self.workspace_sync_errors:
-                            self.workspace_sync_errors.add(key)
-                            self.message("工作区同步失败", "本地顺序已保存，将自动重试同步。")
+                self.workspace_sync_in_flight.discard(key)
+                if not error and response is not None:
+                    self.data.setdefault("workspace_sync_revisions", {})[identity] = response.get("revision", revision)
+                local_host = next((h for h in self.data["hosts"] if self.shared_host_key(h) == key), None)
+                if self.workspace_versions.get(key) != version:
+                    if local_host is not None:
+                        self.push_workspace_list(local_host)
+                elif error:
+                    if key not in self.workspace_sync_errors:
+                        self.workspace_sync_errors.add(key)
+                        self.message("工作区同步失败", "本地顺序已保存，将自动重试同步。")
+                    self.persist()
+                else:
+                    self.workspace_dirty.discard(key)
+                    self.data["dirty_workspaces"] = sorted(self.workspace_dirty)
+                    merged = response.get("workspaces", items)
+                    if local_host is not None and local_host.get("directories", []) != merged:
+                        local_host["directories"] = merged
+                        self.persist(); self.refresh()
                     else:
-                        self.workspace_dirty.discard(key)
-                        self.data.setdefault("workspace_sync_revisions", {})[identity] = response.get("revision", base_revision)
-                        local_host = next((h for h in self.data["hosts"] if self.shared_host_key(h) == key), None)
-                        merged = response.get("workspaces", items)
-                        if local_host is not None and local_host.get("directories", []) != merged:
-                            local_host["directories"] = merged
-                            self.persist(); self.refresh()
-                        else:
-                            self.persist()
-                        self.workspace_sync_errors.discard(key)
-                    self.update_sync_status()
+                        self.persist()
+                    self.workspace_sync_errors.discard(key)
+                self.update_sync_status()
                 return False
             GLib.idle_add(finish)
         self.sync_executor.submit(worker)
@@ -3377,6 +3576,7 @@ class App(Gtk.Window):
         if not shared_item:
             self.sync_async(host, "PUT", session_id, item)
         terminal = Vte.Terminal()
+        self.apply_terminal_theme(terminal)
         def copy_selection(widget):
             if widget.get_has_selection():
                 widget.copy_clipboard_format(Vte.Format.TEXT)

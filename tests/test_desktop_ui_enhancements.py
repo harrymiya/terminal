@@ -24,17 +24,17 @@ class DesktopUIEnhancementsTest(unittest.TestCase):
     def test_separator_css_has_wide_hitbox_and_crisp_visual(self):
         for platform in ("omarchy", "ubuntu", "windows"):
             py_file = (Path(__file__).resolve().parents[1] / platform / "remote-dev-terminal.py").read_text(encoding="utf-8")
-            self.assertIn("paned.tile-paned > separator { background-color: #243546; margin: 0; padding: 0; }", py_file)
+            self.assertIn("paned.tile-paned > separator {", py_file)
             self.assertIn("paned.tile-paned.horizontal > separator { min-width: 2px; }", py_file)
             self.assertIn("paned.tile-paned.vertical > separator { min-height: 2px; }", py_file)
 
     def test_notebook_and_tab_dark_theme(self):
         for platform in ("omarchy", "ubuntu", "windows"):
             py_file = (Path(__file__).resolve().parents[1] / platform / "remote-dev-terminal.py").read_text(encoding="utf-8")
-            self.assertIn("notebook { background-color: #0c1119;", py_file)
+            self.assertIn("notebook { background-color:", py_file)
             self.assertIn("notebook tab {", py_file)
             self.assertIn("notebook tab:checked {", py_file)
-            self.assertIn(".tile-header { padding: 4px 8px; background: #16222f;", py_file)
+            self.assertIn(".tile-header {", py_file)
 
     def test_dark_theme_css_colors(self):
         for platform in ("omarchy", "ubuntu", "windows"):
@@ -305,3 +305,29 @@ class DesktopUIEnhancementsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DesktopThemeBuildTest(unittest.TestCase):
+    def test_ubuntu_and_omarchy_support_cyberpunk_and_light_themes(self):
+        for platform in ("ubuntu", "omarchy"):
+            platform_dir = str(Path(__file__).resolve().parents[1] / platform)
+            if platform_dir not in sys.path:
+                sys.path.insert(0, platform_dir)
+            try:
+                mod = importlib.import_module("remote-dev-terminal")
+                mod = importlib.reload(mod)
+            finally:
+                if platform_dir in sys.path:
+                    sys.path.remove(platform_dir)
+            self.assertIn("cyberpunk", mod.THEMES)
+            self.assertIn("light", mod.THEMES)
+            cyber_css = mod.build_theme_css("cyberpunk")
+            light_css = mod.build_theme_css("light")
+            self.assertIn("#00f0ff", cyber_css)
+            self.assertIn("#ff2a85", cyber_css)
+            self.assertIn("#f5f7fb", light_css)
+            self.assertIn("#182230", light_css)
+            self.assertIn("button:not(.titlebutton)", cyber_css)
+            self.assertIn("button:not(.titlebutton)", light_css)
+            self.assertNotIn("{{", cyber_css)
+            self.assertNotIn("{{", light_css)

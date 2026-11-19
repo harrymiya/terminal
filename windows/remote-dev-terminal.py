@@ -363,6 +363,7 @@ class App(Gtk.Window):
         self.sync_pending = set()
         self.workspace_versions = {}
         self.workspace_dirty = set()
+        self.workspace_sync_in_flight = set()
         self.dirty_host_profiles = set()
         self.host_profile_sync_pending = False
         self.refresh_sessions_after_host_profiles = False
@@ -375,6 +376,7 @@ class App(Gtk.Window):
         self.data.setdefault("auto_sync_enabled", False)
         self.data.setdefault("sync_interval_seconds", 5)
         self.dirty_host_profiles = set(self.data.get("dirty_host_profiles", []))
+        self.workspace_dirty = set(self.data.get("dirty_workspaces", []))
         self.tiled = self.data.get("tiled", True)
         self.scale = self.data.get("ui_scale", 100)
         if not isinstance(self.scale, int) or isinstance(self.scale, bool) or not 50 <= self.scale <= 200:
@@ -2619,6 +2621,11 @@ class App(Gtk.Window):
         version = self.workspace_versions.get(key, 0) + 1
         self.workspace_versions[key] = version
         self.workspace_dirty.add(key)
+        self.data["dirty_workspaces"] = sorted(self.workspace_dirty)
+        self.persist()
+        if key in self.workspace_sync_in_flight:
+            return
+        self.workspace_sync_in_flight.add(key)
         items = [{"id": d.get("id") or __import__("hashlib").sha256(d["path"].encode()).hexdigest()[:32], "name": d["name"], "path": d["path"], "icon": d.get("icon", "📁")} for d in host.get("directories", [])]
         path = "/v1/workspaces/" + sync_host_key(host)
         identity = self.data.get("sync_username", "") + ":" + sync_host_key(host)
@@ -2642,19 +2649,25 @@ class App(Gtk.Window):
                         error = True
                         break
             def finish():
-                if self.workspace_versions.get(key) == version:
-                    if error:
-                        self.shared_by_host[key] = "工作区同步失败，将自动重试"
+                self.workspace_sync_in_flight.discard(key)
+                if not error and response is not None:
+                    self.data.setdefault("workspace_sync_revisions", {})[identity] = response.get("revision", revision)
+                local_host = next((h for h in self.data["hosts"] if self.shared_host_key(h) == key), None)
+                if self.workspace_versions.get(key) != version:
+                    if local_host is not None:
+                        self.push_workspace_list(local_host)
+                elif error:
+                    self.shared_by_host[key] = "工作区同步失败，将自动重试"
+                    self.persist()
+                else:
+                    self.workspace_dirty.discard(key)
+                    self.data["dirty_workspaces"] = sorted(self.workspace_dirty)
+                    merged = response.get("workspaces", items)
+                    if local_host is not None and local_host.get("directories", []) != merged:
+                        local_host["directories"] = merged
+                        self.persist(); self.refresh()
                     else:
-                        self.workspace_dirty.discard(key)
-                        self.data.setdefault("workspace_sync_revisions", {})[identity] = response.get("revision", base_revision)
-                        local_host = next((h for h in self.data["hosts"] if self.shared_host_key(h) == key), None)
-                        merged = response.get("workspaces", items)
-                        if local_host is not None and local_host.get("directories", []) != merged:
-                            local_host["directories"] = merged
-                            self.persist(); self.refresh()
-                        else:
-                            self.persist()
+                        self.persist()
                 return False
             GLib.idle_add(finish)
         self.sync_executor.submit(worker)

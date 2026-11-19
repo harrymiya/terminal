@@ -420,6 +420,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
         val dirtyWorkspaces = remember { store.loadDirtyWorkspaces().toMutableSet() }
         val dirtyHostProfiles = remember { store.loadDirtyHostProfiles().toMutableSet() }
         val workspaceVersions = remember { mutableMapOf<String, Int>() }
+        val workspaceSyncInFlight = remember { mutableSetOf<String>() }
         val agentVersions = remember { mutableMapOf<String, Int>() }
         val agentSaves = remember { mutableSetOf<String>() }
         val mainHandler = remember { Handler(Looper.getMainLooper()) }
@@ -556,6 +557,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
             workspaceVersions[host.id] = version
             dirtyWorkspaces.add(host.id)
             store.saveDirtyWorkspaces(dirtyWorkspaces)
+            if (!workspaceSyncInFlight.add(host.id)) return
             val identity = "${store.loadSyncUsername().lowercase()}:${SyncClient.hostIdentity(host)}"
             scope.launch {
                 runCatching {
@@ -566,20 +568,32 @@ private fun RemoteTerminalApp(store: LocalStore) {
                     }
                 }
                     .onSuccess { (response, baseRevision) ->
-                        if (workspaceVersions[host.id] == version) {
-                            store.saveWorkspaceRevision(identity, response.optInt("revision", baseRevision))
+                        workspaceSyncInFlight.remove(host.id)
+                        store.saveWorkspaceRevision(identity, response.optInt("revision", baseRevision))
+                        val latestHost = hosts.firstOrNull { it.id == host.id }
+                        if (workspaceVersions[host.id] != version) {
+                            if (latestHost != null) syncWorkspaceList(latestHost, latestHost.directories)
+                        } else {
                             dirtyWorkspaces.remove(host.id)
                             store.saveDirtyWorkspaces(dirtyWorkspaces)
                             val array = response.optJSONArray("workspaces") ?: JSONArray()
                             val merged = (0 until array.length()).map { index ->
                                 array.getJSONObject(index).let { ProjectDirectory(it.getString("id"), it.getString("name"), it.getString("path"), it.optString("icon", "📁")) }
                             }
-                            hosts.firstOrNull { it.id == host.id }?.takeIf { it.directories != merged }?.let { current ->
+                            latestHost?.takeIf { it.directories != merged }?.let { current ->
                                 saveHosts(hosts.map { if (it.id == current.id) it.copy(directories = merged) else it })
                             }
                         }
                     }
-                    .onFailure { snackbars.showSnackbar("工作区同步失败，将自动重试：${it.message}") }
+                    .onFailure {
+                        workspaceSyncInFlight.remove(host.id)
+                        val latestHost = hosts.firstOrNull { it.id == host.id }
+                        if (workspaceVersions[host.id] != version && latestHost != null) {
+                            syncWorkspaceList(latestHost, latestHost.directories)
+                        } else {
+                            snackbars.showSnackbar("工作区同步失败，将自动重试：${it.message}")
+                        }
+                    }
             }
         }
 
@@ -956,14 +970,17 @@ private fun RemoteTerminalApp(store: LocalStore) {
                             val revisionIdentity = "${store.loadSyncUsername().lowercase()}:$identity"
                             val localRevision = store.loadWorkspaceRevision(revisionIdentity)
                             val remoteRevision = workspaceSnapshot.optInt("revision", 0)
-                            if (localRevision < remoteRevision) {
+                            if (!configuredWorkspaces && localHost.directories.isNotEmpty()) {
                                 syncWorkspaceList(localHost, localHost.directories)
-                            } else if (!configuredWorkspaces && localHost.directories.isNotEmpty()) {
+                            } else if (configuredWorkspaces && localRevision < 0 && localHost.directories.isNotEmpty() && remoteRevision > 0) {
                                 syncWorkspaceList(localHost, localHost.directories)
-                            } else {
-                                if (localHost.directories != remoteWorkspaces)
-                                    saveHosts(hosts.map { if (it.id == host.id) it.copy(directories = remoteWorkspaces) else it })
-                                store.saveWorkspaceRevision(revisionIdentity, remoteRevision)
+                            } else if (configuredWorkspaces) {
+                                if (remoteRevision > localRevision || localHost.directories != remoteWorkspaces) {
+                                    if (localHost.directories != remoteWorkspaces) {
+                                        saveHosts(hosts.map { if (it.id == host.id) it.copy(directories = remoteWorkspaces) else it })
+                                    }
+                                    store.saveWorkspaceRevision(revisionIdentity, remoteRevision)
+                                }
                             }
                         }
                         val agentRevisionIdentity = SyncClient.agentRevisionIdentity(store.loadSyncUsername())
@@ -1443,13 +1460,15 @@ private fun HomeScreen(
                     EmptyRow("保存你的第一个项目目录", "例如 /workspace/my-app", onAddDirectory, "添加目录")
                 } else {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(bottom = 20.dp)) {
-                        host.directories.forEachIndexed { index, dir ->
+                        val latestHost by rememberUpdatedState(host)
+                        val latestDirectories by rememberUpdatedState(host.directories)
+                        host.directories.forEach { dir ->
                             val isDragging = draggingDirectoryId == dir.id
                             val rowHeightPx = with(LocalDensity.current) { 90.dp.toPx() }
                             ProjectRow(
                                 directory = dir, selectedAgent = selectedAgent,
                                 enabled = selectedAgent != null,
-                                onClick = { if (selectedAgent != null) onStartTask(host, dir, selectedAgent) },
+                                onClick = { if (selectedAgent != null) onStartTask(latestHost, dir, selectedAgent) },
                                 modifier = Modifier
                                     .graphicsLayer {
                                         translationY = if (isDragging) dragOffsetY else 0f
@@ -1457,18 +1476,21 @@ private fun HomeScreen(
                                         scaleY = if (isDragging) 1.025f else 1f
                                         shadowElevation = if (isDragging) 14.dp.toPx() else 0f
                                     }
-                                    .pointerInput(host.id, host.directories, dir.id) {
+                                    .pointerInput(host.id, dir.id) {
                                         detectDragGesturesAfterLongPress(
                                             onDragStart = { draggingDirectoryId = dir.id; dragOffsetY = 0f },
                                             onDrag = { change, amount ->
                                                 change.consume()
                                                 dragOffsetY += amount.y
-                                                val delta = (dragOffsetY / rowHeightPx).toInt()
-                                                val target = (index + delta).coerceIn(0, host.directories.lastIndex)
-                                                if (target != index) {
-                                                    val reordered = host.directories.toMutableList().apply { add(target, removeAt(index)) }
-                                                    onReorderDirectories(host, reordered)
-                                                    dragOffsetY -= (target - index) * rowHeightPx
+                                                val currentIndex = latestDirectories.indexOfFirst { it.id == dir.id }
+                                                if (currentIndex >= 0) {
+                                                    val delta = (dragOffsetY / rowHeightPx).toInt()
+                                                    val target = (currentIndex + delta).coerceIn(0, latestDirectories.lastIndex)
+                                                    if (target != currentIndex) {
+                                                        val reordered = latestDirectories.toMutableList().apply { add(target, removeAt(currentIndex)) }
+                                                        onReorderDirectories(latestHost, reordered)
+                                                        dragOffsetY -= (target - currentIndex) * rowHeightPx
+                                                    }
                                                 }
                                             },
                                             onDragEnd = { draggingDirectoryId = null; dragOffsetY = 0f },
