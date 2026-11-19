@@ -24,31 +24,70 @@ from version import VERSION
 from host_metrics import metrics_key, read_host_metrics
 
 
+def render_host_metric_pixbuf(pct, is_cpu=False, size=20):
+    import cairo
+
+    remaining = (100 - pct if is_cpu else pct) if pct is not None else None
+    warning = remaining is not None and remaining < 20
+    fill_color = (1.0, 0.60, 0.05) if warning else (0.525, 0.859, 0.722)
+    border_color = (0.35, 0.45, 0.55, 0.8) if pct is None else (*fill_color, 0.95)
+    surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, size, size)
+    cr = cairo.Context(surface)
+    cr.set_antialias(cairo.ANTIALIAS_BEST)
+    cr.set_operator(cairo.OPERATOR_CLEAR)
+    cr.paint()
+    cr.set_operator(cairo.OPERATOR_OVER)
+
+    center = size / 2
+    radius = size / 2 - 1
+    fill_radius = radius - 0.55
+    cr.arc(center, center, fill_radius, 0, 2 * math.pi)
+    cr.set_source_rgb(0.22, 0.29, 0.34)
+    cr.fill()
+    if pct is not None and pct > 0:
+        cr.move_to(center, center)
+        cr.arc(center, center, fill_radius, -math.pi / 2, -math.pi / 2 + 2 * math.pi * pct / 100)
+        cr.close_path()
+        cr.set_source_rgb(*fill_color)
+        cr.fill()
+    cr.arc(center, center, radius, 0, 2 * math.pi)
+    cr.set_line_width(1.1)
+    cr.set_source_rgba(*border_color)
+    cr.stroke()
+
+    surface.flush()
+    source = memoryview(surface.get_data())
+    stride = surface.get_stride()
+    rgba = bytearray(size * size * 4)
+    for y in range(size):
+        for x in range(size):
+            offset = y * stride + x * 4
+            if sys.byteorder == "little":
+                blue, green, red, alpha = source[offset:offset + 4]
+            else:
+                alpha, red, green, blue = source[offset:offset + 4]
+            target = (y * size + x) * 4
+            if alpha:
+                rgba[target:target + 4] = bytes((
+                    min(255, (red * 255 + alpha // 2) // alpha),
+                    min(255, (green * 255 + alpha // 2) // alpha),
+                    min(255, (blue * 255 + alpha // 2) // alpha),
+                    alpha,
+                ))
+            else:
+                rgba[target:target + 4] = b"\0\0\0\0"
+    return GdkPixbuf.Pixbuf.new_from_bytes(
+        GLib.Bytes.new(bytes(rgba)), GdkPixbuf.Colorspace.RGB, True, 8, size, size, size * 4
+    )
+
+
 def make_host_metric(label, is_cpu=False):
     box = Gtk.Box(spacing=3, valign=Gtk.Align.CENTER)
     chart = Gtk.Image()
     value = Gtk.Label(label=label, single_line_mode=True)
     value.get_style_context().add_class("subtitle")
     def update(pct):
-        remaining = (100 - pct if is_cpu else pct) if pct is not None else None
-        color = (255, 158, 33) if remaining is not None and remaining < 20 else (135, 219, 184)
-        size = 64
-        center = (size - 1) / 2
-        radius = size / 2 - 1
-        pixels = bytearray()
-        for y in range(size):
-            for x in range(size):
-                dx, dy = x - center, y - center
-                distance = math.hypot(dx, dy)
-                angle = (math.atan2(dy, dx) + math.pi / 2) % (2 * math.pi)
-                if distance > radius:
-                    pixels.extend((0, 0, 0, 0))
-                elif pct is not None and (angle < 2 * math.pi * pct / 100 or (remaining < 20 and distance > radius * 13 / 15)):
-                    pixels.extend((*color, 255))
-                else:
-                    pixels.extend((56, 74, 87, 255))
-        pixbuf = GdkPixbuf.Pixbuf.new_from_bytes(GLib.Bytes.new(bytes(pixels)), GdkPixbuf.Colorspace.RGB, True, 8, size, size, size * 4)
-        chart.set_from_pixbuf(pixbuf.scale_simple(16, 16, GdkPixbuf.InterpType.BILINEAR))
+        chart.set_from_pixbuf(render_host_metric_pixbuf(pct, is_cpu))
         value.set_text(label)
         box.set_tooltip_text("CPU 占用率" if is_cpu else "内存余量")
 
