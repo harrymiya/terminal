@@ -139,6 +139,8 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -1769,9 +1771,20 @@ private fun QuotaBattery(period: String, percent: Int?, compact: Boolean = false
             }
             Box(Modifier.size(3.dp, 5.dp).background(Muted, RoundedCornerShape(1.dp)))
         }
-        val value = percent?.let { if (compact) it.toString() else "$it%" } ?: "--"
-        Text(value, color = White, fontSize = 10.sp, maxLines = 1)
+        if (compact) {
+            QuotaNumber(percent?.toString() ?: "--", columns = 3, color = White)
+        } else {
+            Text(percent?.let { "$it%" } ?: "--", color = White, fontSize = 10.sp, maxLines = 1)
+        }
     }
+}
+
+@Composable
+private fun QuotaNumber(value: String, columns: Int, color: Color, modifier: Modifier = Modifier) {
+    val style = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 10.sp, textAlign = TextAlign.End)
+    val width = rememberTextMeasurer().measure("0".repeat(columns), style, maxLines = 1).size.width
+    Text(value, modifier.width(with(LocalDensity.current) { width.toDp() }), color = color, style = style,
+        maxLines = 1, overflow = TextOverflow.Ellipsis)
 }
 
 @Composable
@@ -1787,7 +1800,7 @@ private fun AgentQuotaDetails(quota: List<QuotaWindow>?) {
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         QuotaBattery(quotaPeriod(hourly?.minutes ?: 300), hourly?.remainingPercent, compact = true)
         QuotaBattery("周", weekly?.remainingPercent, compact = true)
-        Text(reset, color = Muted, fontSize = 10.sp, maxLines = 1, modifier = Modifier.clearAndSetSemantics {
+        QuotaNumber(reset, columns = 2, color = Muted, modifier = Modifier.clearAndSetSemantics {
             contentDescription = "周额度重置 ${if (remaining == null) "未知" else "${reset}天"}"
         })
     }

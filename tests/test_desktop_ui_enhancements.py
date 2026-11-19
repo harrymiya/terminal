@@ -94,6 +94,8 @@ class DesktopUIEnhancementsTest(unittest.TestCase):
             self.assertTrue(quota.is_ancestor(children[0]))
             self.assertEqual(quota.get_orientation(), self.app_mod.Gtk.Orientation.HORIZONTAL)
             hourly, weekly, reset = quota.get_children()
+            columns = (hourly, weekly, reset)
+            widths = [column.get_preferred_width() for column in columns]
             for indicator, percent in ((hourly, 75), (weekly, 40)):
                 battery, value = indicator.get_children()
                 self.assertEqual(battery.get_children()[0].get_value(), percent)
@@ -103,10 +105,17 @@ class DesktopUIEnhancementsTest(unittest.TestCase):
             self.assertEqual(hourly.get_children()[1].get_text(), "100")
             self.assertEqual(weekly.get_children()[1].get_text(), "0")
             self.assertEqual(reset.get_text(), "<1")
+            self.assertEqual([column.get_preferred_width() for column in columns], widths)
+            self.assertFalse(hourly.get_children()[1].get_layout().is_ellipsized())
             gemini = app.agents_list.get_children()[1].get_children()[0].get_child().get_children()[1]
             bundle = gemini.get_children()
             self.assertEqual(bundle[0].get_children()[1].get_text(), "--")
             self.assertEqual(bundle[2].get_text(), "--")
+            self.assertEqual([column.get_preferred_width() for column in bundle], widths)
+            self.assertEqual(
+                [column.translate_coordinates(app.agents_list, 0, 0)[0] for column in columns],
+                [column.translate_coordinates(app.agents_list, 0, 0)[0] for column in bundle],
+            )
             self.assertFalse(children[1].get_children()[0].get_sensitive())
             children[1].get_children()[1].clicked()
             self.assertEqual([item["command"] for item in app.data["agents"]], ["agy", "codex"])

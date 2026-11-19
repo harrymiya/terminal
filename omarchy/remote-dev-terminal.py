@@ -23,7 +23,15 @@ from version import VERSION
 from mcp_server import EmbeddedMCPServer
 
 
-def make_quota_indicator():
+def set_quota_number_width(label, columns):
+    label.get_style_context().add_class("quota-number")
+    label.set_width_chars(columns)
+    label.set_max_width_chars(columns)
+    label.set_ellipsize(Pango.EllipsizeMode.END)
+    label.set_xalign(1)
+
+
+def make_quota_indicator(value_columns=None):
     """Draw a compact battery using GTK widgets and readable percentage text."""
     box = Gtk.Box(spacing=3)
     battery = Gtk.Box(spacing=0)
@@ -40,6 +48,8 @@ def make_quota_indicator():
     battery.pack_start(cap, False, False, 0)
     value = Gtk.Label(label="--")
     value.get_style_context().add_class("quota-value")
+    if value_columns is not None:
+        set_quota_number_width(value, value_columns)
     box.pack_start(battery, False, False, 0)
     box.pack_start(value, False, False, 0)
 
@@ -65,13 +75,14 @@ def make_quota_indicator():
 
 def make_developer_quota_indicator():
     row = Gtk.Box(spacing=6, valign=Gtk.Align.CENTER)
-    hourly, update_hourly = make_quota_indicator()
-    weekly, update_weekly = make_quota_indicator()
+    hourly, update_hourly = make_quota_indicator(value_columns=3)
+    weekly, update_weekly = make_quota_indicator(value_columns=3)
     hourly.set_show_percent(False)
     weekly.set_show_percent(False)
     weekly.set_tooltip_text("周剩余额度")
     reset = Gtk.Label(single_line_mode=True)
     reset.get_style_context().add_class("subtitle")
+    set_quota_number_width(reset, 2)
     reset.set_tooltip_text("周额度重置天数")
     for widget in (hourly, weekly, reset):
         row.pack_start(widget, False, False, 0)
@@ -232,6 +243,7 @@ class App(Gtk.Window):
             .quota-battery-cap { background-color: #8fa2b4; border-radius: 1px; }
             .quota-value { color: #e8eef6; font-size: 12px; font-weight: bold; }
             .quota-value:backdrop { color: #e8eef6; }
+            .quota-number { font-family: monospace; }
             notebook { background-color: #0c1119; border: none; }
             notebook > header { background-color: #101823; border-bottom: 1px solid #243546; min-height: 25px; padding: 0 4px; }
             notebook tab {
