@@ -11,6 +11,7 @@ import uuid
 import time
 import shutil
 import re
+import math
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import gi
@@ -20,7 +21,39 @@ gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Gtk, Vte, GLib, Gdk, GdkPixbuf, Pango
 from core import load_config, save_config, ssh_argv, close_remote_session_command, auto_enter_signature, confirmation_pending, AutoEnterController, quota_agent, quota_key, read_agent_quota, hourly_quota, upload_image, MAX_IMAGE_BYTES, sync_request, sync_data_request, sync_host_key, legacy_sync_keys, ssh_address, ssh_port, ssh_host_fingerprint, sync_auth_request, save_sync_password, load_sync_password, clear_sync_password, render_battery_pixbuf, save_host_password, load_host_password, clear_host_password, ssh_auth_environment
 from version import VERSION
+from host_metrics import metrics_key, read_host_metrics
 from mcp_server import EmbeddedMCPServer
+
+
+def make_host_metric(label, is_cpu=False):
+    box = Gtk.Box(spacing=3, valign=Gtk.Align.CENTER)
+    chart = Gtk.Image()
+    value = Gtk.Label(label=f"{label} --", single_line_mode=True)
+    value.get_style_context().add_class("subtitle")
+    def update(pct):
+        remaining = (100 - pct if is_cpu else pct) if pct is not None else None
+        color = (255, 158, 33) if remaining is not None and remaining < 20 else (135, 219, 184)
+        pixels = bytearray()
+        for y in range(16):
+            for x in range(16):
+                dx, dy = x - 7.5, y - 7.5
+                distance = math.hypot(dx, dy)
+                angle = (math.atan2(dy, dx) + math.pi / 2) % (2 * math.pi)
+                if distance > 7.5:
+                    pixels.extend((0, 0, 0, 0))
+                elif pct is not None and (angle < 2 * math.pi * pct / 100 or (remaining < 20 and distance > 6.5)):
+                    pixels.extend((*color, 255))
+                else:
+                    pixels.extend((56, 74, 87, 255))
+        pixbuf = GdkPixbuf.Pixbuf.new_from_bytes(GLib.Bytes.new(bytes(pixels)), GdkPixbuf.Colorspace.RGB, True, 8, 16, 16, 64)
+        chart.set_from_pixbuf(pixbuf)
+        value.set_text(f"{label} --" if pct is None else f"{label} {round(pct)}%")
+        box.set_tooltip_text(("CPU 占用率" if is_cpu else "内存可用比例") + ("：暂无数据" if pct is None else f"：{pct:.1f}%"))
+
+    box.pack_start(chart, False, False, 0)
+    box.pack_start(value, False, False, 0)
+    update(None)
+    return box, update
 
 
 def set_quota_number_width(label, columns):
@@ -282,6 +315,10 @@ class App(Gtk.Window):
         self.quota_attempts = {}
         self.quota_pending = set()
         self.quota_shutdown = False
+        self.metrics_cache = {}
+        self.metrics_attempts = {}
+        self.metrics_pending = set()
+        self.metrics_rows = {}
         self.shared_by_host = {}
         self.sync_pending = set()
         self.workspace_versions = {}
@@ -737,6 +774,7 @@ class App(Gtk.Window):
         self.main_click.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
         self.main_click.connect("pressed", lambda *_: self.focus_floating_session(None))
         self.quota_timer = GLib.timeout_add_seconds(1, self.refresh_quotas)
+        self.metrics_timer = GLib.timeout_add_seconds(1, self.refresh_host_metrics)
         self.connect("destroy", self.stop_quota_refresh)
         self.refresh()
         self.refresh_all_shared()
@@ -1599,6 +1637,13 @@ class App(Gtk.Window):
         quota_interval_row.pack_start(quota_interval, False, False, 0)
         quota_interval_row.pack_start(Gtk.Label(label="秒（15–300）"), False, False, 0)
         grid.attach(quota_interval_row, 0, 6, 2, 1)
+        metrics_interval = Gtk.SpinButton.new_with_range(5, 300, 1)
+        metrics_interval.set_value(min(max(int(self.data.get("host_metrics_interval_seconds", 5)), 5), 300))
+        metrics_row = Gtk.Box(spacing=6)
+        metrics_row.pack_start(Gtk.Label(label="主机资源刷新周期"), False, False, 0)
+        metrics_row.pack_start(metrics_interval, False, False, 0)
+        metrics_row.pack_start(Gtk.Label(label="秒（5–300）"), False, False, 0)
+        grid.attach(metrics_row, 0, 7, 2, 1)
         key_path = Path.home() / ".ssh" / "id_ed25519.pub"
         key_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         key_label = Gtk.Label(label=key_path.read_text(encoding="utf-8").strip() if key_path.exists() else "尚未生成本地 SSH 密钥", xalign=0)
@@ -1628,10 +1673,10 @@ class App(Gtk.Window):
         key_buttons.pack_start(generate, False, False, 0)
         key_buttons.pack_start(copy, False, False, 0)
         key_box.pack_start(key_buttons, False, False, 0)
-        grid.attach(Gtk.Label(label="本机 SSH 公钥", xalign=0), 0, 7, 2, 1)
-        grid.attach(key_box, 0, 8, 2, 1)
+        grid.attach(Gtk.Label(label="本机 SSH 公钥", xalign=0), 0, 8, 2, 1)
+        grid.attach(key_box, 0, 9, 2, 1)
         if self.data.get("sync_is_admin"):
-            grid.attach(self.manage_sync_users(dialog), 0, 9, 2, 2)
+            grid.attach(self.manage_sync_users(dialog), 0, 10, 2, 2)
         self.scale_layout(dialog)
         dialog.show_all()
         if dialog.run() == Gtk.ResponseType.OK:
@@ -1641,6 +1686,9 @@ class App(Gtk.Window):
             self.data["auto_sync_enabled"] = auto_sync.get_active()
             self.data["sync_interval_seconds"] = sync_interval.get_value_as_int()
             self.data["agent_quota_interval_seconds"] = quota_interval.get_value_as_int()
+            self.data["host_metrics_interval_seconds"] = metrics_interval.get_value_as_int()
+            self.metrics_attempts.clear()
+            self.refresh_host_metrics()
             self.refresh_quotas()
             self.save_settings()
             self.configure_sync_polling()
@@ -1690,6 +1738,7 @@ class App(Gtk.Window):
         selected = self.hosts.get_active()
         for child in self.hosts_list.get_children():
             self.hosts_list.remove(child)
+        self.metrics_rows = {}
         host_radio_group = None
         for index, item in enumerate(self.data["hosts"]):
             row = Gtk.Box(spacing=4)
@@ -1718,6 +1767,17 @@ class App(Gtk.Window):
                 button.get_style_context().add_class("host-selected")
             button.connect("toggled", lambda radio, i=index: self.hosts.set_active(i) if radio.get_active() else None)
             row.pack_start(button, True, True, 0)
+            metrics = Gtk.Box(spacing=5, valign=Gtk.Align.CENTER)
+            memory, update_memory = make_host_metric("内存")
+            cpu, update_cpu = make_host_metric("CPU", is_cpu=True)
+            metrics.pack_start(memory, False, False, 0)
+            metrics.pack_start(cpu, False, False, 0)
+            key = metrics_key(item)
+            self.metrics_rows[key] = (update_memory, update_cpu)
+            values = self.metrics_cache.get(key)
+            update_memory(values[0] if values else None)
+            update_cpu(values[1] if values else None)
+            row.pack_start(metrics, False, False, 0)
             if self.edit_mode:
                 actions = Gtk.Box(spacing=4)
                 actions.set_halign(Gtk.Align.END)
@@ -1892,6 +1952,52 @@ class App(Gtk.Window):
     def stop_quota_refresh(self, *_):
         self.quota_shutdown = True
         GLib.source_remove(self.quota_timer)
+        GLib.source_remove(self.metrics_timer)
+
+    def refresh_host_metrics(self):
+        if self.quota_shutdown:
+            return False
+        if not self.get_visible() or not self.sidebar_revealer.get_reveal_child():
+            return True
+        now = time.monotonic()
+        interval = min(max(int(self.data.get("host_metrics_interval_seconds", 5)), 5), 300)
+        hosts = {metrics_key(host): dict(host) for host in self.data["hosts"]}
+        for key in list(self.metrics_cache):
+            if key not in hosts:
+                self.metrics_cache.pop(key, None)
+        for key in list(self.metrics_attempts):
+            if key not in hosts and key not in self.metrics_pending:
+                self.metrics_attempts.pop(key, None)
+        for key in sorted(hosts, key=lambda k: self.metrics_attempts.get(k, -float("inf"))):
+            if len(self.metrics_pending) >= 4:
+                break
+            if key in self.metrics_pending or now - self.metrics_attempts.get(key, -float("inf")) < interval:
+                continue
+            self.metrics_pending.add(key)
+            self.metrics_attempts[key] = now
+            threading.Thread(target=self.fetch_host_metrics, args=(key, hosts[key]), daemon=True).start()
+        return True
+
+    def fetch_host_metrics(self, key, host):
+        try:
+            result = read_host_metrics(host)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            result = None
+
+        def finish():
+            self.metrics_pending.discard(key)
+            if not self.quota_shutdown and any(metrics_key(h) == key for h in self.data["hosts"]):
+                if result is None:
+                    self.metrics_cache.pop(key, None)
+                else:
+                    self.metrics_cache[key] = result
+                updates = self.metrics_rows.get(key)
+                if updates:
+                    updates[0](result[0] if result else None)
+                    updates[1](result[1] if result else None)
+            return False
+
+        GLib.idle_add(finish)
 
     def move_agent(self, _button, index, offset):
         host = self.current_host()
