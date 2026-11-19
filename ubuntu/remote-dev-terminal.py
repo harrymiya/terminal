@@ -919,7 +919,6 @@ class App(Gtk.Window):
         self.quota_shutdown = False
         self.cyber_anim_timer = None
         self.cyber_phase = 0.0
-        self.cyber_banner = None
         self.toolbar_neon_bar = None
         self.metrics_cache = {}
         self.metrics_attempts = {}
@@ -1001,12 +1000,6 @@ class App(Gtk.Window):
         subtitle = Gtk.Label(label=f"远程开发工作台 · v{VERSION}", xalign=0)
         subtitle.get_style_context().add_class("subtitle")
         sidebar.pack_start(subtitle, False, False, 0)
-        self.cyber_banner = Gtk.DrawingArea()
-        self.cyber_banner.set_size_request(-1, 34)
-        self.cyber_banner.set_no_show_all(True)
-        self.cyber_banner.get_style_context().add_class("cyber-banner")
-        self.cyber_banner.connect("draw", self._draw_cyber_banner)
-        sidebar.pack_start(self.cyber_banner, False, False, 0)
         self.refreshing = False
         for title, attr in [("主机", "hosts"), ("开发者", "agents"), ("工作区 · 点击直达", "directories")]:
             heading = Gtk.Label(label=title, xalign=0)
@@ -1308,9 +1301,9 @@ class App(Gtk.Window):
 
     def _update_cyber_animations(self):
         active = self.current_theme() == "neon_glow" and not getattr(self, "quota_shutdown", False)
-        for widget in (getattr(self, "cyber_banner", None), getattr(self, "toolbar_neon_bar", None)):
-            if widget is not None:
-                widget.set_visible(active)
+        bar = getattr(self, "toolbar_neon_bar", None)
+        if bar is not None:
+            bar.set_visible(active)
         if active and self.cyber_anim_timer is None:
             self.cyber_anim_timer = GLib.timeout_add(45, self._tick_cyber_animations)
         elif not active and self.cyber_anim_timer is not None:
@@ -1322,9 +1315,8 @@ class App(Gtk.Window):
             self.cyber_anim_timer = None
             return False
         self.cyber_phase = (self.cyber_phase + 0.08) % (math.tau * 100.0)
-        for widget in (self.cyber_banner, self.toolbar_neon_bar):
-            if widget is not None and widget.get_visible():
-                widget.queue_draw()
+        if self.toolbar_neon_bar is not None and self.toolbar_neon_bar.get_visible():
+            self.toolbar_neon_bar.queue_draw()
         return True
 
     def _draw_toolbar_neon_bar(self, widget, cr):
@@ -1347,73 +1339,6 @@ class App(Gtk.Window):
                 cr.set_source_rgba(r, g, b, alpha * (0.75 + 0.25 * pulse))
                 cr.rectangle(pos - glow_pad, 0, seg_w + glow_pad * 2, h)
                 cr.fill()
-        return False
-
-    def _draw_cyber_banner(self, widget, cr):
-        w = widget.get_allocated_width()
-        h = widget.get_allocated_height()
-        if w <= 8 or h <= 8:
-            return False
-        pulse = 0.5 + 0.5 * math.sin(self.cyber_phase * 1.2)
-        # Background & breathing halo border
-        cr.set_source_rgba(0.04, 0.02, 0.10, 0.96)
-        cr.rectangle(0, 0, w, h)
-        cr.fill()
-        cr.set_line_width(1.2)
-        cr.set_source_rgba(0.0 + pulse * 0.95, 0.94 - pulse * 0.72, 1.0, 0.55 + 0.4 * pulse)
-        cr.rectangle(1, 1, w - 2, h - 2)
-        cr.stroke()
-        # Subtle cyber scanlines
-        cr.set_source_rgba(0.0, 0.94, 1.0, 0.06)
-        for y in range(3, h - 2, 4):
-            cr.rectangle(2, y, w - 4, 1)
-            cr.fill()
-        # Marquee chase dots along top and bottom rails
-        rail_colors = ((0.0, 0.94, 1.0), (1.0, 0.18, 0.93), (0.0, 1.0, 0.64))
-        for idx, (r, g, b) in enumerate(rail_colors):
-            x_top = ((self.cyber_phase * 42.0 + idx * (w / 3.0)) % (w - 8)) + 4
-            x_bot = w - (((self.cyber_phase * 42.0 + idx * (w / 3.0)) % (w - 8)) + 4)
-            for bx, by in ((x_top, 3.0), (x_bot, h - 3.0)):
-                for rad, alpha in ((6.0, 0.22), (3.0, 0.55), (1.5, 1.0)):
-                    cr.set_source_rgba(r, g, b, alpha)
-                    cr.arc(bx, by, rad, 0, math.tau)
-                    cr.fill()
-        # Breathing cyber core on the left
-        cx, cy = 18.0, h / 2.0
-        for rad, alpha in ((11.0, 0.16 * pulse), (7.0, 0.4 * pulse), (3.5, 0.95)):
-            cr.set_source_rgba(1.0, 0.18, 0.93, alpha)
-            cr.arc(cx, cy, rad, 0, math.tau)
-            cr.fill()
-        cr.set_source_rgba(0.0, 0.94, 1.0, 0.9)
-        cr.arc(cx, cy, 1.8, 0, math.tau)
-        cr.fill()
-        # Animated equalizer / cyber signal bars
-        eq_x = 36.0
-        bar_count = max(6, int((w - 52) / 7))
-        for i in range(bar_count):
-            amp = 0.25 + 0.75 * abs(math.sin(self.cyber_phase * 1.9 + i * 0.55))
-            bh = max(3.0, (h - 14.0) * amp)
-            bx = eq_x + i * 7.0
-            if bx + 4 > w - 10:
-                break
-            ratio = i / max(1, bar_count - 1)
-            r = ratio
-            g = 0.94 * (1.0 - ratio) + 0.2 * ratio
-            b = 1.0
-            cr.set_source_rgba(r, g, b, 0.28)
-            cr.rectangle(bx - 1, (h - bh) / 2.0 - 1, 5.0, bh + 2.0)
-            cr.fill()
-            cr.set_source_rgba(r, g, b, 0.92)
-            cr.rectangle(bx, (h - bh) / 2.0, 3.0, bh)
-            cr.fill()
-        # Sweeping laser scanner beam
-        scan_x = ((self.cyber_phase * 34.0) % max(20.0, w - 12.0)) + 6.0
-        cr.set_source_rgba(0.0, 1.0, 0.64, 0.35)
-        cr.rectangle(scan_x - 3, 2, 6, h - 4)
-        cr.fill()
-        cr.set_source_rgba(0.0, 1.0, 0.64, 0.95)
-        cr.rectangle(scan_x, 2, 1.5, h - 4)
-        cr.fill()
         return False
 
     @staticmethod
