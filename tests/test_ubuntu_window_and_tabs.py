@@ -106,8 +106,9 @@ class UbuntuWindowAndTabsTest(unittest.TestCase):
         tab_btn, img_btn, close_btn = row_children
         label = tab_btn.get_child()
         self.assertEqual(label.get_text(), "very-long-workspace-name-for-full-display · Codex")
-        self.assertEqual(label.get_ellipsize(), Pango.EllipsizeMode.NONE)
-        self.assertTrue(label.get_line_wrap())
+        self.assertEqual(label.get_ellipsize(), Pango.EllipsizeMode.END)
+        self.assertTrue(label.get_single_line_mode())
+        self.assertFalse(label.get_line_wrap())
 
         # Clicking second tab switches active page and updates highlight
         second_btn = rows[1].get_children()[0]
