@@ -340,7 +340,7 @@ class UbuntuWindowAndTabsTest(unittest.TestCase):
             self.assertTrue(c_frame.get_style_context().has_class("tile-dragging"))
             self.assertEqual(set_icon.call_count, 1)
             alloc = c_header.get_allocation()
-            expected_w = max(1, alloc.width // 4)
+            expected_w = max(1, alloc.width // 2)
             expected_h = max(1, round(alloc.height * (expected_w / alloc.width)))
             icon_pixbuf = set_icon.call_args.args[1]
             self.assertEqual((icon_pixbuf.get_width(), icon_pixbuf.get_height()), (expected_w, expected_h))
@@ -378,8 +378,10 @@ class UbuntuWindowAndTabsTest(unittest.TestCase):
         self.assertEqual([s["item"]["directory_name"] for s in self.app.sessions], ["c", "d", "a", "b"])
         self.assertEqual(grid_rows(), [[c["terminal"], d["terminal"]], [a["terminal"], b["terminal"]]])
 
-        # Floating sessions must not participate in tiled card replacement.
+        # Floating sessions must not participate in tiled card replacement or hijack header drag.
         self.app.toggle_floating_session(d)
+        self.assertIsNone(d["floating_window"].header.drag_source_get_target_list())
+        self.assertIsNone(d["terminal"]._tile_frame.drag_dest_get_target_list())
         self.assertFalse(self.app.move_tiled_session(d, c))
         self.assertFalse(self.app.move_tiled_session(c, d))
         self.assertEqual([s["item"]["directory_name"] for s in self.app.sessions], ["c", "d", "a", "b"])

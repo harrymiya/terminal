@@ -1156,7 +1156,7 @@ class App(Gtk.Window):
             self.restore_floating_session(session)
             return
         self.detach_session_widgets(session)
-        frame, header = self.make_tile_card(session)
+        frame, header = self.make_tile_card(session, draggable=False)
         window = FloatingSession(self, session, frame, header)
         session["floating_window"] = window
         self.update_float_button(session)
@@ -1250,7 +1250,7 @@ class App(Gtk.Window):
             if win is not None and alloc.width > 0 and alloc.height > 0:
                 pixbuf = Gdk.pixbuf_get_from_window(win, 0, 0, alloc.width, alloc.height)
                 if pixbuf is not None:
-                    scaled_w = max(1, alloc.width // 4)
+                    scaled_w = max(1, alloc.width // 2)
                     scaled_h = max(1, round(alloc.height * (scaled_w / alloc.width)))
                     scaled = pixbuf.scale_simple(scaled_w, scaled_h, GdkPixbuf.InterpType.BILINEAR)
                     if scaled is not None:
@@ -1311,7 +1311,7 @@ class App(Gtk.Window):
             terminal.connect("drag-drop", on_drag_drop),
         )
 
-    def make_tile_card(self, session):
+    def make_tile_card(self, session, draggable=True):
         frame = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True, vexpand=True)
         frame.get_style_context().add_class("tile")
         terminal = session["terminal"]
@@ -1324,7 +1324,8 @@ class App(Gtk.Window):
         header.add(self.make_session_header(session))
         frame.pack_start(header, False, False, 0)
         frame.pack_start(terminal, True, True, 0)
-        self.enable_tile_drag_and_drop(session, frame, header)
+        if draggable:
+            self.enable_tile_drag_and_drop(session, frame, header)
         return frame, header
 
     def _animate_running_headers(self):
