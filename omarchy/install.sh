@@ -11,6 +11,7 @@ install -m 644 "$source_dir/version.py" "$install_dir/version.py"
 install -m 755 "$source_dir/remote-dev-terminal.py" "$install_dir/remote-dev-terminal.py"
 install -m 755 "$source_dir/askpass.py" "$install_dir/askpass.py"
 install -m 755 "$source_dir/mcp_server.py" "$install_dir/mcp_server.py"
+install -m 644 "$source_dir/MCP使用说明.md" "$install_dir/MCP使用说明.md"
 ln -sf "$install_dir/mcp_server.py" "$bin_dir/remote-dev-terminal-mcp"
 # Desktop entry Exec arguments require double-quote escaping.
 escaped="${install_dir//\\/\\\\}"

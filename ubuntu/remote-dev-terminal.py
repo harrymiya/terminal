@@ -1631,6 +1631,44 @@ class App(Gtk.Window):
         else:
             box.show_all()
         return box
+    def show_mcp_guide(self, parent):
+        guide_path = Path(__file__).with_name("MCP使用说明.md")
+        try:
+            guide = guide_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            self.message("无法读取 MCP 接入说明", str(exc))
+            return
+
+        dialog = Gtk.Dialog(title="MCP 接入说明", transient_for=parent, modal=True)
+        dialog.set_default_size(800, 680)
+        dialog.add_button("关闭", Gtk.ResponseType.CLOSE)
+        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=12)
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        view = Gtk.TextView()
+        view.set_editable(False)
+        view.set_cursor_visible(False)
+        view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        view.set_monospace(True)
+        view.get_buffer().set_text(guide)
+        scroll.add(view)
+        body.pack_start(scroll, True, True, 0)
+        action_row = Gtk.Box(spacing=8)
+        status = Gtk.Label(label="", xalign=0)
+        copy_button = Gtk.Button(label="一键复制")
+        copy_button.connect("clicked", lambda *_: (
+            Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).set_text(guide, -1),
+            status.set_text("已复制全部接入说明")
+        ))
+        action_row.pack_start(status, True, True, 0)
+        action_row.pack_end(copy_button, False, False, 0)
+        body.pack_start(action_row, False, False, 0)
+        dialog.get_content_area().add(body)
+        self.scale_layout(dialog)
+        dialog.show_all()
+        dialog.run()
+        dialog.destroy()
+
     def show_settings(self, *_):
         dialog = Gtk.Dialog(title="系统设置", transient_for=self, modal=True)
         dialog.set_default_size(820, 720)
@@ -1666,8 +1704,11 @@ class App(Gtk.Window):
         metrics_row.pack_start(metrics_interval, False, False, 0)
         metrics_row.pack_start(Gtk.Label(label="秒（5–300）"), False, False, 0)
         grid.attach(metrics_row, 0, 7, 2, 1)
+        mcp_button = Gtk.Button(label="MCP 接入说明")
+        mcp_button.connect("clicked", lambda *_: self.show_mcp_guide(dialog))
+        grid.attach(mcp_button, 0, 8, 2, 1)
         if self.data.get("sync_is_admin"):
-            grid.attach(self.manage_sync_users(dialog), 0, 8, 2, 1)
+            grid.attach(self.manage_sync_users(dialog), 0, 9, 2, 1)
         self.scale_layout(dialog); dialog.show_all()
         if dialog.run() == Gtk.ResponseType.OK:
             if self.data.get("sync_url") != url.get_text().strip(): self.data["sync_token"] = ""
