@@ -130,6 +130,16 @@ class DesktopAutoConfirmTest(unittest.TestCase):
                 ):
                     self.assertIsNone(core.auto_enter_signature(body + "\n" + rejected))
 
+    def test_pending_status_includes_a_selected_rejection_without_approving_it(self):
+        prompt = "Would you like to run this command?\n  1. Yes\n› 2. No"
+        for platform in ("omarchy", "ubuntu", "windows"):
+            with self.subTest(platform=platform):
+                core = load_core(platform)
+                self.assertTrue(core.confirmation_pending(prompt))
+                self.assertIsNone(core.auto_enter_signature(prompt))
+                self.assertTrue(core.confirmation_pending("Continue? [y/N]"))
+                self.assertFalse(core.confirmation_pending("Command completed"))
+
 
 if __name__ == '__main__':
     unittest.main()

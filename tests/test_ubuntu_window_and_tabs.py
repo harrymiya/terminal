@@ -67,6 +67,115 @@ class UbuntuWindowAndTabsTest(unittest.TestCase):
                 self.assertTrue(name.get_mapped(), 'tab name must actually be displayed')
                 self.assertTrue(quota.get_mapped(), 'tab quota must actually be displayed')
 
+    def make_session(self, name):
+        Gtk, Vte = app_module.Gtk, app_module.Vte
+        terminal = Vte.Terminal()
+        terminal.set_size(24, 8)
+        pty = Vte.Pty.new_sync(Vte.PtyFlags.DEFAULT, None)
+        terminal.set_pty(pty)
+        header = Gtk.Box()
+        header.pack_start(Gtk.Label(label=f"{name} · Codex"), True, True, 0)
+        floating = Gtk.Button.new_from_icon_name("window-new-symbolic", Gtk.IconSize.MENU)
+        header.pack_start(floating, False, False, 0)
+        session = {"terminal": terminal, "label": header, "item": {"directory_name": name},
+                   "state": {}, "float_button": floating}
+        self.app.sessions.append(session)
+        return session, pty
+
+    def test_minimize_creates_one_button_per_session_and_restores_tiles(self):
+        self.app.persist = lambda: None
+        first, pty = self.make_session("project")
+        second, _ = self.make_session("other")
+        self.app.show_all()
+        self.app.view_button.set_active(False)
+        self.assertEqual(self.app.tabs.get_n_pages(), 2)
+        self.app.minimize_session(first)
+        self.app.minimize_session(first)
+        self.app.minimize_session(second)
+        self.assertEqual(self.app.tabs.get_n_pages(), 0)
+        self.assertEqual(len(self.app.minimized_buttons.get_children()), 2)
+        button = first["minimized_button"]
+        self.assertEqual(button.get_child().get_children()[1].get_text(), "project")
+        dot = first["minimized_dot"]
+        self.app._animate_running_headers()
+        self.assertTrue(dot.get_style_context().has_class("idle"))
+        first["state"]["last_output_at"] = app_module.time.monotonic()
+        self.app._animate_running_headers()
+        self.assertTrue(dot.get_style_context().has_class("running"))
+        first["state"]["needs_action"] = True
+        self.app._animate_running_headers()
+        self.assertTrue(dot.get_style_context().has_class("waiting"))
+        self.assertEqual(dot.get_opacity(), 1)
+        self.assertIs(first["terminal"].get_pty(), pty)
+        button.clicked()
+        self.assertTrue(self.app.tiled)
+        self.assertEqual(len(self.app.minimized_buttons.get_children()), 1)
+        self.assertIs(first["terminal"].get_pty(), pty)
+        self.assertIsNotNone(first["terminal"].get_parent())
+        self.assertIsNone(second["terminal"].get_parent())
+
+    def test_floating_card_resizes_overhangs_and_returns_to_the_tab(self):
+        self.app.persist = lambda: None
+        session, pty = self.make_session("project")
+        self.app.show_all()
+        self.app.view_button.set_active(False)
+        self.app.toggle_floating_session(session)
+        window = session["floating_window"]
+        self.assertEqual(self.app.tabs.get_n_pages(), 0)
+        self.assertEqual(window.header.get_size_request()[1], 25)
+        self.assertIs(session["terminal"].get_toplevel(), window)
+        self.assertIs(session["terminal"].get_pty(), pty)
+        self.assertEqual(session["float_button"].get_image().get_icon_name()[0], "view-restore-symbolic")
+
+        x, y, width, height = window.geometry
+        window.drag = ("left", 100, 100, window.geometry)
+        window.drag_to(60, 100)
+        self.assertEqual(window.geometry, (x - 40, y, width + 40, height))
+        window.drag = ("bottom", 100, 100, window.geometry)
+        window.drag_to(100, 155)
+        self.assertEqual(window.geometry, (x - 40, y, width + 40, height + 55))
+        window.place(-5000, -5000, width, height)
+        left, top, _, _ = window.geometry
+        self.assertLess(left, 0)
+        self.assertLess(top, 0)
+        self.assertGreaterEqual(left + width, 50)
+        self.assertGreaterEqual(top + height, 50)
+        window.place(5000, 5000, width, height)
+        parent_width, parent_height = self.app.get_size()
+        self.assertEqual(window.geometry[:2], (parent_width - 50, parent_height - 50))
+        self.app.rebuild_view()
+        self.assertIs(session["terminal"].get_toplevel(), window)
+        self.app.toggle_floating_session(session)
+        self.assertNotIn("floating_window", session)
+        self.assertEqual(self.app.tabs.get_n_pages(), 1)
+        self.assertIs(session["terminal"].get_pty(), pty)
+        self.assertEqual(session["float_button"].get_image().get_icon_name()[0], "window-new-symbolic")
+
+    def test_weekly_quota_is_next_to_hourly_in_the_live_card_header(self):
+        self.app.persist = lambda: None
+        host = {"id": "test-host", "address": "127.0.0.1", "port": 22, "username": "dev",
+                "_resolved": True, "_active_address": "127.0.0.1", "_active_port": 22}
+        shared = {"id": "a" * 32, "directory_name": "project", "directory_path": "/project",
+                  "agent_name": "Codex", "agent_command": "codex"}
+        self.app.show_all()
+        with patch.object(app_module, "ssh_argv", return_value=(["/bin/cat"], shared["id"])):
+            self.app.open_terminal(None, host, shared)
+        session = self.app.sessions[0]
+        try:
+            hourly, weekly = session["quota_indicators"]
+            session["update_quota"]([(300, 75, None), (10080, 40, "3d")])
+            children = session["label"].get_children()
+            self.assertIs(children[children.index(hourly) + 1], weekly)
+            self.assertEqual(hourly.get_children()[1].get_text(), "75")
+            self.assertEqual(weekly.get_children()[1].get_text(), "40")
+            self.app.view_button.set_active(False)
+            self.assertEqual(weekly.get_children()[1].get_text(), "40%")
+            session["float_button"].clicked()
+            self.assertEqual(weekly.get_children()[1].get_text(), "40")
+            self.assertIs(weekly.get_toplevel(), session["floating_window"])
+        finally:
+            session["close_button"].clicked()
+
     def test_sidebar_width_clamps_and_restores_after_hiding(self):
         Gtk = app_module.Gtk
         self.app.show_all()

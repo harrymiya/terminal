@@ -450,6 +450,32 @@ def _wrapped_approval_signature(lines):
     return _normalize_signature("\n".join(lines[max(0, selected - 2):selected] + [label]))
 
 
+def confirmation_pending(text):
+    """Recognize a visible confirmation even when its current choice is negative."""
+    lines = []
+    for raw in text.splitlines()[-45:]:
+        line = raw.strip().strip("│┃║| ")
+        if line and not all(char in "─━═╭╮╰╯┌┐└┘+ " for char in line) and not re.match(
+                r"^\[(?:rdt_[0-9a-fA-F]+|\d+)\]\s+\d+:\S+", line):
+            lines.append(line)
+    if not lines:
+        return False
+    if re.search(r"[\[(](?:y|yes)/(?:n|no)[\])]\s*[:?？.!]*$", lines[-1], re.I):
+        return True
+    for index in range(max(0, len(lines) - 4), len(lines)):
+        footer = " ".join(lines[index:])
+        if _WRAPPED_APPROVAL_FOOTER.fullmatch(footer) or re.fullmatch(
+                r"press\s+(?:enter|return)\s+to\s+(?:confirm|approve)[.!]?", footer, re.I):
+            return True
+    selected = next((index for index in range(len(lines) - 1, -1, -1)
+                     if _APPROVAL_CURSOR.match(lines[index]) and _APPROVAL_CHOICE.fullmatch(lines[index])), None)
+    return selected is not None and any(
+        re.search(r"would you like to (?:run|make|grant)|do you want to (?:approve|proceed)|needs your approval|需要确认|是否允许",
+                  line, re.I)
+        for line in lines[:selected]
+    )
+
+
 class AutoEnterController:
     """Track one visible prompt per terminal and send at most one Enter."""
     def __init__(self):

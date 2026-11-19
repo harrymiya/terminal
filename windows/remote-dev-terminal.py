@@ -18,7 +18,7 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("Vte", "2.91")
 gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Gtk, Vte, GLib, Gdk, GdkPixbuf, Pango
-from core import load_config, save_config, ssh_argv, close_remote_session_command, auto_enter_signature, AutoEnterController, quota_agent, quota_key, read_agent_quota, hourly_quota, upload_image, MAX_IMAGE_BYTES, sync_request, sync_data_request, sync_host_key, legacy_sync_keys, ssh_address, ssh_port, ssh_host_fingerprint, sync_auth_request, save_sync_password, load_sync_password, clear_sync_password, render_battery_pixbuf, save_host_password, load_host_password, clear_host_password, ssh_auth_environment
+from core import load_config, save_config, ssh_argv, close_remote_session_command, auto_enter_signature, confirmation_pending, AutoEnterController, quota_agent, quota_key, read_agent_quota, hourly_quota, upload_image, MAX_IMAGE_BYTES, sync_request, sync_data_request, sync_host_key, legacy_sync_keys, ssh_address, ssh_port, ssh_host_fingerprint, sync_auth_request, save_sync_password, load_sync_password, clear_sync_password, render_battery_pixbuf, save_host_password, load_host_password, clear_host_password, ssh_auth_environment
 from version import VERSION
 
 
@@ -98,12 +98,182 @@ def make_developer_quota_indicator():
     return row, update
 
 
+class FloatingSession(Gtk.Window):
+    """Host the existing card in a movable transient surface."""
+
+    def __init__(self, app, session, frame, header):
+        self.relative = app.get_display().__gtype__.name == "GdkWaylandDisplay"
+        super().__init__(type=Gtk.WindowType.POPUP if self.relative else Gtk.WindowType.TOPLEVEL)
+        self.app = app
+        self.session = session
+        self.header = header
+        self.drag = None
+        self.applied_geometry = None
+        self.gestures = []
+        self.set_transient_for(app)
+        self.set_destroy_with_parent(True)
+        self.set_decorated(False)
+        self.set_skip_taskbar_hint(True)
+        self.set_skip_pager_hint(True)
+        self.set_title(session["item"]["directory_name"])
+
+        grid = Gtk.Grid()
+        grid.get_style_context().add_class("floating-session")
+        grid.attach(frame, 1, 0, 1, 1)
+        left = Gtk.EventBox()
+        left.set_size_request(6, -1)
+        left.set_vexpand(True)
+        bottom = Gtk.EventBox()
+        bottom.set_size_request(-1, 6)
+        bottom.set_hexpand(True)
+        grid.attach(left, 0, 0, 1, 1)
+        grid.attach(bottom, 0, 1, 2, 1)
+        self.add(grid)
+        self.add_drag(header, "move", "move")
+        self.add_drag(left, "left", "ew-resize")
+        self.add_drag(bottom, "bottom", "ns-resize")
+        self.connect("delete-event", self.restore)
+
+        if self.relative:
+            # A Wayland subsurface can extend beyond the app window, but the
+            # compositor gives keyboard focus to its parent toplevel.
+            terminal = session["terminal"]
+            self.focus_handler = terminal.connect("button-press-event", self.on_terminal_click)
+
+        parent_width, parent_height = app.get_size()
+        width = min(680, parent_width - 60)
+        height = min(450, parent_height - 60)
+        offset = 24 * sum(item.get("floating_window") is not None for item in app.sessions)
+        self.geometry = session.get("floating_geometry", (
+            (parent_width - width) // 2 + offset,
+            (parent_height - height) // 2 + offset,
+            width,
+            height,
+        ))
+        self.set_default_size(self.geometry[2], self.geometry[3])
+
+    def restore(self, *_):
+        self.app.restore_floating_session(self.session)
+        return True
+
+    def on_terminal_click(self, *_):
+        self.app.focus_floating_session(self)
+        return False
+
+    def set_keyboard_focus(self, focused):
+        if self.relative and self.get_window() is not None:
+            event = Gdk.Event.new(Gdk.EventType.FOCUS_CHANGE)
+            event.window = self.get_window()
+            event.in_ = focused
+            self.send_focus_change(event)
+
+    def activate(self):
+        if self.relative:
+            self.app.focus_floating_session(self)
+            self.get_window().raise_()
+        else:
+            self.present()
+        self.session["terminal"].grab_focus()
+
+    def add_drag(self, widget, edge, cursor_name):
+        def set_cursor(target):
+            cursor = Gdk.Cursor.new_from_name(target.get_display(), cursor_name)
+            target.get_window().set_cursor(cursor)
+
+        widget.connect("realize", set_cursor)
+        gesture = Gtk.GestureDrag.new(widget)
+        gesture.set_button(1)
+        gesture.connect("drag-begin", self.begin_drag, widget, edge)
+        gesture.connect("drag-update", self.update_drag)
+        gesture.connect("drag-end", self.end_drag)
+        self.gestures.append(gesture)
+
+    @staticmethod
+    def drag_event(gesture):
+        return gesture.get_last_event(gesture.get_last_updated_sequence())
+
+    def begin_drag(self, gesture, _x, _y, widget, edge):
+        event = self.drag_event(gesture)
+        if event is None:
+            return
+        target = Gtk.get_event_widget(event)
+        while target is not None and target is not widget:
+            if isinstance(target, Gtk.Button):
+                gesture.set_state(Gtk.EventSequenceState.DENIED)
+                return
+            target = target.get_parent()
+        valid, root_x, root_y = event.get_root_coords()
+        if valid:
+            self.drag = (edge, root_x, root_y, self.geometry)
+            gesture.set_state(Gtk.EventSequenceState.CLAIMED)
+
+    def update_drag(self, gesture, _x, _y):
+        if self.drag is None:
+            return
+        event = self.drag_event(gesture)
+        if event is None:
+            return
+        valid, root_x, root_y = event.get_root_coords()
+        if valid:
+            self.drag_to(round(root_x), round(root_y))
+
+    def end_drag(self, *_):
+        self.drag = None
+
+    def minimum_size(self):
+        child = self.get_child()
+        return max(300, child.get_preferred_width()[0]), max(160, child.get_preferred_height()[0])
+
+    def drag_to(self, root_x, root_y):
+        edge, start_x, start_y, (x, y, width, height) = self.drag
+        dx, dy = round(root_x - start_x), round(root_y - start_y)
+        min_width, min_height = self.minimum_size()
+        if edge == "left":
+            new_width = max(min_width, width - dx)
+            x += width - new_width
+            width = new_width
+        elif edge == "bottom":
+            height = max(min_height, height + dy)
+        else:
+            x += dx
+            y += dy
+        self.place(x, y, width, height)
+
+    def place(self, x, y, width, height):
+        min_width, min_height = self.minimum_size()
+        width, height = max(min_width, width), max(min_height, height)
+        parent_width, parent_height = self.app.get_size()
+        # Leave part of the header reachable when the card overhangs the top.
+        header_height = max(self.header.get_allocated_height(), self.header.get_preferred_height()[0])
+        controls = self.session["label"].get_preferred_width()[0]
+        visible_width = min(width, max(50, controls + 12))
+        x = max(visible_width - width, min(x, parent_width - 50))
+        y = max(50 - height, 10 - header_height, min(y, parent_height - 50))
+        self.geometry = (x, y, width, height)
+        self.session["floating_geometry"] = self.geometry
+        origin_x = origin_y = 0
+        if not self.relative and self.app.get_window() is not None:
+            _, origin_x, origin_y = self.app.get_window().get_origin()
+        target = (x + origin_x, y + origin_y, width, height)
+        if target == self.applied_geometry:
+            return
+        if self.applied_geometry is None or target[2:] != self.applied_geometry[2:]:
+            self.resize(width, height)
+        self.move(*target[:2])
+        self.applied_geometry = target
+
+    def release_terminal(self):
+        if self.relative:
+            self.session["terminal"].disconnect(self.focus_handler)
+
+
 class App(Gtk.Window):
     def __init__(self):
         super().__init__(title="Remote Dev Terminal")
         self.set_default_size(1200, 760)
         self.set_size_request(700, 450)
         self.sessions = []
+        self.floating_focus = None
         self.agent_rows = None
         self.agent_list_version = 0
         self.agent_sync_in_flight = False
@@ -335,6 +505,11 @@ class App(Gtk.Window):
             paned.tile-paned.horizontal > separator { min-width: 2px; }
             paned.tile-paned.vertical > separator { min-height: 2px; }
             paned.tile-paned > separator:hover, paned.tile-paned > separator:active { background-color: #86dbb8; }
+            .floating-session { background: #243546; }
+            .session-header-action { padding-left: 4px; padding-right: 4px; }
+            .minimized-dot { border-radius: 8px; background: #6bd18f; }
+            .minimized-dot.running { background: #3da1ff; }
+            .minimized-dot.waiting { background: #ffc745; }
             .empty { color: #8fa2b4; font-size: 15px; }
             .host-button {
                 background-image: none;
@@ -476,7 +651,17 @@ class App(Gtk.Window):
         toolbar.pack_start(menu, False, False, 0)
         title = Gtk.Label(label="工作区", xalign=0)
         title.get_style_context().add_class("workspace-title")
-        toolbar.pack_start(title, True, True, 0)
+        toolbar_middle = Gtk.Box(spacing=8)
+        toolbar_middle.pack_start(title, False, False, 0)
+        self.minimized_buttons = Gtk.Box(spacing=4)
+        self.minimized_scroller = Gtk.ScrolledWindow()
+        self.minimized_scroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.NEVER)
+        self.minimized_scroller.set_no_show_all(True)
+        self.minimized_scroller.add(self.minimized_buttons)
+        self.minimized_buttons.show_all()
+        self.minimized_scroller.get_child().show()
+        toolbar_middle.pack_start(self.minimized_scroller, True, True, 0)
+        toolbar.pack_start(toolbar_middle, True, True, 0)
         self.count_label = Gtk.Label(label="0 / 8")
         self.count_label.get_style_context().add_class("subtitle")
         toolbar.pack_start(self.count_label, False, False, 0)
@@ -529,6 +714,13 @@ class App(Gtk.Window):
         self.empty.get_style_context().add_class("empty")
         self.views.add_named(self.empty, "empty")
         self.views.set_visible_child_name("empty")
+        self.connect("configure-event", self.reposition_floating_sessions)
+        self.connect("key-press-event", self.forward_floating_key)
+        self.connect("key-release-event", self.forward_floating_key)
+        self.main_click = Gtk.GestureMultiPress.new(self)
+        self.main_click.set_button(0)
+        self.main_click.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        self.main_click.connect("pressed", lambda *_: self.focus_floating_session(None))
         self.quota_timer = GLib.timeout_add_seconds(1, self.refresh_quotas)
         self.connect("destroy", self.stop_quota_refresh)
         self.refresh()
@@ -829,15 +1021,186 @@ class App(Gtk.Window):
         self.set_initial_positions(root, total_w, total_h)
         return root
 
+    def focus_floating_session(self, window):
+        if self.floating_focus is window:
+            return
+        if self.floating_focus is not None:
+            self.floating_focus.set_keyboard_focus(False)
+        self.floating_focus = window
+        if window is not None:
+            window.set_keyboard_focus(True)
+
+    def forward_floating_key(self, _widget, event):
+        if self.floating_focus is None:
+            return False
+        terminal = self.floating_focus.session["terminal"]
+        if not terminal.get_mapped():
+            return False
+        forwarded = event.copy()
+        forwarded.window = terminal.get_window()
+        return terminal.event(forwarded)
+
+    def reposition_floating_sessions(self, *_):
+        for session in self.sessions:
+            window = session.get("floating_window")
+            if window is not None:
+                window.place(*window.geometry)
+        return False
+
+    def detach_session_widgets(self, session):
+        label, terminal = session["label"], session["terminal"]
+        parent = label.get_parent()
+        if parent is not None:
+            parent.remove(label)
+        parent = terminal.get_parent()
+        if parent is self.tabs:
+            self.tabs.remove_page(self.tabs.page_num(terminal))
+        elif parent is not None:
+            parent.remove(terminal)
+
+    def remove_floating_window(self, session):
+        window = session.pop("floating_window", None)
+        if window is not None:
+            if self.floating_focus is window:
+                self.focus_floating_session(None)
+            window.release_terminal()
+            self.detach_session_widgets(session)
+            window.destroy()
+
+    def update_minimized_scroller(self):
+        self.minimized_scroller.set_visible(bool(self.minimized_buttons.get_children()))
+
+    def minimize_session(self, session):
+        if session.get("minimized_button") is not None:
+            return
+        self.remove_floating_window(session)
+        self.update_float_button(session)
+        name = session["item"]["directory_name"]
+        button = Gtk.Button()
+        content = Gtk.Box(spacing=5)
+        dot = Gtk.Box(valign=Gtk.Align.CENTER)
+        dot.set_size_request(8, 8)
+        dot.get_style_context().add_class("minimized-dot")
+        content.pack_start(dot, False, False, 0)
+        text = Gtk.Label(label=name)
+        text.set_ellipsize(Pango.EllipsizeMode.END)
+        text.set_max_width_chars(20)
+        content.pack_start(text, True, True, 0)
+        button.add(content)
+        button.connect("clicked", lambda *_: self.restore_minimized_session(session))
+        session["minimized_button"], session["minimized_dot"] = button, dot
+        self.minimized_buttons.pack_start(button, False, False, 0)
+        button.show_all()
+        self.scale_layout(button)
+        self.update_minimized_scroller()
+        self.rebuild_view()
+
+    def remove_minimized_button(self, session):
+        button = session.pop("minimized_button", None)
+        if button is not None:
+            session.pop("minimized_dot", None)
+            session.pop("minimized_status", None)
+            button.destroy()
+            self.update_minimized_scroller()
+
+    def restore_minimized_session(self, session):
+        self.remove_minimized_button(session)
+        if not self.view_button.get_active():
+            self.view_button.set_active(True)
+        elif not self.tiled:
+            self.change_view(self.view_button)
+        else:
+            self.rebuild_view(selected=session["terminal"])
+        session["terminal"].grab_focus()
+
+    def toggle_floating_session(self, session):
+        if session.get("floating_window") is not None:
+            self.restore_floating_session(session)
+            return
+        self.detach_session_widgets(session)
+        frame, header = self.make_tile_card(session)
+        window = FloatingSession(self, session, frame, header)
+        session["floating_window"] = window
+        self.update_float_button(session)
+        for indicator in session.get("quota_indicators", ()):
+            indicator.set_show_percent(False)
+        self.rebuild_view()
+        window.show_all()
+        window.place(*window.geometry)
+        window.activate()
+
+    def restore_floating_session(self, session):
+        self.remove_floating_window(session)
+        self.update_float_button(session)
+        self.rebuild_view(selected=session["terminal"])
+        session["terminal"].grab_focus()
+
+    def update_float_button(self, session):
+        button = session.get("float_button")
+        if button is None:
+            return
+        floating = session.get("floating_window") is not None
+        button.get_image().set_from_icon_name(
+            "view-restore-symbolic" if floating else "window-new-symbolic", Gtk.IconSize.MENU,
+        )
+        button.set_tooltip_text("还原到工作区" if floating else "悬浮终端")
+
+    def make_session_header(self, session):
+        header = Gtk.Overlay()
+        bar = Gtk.Box()
+        bar.pack_start(session["label"], True, True, 0)
+        header.add(bar)
+        outline = Gtk.DrawingArea()
+        outline.set_has_window(False)
+        outline.set_can_focus(False)
+        outline.set_no_show_all(True)
+        outline.get_style_context().add_class("running-outline")
+        outline.set_halign(Gtk.Align.FILL)
+        outline.set_valign(Gtk.Align.FILL)
+        outline.connect("draw", self.draw_running_outline)
+        header.add_overlay(outline)
+        header.set_overlay_pass_through(outline, True)
+        session["terminal"]._running_outline = outline
+        return header
+
+    def make_tile_card(self, session):
+        frame = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True, vexpand=True)
+        frame.get_style_context().add_class("tile")
+        terminal = session["terminal"]
+        terminal._tile_frame = frame
+        if terminal.has_focus():
+            frame.get_style_context().add_class("tile-focused")
+        header = Gtk.EventBox()
+        header.get_style_context().add_class("tile-header")
+        header.set_size_request(-1, 25)
+        header.add(self.make_session_header(session))
+        frame.pack_start(header, False, False, 0)
+        frame.pack_start(terminal, True, True, 0)
+        return frame, header
+
     def _animate_running_headers(self):
         now = time.monotonic()
         for session in self.sessions:
             terminal = session.get("terminal")
             outline = getattr(terminal, "_running_outline", None)
-            state = session.get("state")
-            is_active = False
-            if state:
-                is_active = (now - state.get("last_output_at", 0.0) < 2.5)
+            state = session.get("state", {})
+            is_active = now - state.get("last_output_at", 0) < 2.5
+            dot = session.get("minimized_dot")
+            if dot is not None:
+                status = "waiting" if state.get("needs_action") else "running" if is_active else "idle"
+                previous = session.get("minimized_status")
+                if previous != status:
+                    context = dot.get_style_context()
+                    if previous is not None:
+                        context.remove_class(previous)
+                    context.add_class(status)
+                    session["minimized_status"] = status
+                    name = session["item"]["directory_name"]
+                    status_name = {"waiting": "待确认", "running": "运行中", "idle": "空闲"}[status]
+                    session["minimized_button"].set_tooltip_text(f"{name} · {status_name}\n单击恢复到平铺")
+                dimmed = status == "running" and now % 1.0 >= 0.55
+                if dimmed != (dot.get_opacity() < 0.5):
+                    dot.set_opacity(0.28 if dimmed else 1.0)
             if outline:
                 if is_active and not outline.get_visible():
                     outline.show()
@@ -850,97 +1213,45 @@ class App(Gtk.Window):
     def rebuild_view(self, selected=None):
         if selected is None and not self.tiled:
             selected = self.tabs.get_nth_page(self.tabs.get_current_page())
-        # Detach the reusable header before removing its notebook page: GTK
-        # otherwise destroys the tab label and all of its child widgets.
+        docked = []
         for session in self.sessions:
-            label = session["label"]
-            if label.get_parent():
-                label.get_parent().remove(label)
-        while self.tabs.get_n_pages():
-            self.tabs.remove_page(0)
-        for session in self.sessions:
-            terminal = session["terminal"]
-            if terminal.get_parent():
-                terminal.get_parent().remove(terminal)
-        for child in self.grid.get_children():
-            self.grid.remove(child)
-        for session in self.sessions:
-            for indicator in session.get("quota_indicators", ()):
-                indicator.set_show_percent(not self.tiled)
+            if session.get("floating_window") is not None:
+                continue
+            self.detach_session_widgets(session)
             session["terminal"]._tile_frame = None
             session["terminal"]._running_outline = None
+            if session.get("minimized_button") is None:
+                docked.append(session)
+                for indicator in session.get("quota_indicators", ()):
+                    indicator.set_show_percent(not self.tiled)
+        for child in self.grid.get_children():
+            self.grid.remove(child)
         self.count_label.set_text(f"{len(self.sessions)} / 8")
-        if not self.sessions:
+        self.layout_button.set_visible(self.tiled)
+        self.layout_button.set_sensitive(len(docked) >= 2)
+        if not docked:
+            text = ("终端已最小化或悬浮。" if self.sessions else
+                    "选择左侧主机和开发者，然后点击工作区直达终端。")
+            self.empty.set_text(text)
             self.views.set_visible_child_name("empty")
             return
         if self.tiled:
-            self.layout_button.show()
-            self.layout_button.set_sensitive(len(self.sessions) >= 2)
             self.grid._proportions_applied = False
-            frames = []
-            for session in self.sessions:
-                frame = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-                frame.get_style_context().add_class("tile")
-                session["terminal"]._tile_frame = frame
-                if session["terminal"].has_focus():
-                    frame.get_style_context().add_class("tile-focused")
-                frame.set_hexpand(True)
-                frame.set_vexpand(True)
-                header_container = Gtk.EventBox()
-                header_container.get_style_context().add_class("tile-header")
-                header_container.set_size_request(-1, 25)
-                header = Gtk.Overlay()
-                header_container.add(header)
-                header_bar = Gtk.Box()
-                header_bar.pack_start(session["label"], True, True, 0)
-                header.add(header_bar)
-                outline = Gtk.DrawingArea()
-                outline.set_has_window(False)
-                outline.set_can_focus(False)
-                outline.set_no_show_all(True)
-                outline.get_style_context().add_class("running-outline")
-                outline.set_halign(Gtk.Align.FILL)
-                outline.set_valign(Gtk.Align.FILL)
-                outline.hide()
-                outline.connect("draw", self.draw_running_outline)
-                header.add_overlay(outline)
-                header.set_overlay_pass_through(outline, True)
-                session["terminal"]._running_outline = outline
-                frame.pack_start(header_container, False, False, 0)
-                frame.pack_start(session["terminal"], True, True, 0)
-                frames.append(frame)
-            tile_root = self.build_tile_layout(frames)
-            if tile_root:
-                self.grid.pack_start(tile_root, True, True, 0)
+            frames = [self.make_tile_card(session)[0] for session in docked]
+            self.grid.pack_start(self.build_tile_layout(frames), True, True, 0)
             self.grid.show_all()
             self.views.set_visible_child_name("grid")
         else:
-            self.layout_button.hide()
-            for session in self.sessions:
-                tab_box = Gtk.Overlay()
-                tab_box.set_size_request(-1, 25)
-                tab_bar = Gtk.Box()
-                tab_bar.pack_start(session["label"], True, True, 0)
-                tab_box.add(tab_bar)
-                outline = Gtk.DrawingArea()
-                outline.set_has_window(False)
-                outline.set_can_focus(False)
-                outline.set_no_show_all(True)
-                outline.get_style_context().add_class("running-outline")
-                outline.set_halign(Gtk.Align.FILL)
-                outline.set_valign(Gtk.Align.FILL)
-                outline.hide()
-                outline.connect("draw", self.draw_running_outline)
-                tab_box.add_overlay(outline)
-                tab_box.set_overlay_pass_through(outline, True)
-                session["terminal"]._running_outline = outline
-                tab_box.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
-                tab_box.connect("button-press-event", self.activate_tab_from_label, session["terminal"])
-                tab_box.show_all()
-                self.tabs.append_page(session["terminal"], tab_box)
+            for session in docked:
+                tab = self.make_session_header(session)
+                tab.set_size_request(-1, 25)
+                tab.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
+                tab.connect("button-press-event", self.activate_tab_from_label, session["terminal"])
+                tab.show_all()
+                self.tabs.append_page(session["terminal"], tab)
             self.tabs.show_all()
             self.views.set_visible_child_name("tabs")
-            if selected:
+            if selected is not None:
                 index = self.tabs.page_num(selected)
                 if index >= 0:
                     self.tabs.set_current_page(index)
@@ -2585,10 +2896,17 @@ class App(Gtk.Window):
             key += (shared_item["id"],)
         existing = next((item for item in self.sessions if item["key"] == key or (shared_item and item["id"] == shared_item["id"])), None)
         if existing:
-            terminal = existing["terminal"]
-            if not self.tiled:
-                self.tabs.set_current_page(self.tabs.page_num(terminal))
-            terminal.grab_focus()
+            if not activate:
+                return
+            if existing.get("minimized_button") is not None:
+                self.restore_minimized_session(existing)
+            elif existing.get("floating_window") is not None:
+                existing["floating_window"].activate()
+            else:
+                terminal = existing["terminal"]
+                if not self.tiled:
+                    self.tabs.set_current_page(self.tabs.page_num(terminal))
+                terminal.grab_focus()
             return
         if len(self.sessions) >= 8:
             self.message("终端已达上限", "最多同时打开 8 个终端，请先关闭一个终端。")
@@ -2616,32 +2934,46 @@ class App(Gtk.Window):
         terminal.set_vexpand(True)
         terminal.set_scrollback_lines(10000)
         label = Gtk.Box(spacing=5)
-        label.pack_start(Gtk.Label(label=directory["name"] + " · " + agent["name"]), True, True, 0)
+        session_title = Gtk.Label(label=directory["name"] + " · " + agent["name"])
+        session_title.set_ellipsize(Pango.EllipsizeMode.END)
+        label.pack_start(session_title, True, True, 0)
         kind, _ = quota_agent(agent["command"])
         hourly_img, update_hourly = make_quota_indicator()
+        weekly_img, update_weekly = make_quota_indicator()
         if kind:
             hourly_img.show_all()
             label.pack_start(hourly_img, False, False, 0)
+            label.pack_start(weekly_img, False, False, 0)
 
-        shown_hourly = None
+        shown_quota = None
         def update_quota_display(result):
-            nonlocal shown_hourly
+            nonlocal shown_quota
             if not kind:
                 return
             minutes, percent, *_ = hourly_quota(result)
-            current = (minutes, percent)
-            if current == shown_hourly:
+            weekly = next((window[1] for window in result if window[0] == 10080), None)
+            current = (minutes, percent, weekly)
+            if current == shown_quota:
                 return
-            shown_hourly = current
+            shown_quota = current
             update_hourly(percent)
+            update_weekly(weekly)
             period = f"{minutes // 60}小时" if minutes % 60 == 0 else f"{minutes}分钟"
             remaining = "--" if percent is None else f"{percent}%"
             hourly_img.set_tooltip_text(f"{period}剩余 {remaining}")
+            weekly_img.set_tooltip_text("周剩余 --" if weekly is None else f"周剩余 {weekly}%")
 
         image_button = Gtk.Button.new_from_icon_name("image-x-generic-symbolic", Gtk.IconSize.MENU)
         image_button.set_relief(Gtk.ReliefStyle.NONE)
         image_button.set_tooltip_text("发送图片给此终端的 Agent")
         label.pack_start(image_button, False, False, 0)
+        minimize = Gtk.Button.new_from_icon_name("window-minimize-symbolic", Gtk.IconSize.MENU)
+        minimize.set_tooltip_text("最小化到顶部栏")
+        float_button = Gtk.Button.new_from_icon_name("window-new-symbolic", Gtk.IconSize.MENU)
+        for button in (minimize, float_button):
+            button.set_relief(Gtk.ReliefStyle.NONE)
+            button.get_style_context().add_class("session-header-action")
+            label.pack_start(button, False, False, 0)
         close = Gtk.Button.new_from_icon_name("window-close-symbolic", Gtk.IconSize.MENU)
         close.set_relief(Gtk.ReliefStyle.NONE)
         label.pack_start(close, False, False, 0)
@@ -2666,15 +2998,9 @@ class App(Gtk.Window):
             if state["retry_source"]:
                 GLib.source_remove(state["retry_source"])
                 state["retry_source"] = None
-            if terminal.get_parent():
-                parent = terminal.get_parent()
-                if parent is self.tabs:
-                    self.tabs.remove_page(self.tabs.page_num(terminal))
-                else:
-                    parent.remove(terminal)
-            label_parent = label.get_parent()
-            if label_parent:
-                label_parent.remove(label)
+            self.remove_minimized_button(session)
+            self.remove_floating_window(session)
+            self.detach_session_widgets(session)
             self.sessions[:] = [item for item in self.sessions if item["terminal"] is not terminal]
             self.rebuild_view()
             # Terminate local SSH child process, kill remote tmux session & processes, then close multiplex master.
@@ -2704,10 +3030,15 @@ class App(Gtk.Window):
                     shutil.rmtree(socket_dir, ignore_errors=True)
             threading.Thread(target=cleanup_remote, daemon=True).start()
         close.connect("clicked", close_tab)
-        self.sessions.append({"terminal": terminal, "label": label, "key": key, "id": session_id, "host": host, "state": state,
+        session = {"terminal": terminal, "label": label, "key": key, "id": session_id, "host": host, "state": state,
                               "close_button": close, "started_at": time.monotonic(),
-                              "quota_indicators": (hourly_img,) if kind else (),
-                              "update_quota": update_quota_display})
+                              "quota_indicators": (hourly_img, weekly_img) if kind else (),
+                              "update_quota": update_quota_display}
+        session["float_button"] = float_button
+        self.update_float_button(session)
+        minimize.connect("clicked", lambda *_: self.minimize_session(session))
+        float_button.connect("clicked", lambda *_: self.toggle_floating_session(session))
+        self.sessions.append(session)
         self.rebuild_view(selected=terminal if activate else None)
         def spawned(_terminal, pid, error, *_):
             if error:
@@ -2721,7 +3052,7 @@ class App(Gtk.Window):
         self.scale_layout(label)
         auto_confirm = AutoEnterController()
 
-        def visible_signature():
+        def visible_prompt_text():
             try:
                 # Only inspect the visible screen, not old prompts in scrollback.
                 if hasattr(terminal, "get_text_format"):
@@ -2731,13 +3062,21 @@ class App(Gtk.Window):
                     text, _ = terminal.get_text_range_format(
                         Vte.Format.TEXT, max(0, row - terminal.get_row_count() + 1), 0,
                         row, terminal.get_column_count() - 1)
-                return auto_enter_signature(text or "")
+                return text or ""
             except (AttributeError, TypeError, ValueError):
-                return None
+                return ""
+
+        def visible_signature():
+            return auto_enter_signature(visible_prompt_text())
 
         def check_prompt():
-            enabled = state["connected"] and self.auto_enter.get_active() and not state["closed"]
-            signature = visible_signature() if enabled else None
+            available = state["connected"] and not state["closed"]
+            enabled = available and self.auto_enter.get_active()
+            minimized = session.get("minimized_button") is not None
+            text = visible_prompt_text() if available and (enabled or minimized) else ""
+            signature = auto_enter_signature(text) if text else None
+            if minimized:
+                state["needs_action"] = signature is not None or confirmation_pending(text)
             if auto_confirm.observe(signature, time.monotonic(), self.delay.get_value_as_int(), enabled):
                 # A changed selection or prompt must start a fresh countdown.
                 if visible_signature() == signature:
