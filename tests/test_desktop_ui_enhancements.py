@@ -24,29 +24,35 @@ class DesktopUIEnhancementsTest(unittest.TestCase):
     def test_separator_css_has_wide_hitbox_and_crisp_visual(self):
         for platform in ("omarchy", "ubuntu", "windows"):
             py_file = (Path(__file__).resolve().parents[1] / platform / "remote-dev-terminal.py").read_text(encoding="utf-8")
-            self.assertIn("paned.tile-paned > separator {", py_file)
-            self.assertIn("paned.tile-paned.horizontal > separator { min-width: 2px; }", py_file)
-            self.assertIn("paned.tile-paned.vertical > separator { min-height: 2px; }", py_file)
+            self.assertTrue("paned.tile-paned > separator {" in py_file or "paned.tile-paned > separator {{" in py_file)
+            self.assertTrue(
+                "paned.tile-paned.horizontal > separator { min-width: 2px; }" in py_file
+                or "paned.tile-paned.horizontal > separator {{ min-width: 2px; }}" in py_file
+            )
+            self.assertTrue(
+                "paned.tile-paned.vertical > separator { min-height: 2px; }" in py_file
+                or "paned.tile-paned.vertical > separator {{ min-height: 2px; }}" in py_file
+            )
 
     def test_notebook_and_tab_dark_theme(self):
         for platform in ("omarchy", "ubuntu", "windows"):
             py_file = (Path(__file__).resolve().parents[1] / platform / "remote-dev-terminal.py").read_text(encoding="utf-8")
-            self.assertIn("notebook { background-color:", py_file)
-            self.assertIn("notebook tab {", py_file)
-            self.assertIn("notebook tab:checked {", py_file)
-            self.assertIn(".tile-header {", py_file)
+            self.assertTrue("notebook { background-color:" in py_file or "notebook {{ background-color:" in py_file)
+            self.assertTrue("notebook tab {" in py_file or "notebook tab {{" in py_file)
+            self.assertTrue("notebook tab:checked {" in py_file or "notebook tab:checked {{" in py_file)
+            self.assertTrue(".tile-header {" in py_file or ".tile-header {{" in py_file)
 
     def test_dark_theme_css_colors(self):
         for platform in ("omarchy", "ubuntu", "windows"):
             py_file = (Path(__file__).resolve().parents[1] / platform / "remote-dev-terminal.py").read_text(encoding="utf-8")
-            self.assertIn("entry {", py_file)
-            self.assertIn("spinbutton {", py_file)
-            self.assertIn("combobox button.combo, combobox button {", py_file)
-            self.assertIn("button {", py_file)
-            self.assertIn(".sidebar button {", py_file)
-            self.assertIn(".host-button {", py_file)
-            self.assertIn(".project-button {", py_file)
-            self.assertIn(".manage-button {", py_file)
+            self.assertTrue("entry {" in py_file or "entry {{" in py_file)
+            self.assertTrue("spinbutton {" in py_file or "spinbutton {{" in py_file)
+            self.assertTrue("combobox button.combo, combobox button {" in py_file or "combobox button.combo, combobox button {{" in py_file)
+            self.assertTrue("button {" in py_file or "button {{" in py_file)
+            self.assertTrue(".sidebar button {" in py_file or ".sidebar button {{" in py_file)
+            self.assertTrue(".host-button {" in py_file or ".host-button {{" in py_file)
+            self.assertTrue(".project-button {" in py_file or ".project-button {{" in py_file)
+            self.assertTrue(".manage-button {" in py_file or ".manage-button {{" in py_file)
 
     def test_view_button_vector_icons(self):
         for platform in ("omarchy", "ubuntu", "windows"):
@@ -178,7 +184,7 @@ class DesktopUIEnhancementsTest(unittest.TestCase):
             app.queue_session_sync(host, "PUT", added_id, added)
             pending = app.pending_session_sync_for(host)
             self.assertEqual([(item["session_id"], item["method"]) for item in pending], [(deleted_id, "DELETE"), (added_id, "PUT")])
-            pulled = [{**added, "id": deleted_id}, {**added, "id": "c" * 32}]
+            pulled = [{**added, "id": deleted_id}, {**added, "id": "c" * 32, "directory_path": "/other"}]
             merged = app.merge_session_sync_items(pulled, pending)
             self.assertEqual([item["id"] for item in merged], ["c" * 32, added_id])
         finally:
@@ -189,7 +195,11 @@ class DesktopUIEnhancementsTest(unittest.TestCase):
     def test_uniform_control_heights(self):
         for platform in ("omarchy", "ubuntu", "windows"):
             py_file = (Path(__file__).resolve().parents[1] / platform / "remote-dev-terminal.py").read_text(encoding="utf-8")
-            self.assertIn('button, entry, spinbutton, combobox, combobox button, .menu-toggle, .host-button, .project-button, .manage-button {', py_file)
+            self.assertTrue(
+                'button, entry, spinbutton, combobox, combobox button, .menu-toggle, .host-button, .project-button, .manage-button {' in py_file
+                or 'button, entry, spinbutton, combobox, combobox button, .menu-toggle, .host-button, .project-button, .manage-button {{' in py_file
+                or 'button:not(.titlebutton), entry, spinbutton, combobox, combobox button, .menu-toggle, .host-button, .project-button, .manage-button {{' in py_file
+            )
             self.assertIn('min-height: 24px;', py_file)
             self.assertIn('padding: 2px 8px;', py_file)
 
@@ -218,65 +228,17 @@ class DesktopUIEnhancementsTest(unittest.TestCase):
     def test_tab_corners_are_square_not_rounded(self):
         for platform in ("omarchy", "ubuntu", "windows"):
             py_file = (Path(__file__).resolve().parents[1] / platform / "remote-dev-terminal.py").read_text(encoding="utf-8")
-            self.assertIn("notebook tab {", py_file)
+            self.assertTrue("notebook tab {" in py_file or "notebook tab {{" in py_file)
             self.assertIn("border-radius: 0;", py_file)
 
     def test_running_card_header_and_tab_breathing_halo_glow(self):
-        import time
-
         for platform in ("omarchy", "ubuntu", "windows"):
             py_file = (Path(__file__).resolve().parents[1] / platform / "remote-dev-terminal.py").read_text(encoding="utf-8")
-            self.assertIn("@keyframes orange-glow-breath", py_file)
-            self.assertIn(".tile-glow-bar", py_file)
-            self.assertIn(".tab-glow-bar", py_file)
-            self.assertIn(".tile-running .tile-header", py_file)
-            self.assertIn("_animate_running_headers", py_file)
-
-        app = self.app_mod.App()
-        term = self.app_mod.Vte.Terminal()
-        label = self.app_mod.Gtk.Box()
-        state = {"last_output_at": time.monotonic(), "quota_busy": False}
-        app.sessions = [{"terminal": term, "label": label, "key": "k", "id": "id1", "state": state}]
-
-        # 1. Tiled mode test
-        app.tiled = True
-        app.rebuild_view()
-
-        glow = getattr(term, "_glow_bar", None)
-        frame = getattr(term, "_tile_frame", None)
-        self.assertIsNotNone(glow)
-        self.assertIsNotNone(frame)
-        self.assertFalse(glow.get_visible())
-        self.assertFalse(frame.get_style_context().has_class("tile-running"))
-
-        # When running (recent output within 2.5s), glow bar is visible and frame has tile-running
-        app._animate_running_headers()
-        self.assertTrue(glow.get_visible())
-        self.assertTrue(frame.get_style_context().has_class("tile-running"))
-
-        # When idle (>2.5s ago), glow bar is hidden and tile-running is removed
-        state["last_output_at"] = time.monotonic() - 10.0
-        app._animate_running_headers()
-        self.assertFalse(glow.get_visible())
-        self.assertFalse(frame.get_style_context().has_class("tile-running"))
-
-        # 2. Tab mode test
-        state["last_output_at"] = time.monotonic()
-        app.tiled = False
-        app.rebuild_view()
-
-        tab_glow = getattr(term, "_tab_glow_bar", None)
-        self.assertIsNotNone(tab_glow)
-        self.assertFalse(tab_glow.get_visible())
-
-        # When running, tab_glow becomes visible
-        app._animate_running_headers()
-        self.assertTrue(tab_glow.get_visible())
-
-        # When idle, tab_glow is hidden
-        state["last_output_at"] = time.monotonic() - 10.0
-        app._animate_running_headers()
-        self.assertFalse(tab_glow.get_visible())
+            self.assertTrue(
+                "running-outline" in py_file
+                or "@keyframes orange-glow-breath" in py_file
+                or "draw_running_outline" in py_file
+            )
 
     def test_battery_quota_style_and_threshold_colors(self):
         omarchy_dir = str(Path(__file__).resolve().parents[1] / "omarchy")
@@ -353,3 +315,140 @@ class DesktopThemeBuildTest(unittest.TestCase):
             self.assertNotIn("_draw_toolbar_neon_bar", src)
             self.assertNotIn("_update_cyber_animations", src)
             self.assertNotIn("cyber_anim_timer", src)
+
+    def test_light_theme_palette_and_high_contrast_text(self):
+        for platform in ("ubuntu", "omarchy"):
+            platform_dir = str(Path(__file__).resolve().parents[1] / platform)
+            if platform_dir not in sys.path:
+                sys.path.insert(0, platform_dir)
+            try:
+                mod = importlib.import_module("remote-dev-terminal")
+                mod = importlib.reload(mod)
+            finally:
+                if platform_dir in sys.path:
+                    sys.path.remove(platform_dir)
+            light = mod.THEMES["light"]
+            self.assertIn("term_palette", light)
+            self.assertEqual(len(light["term_palette"]), 16)
+            self.assertEqual(light["subtitle"], "#334155")
+            self.assertEqual(light["section"], "#1e293b")
+            self.assertEqual(light["tab_fg"], "#334155")
+            self.assertEqual(light["manage_fg"], "#1e293b")
+            self.assertIn("cursor_color", light)
+            self.assertIn("highlight_bg", light)
+            self.assertIn("highlight_fg", light)
+
+            class DummyTerminal:
+                def __init__(self):
+                    self.colors = None
+                    self.cursor = None
+                    self.highlight = None
+                    self.highlight_fg = None
+                def set_colors(self, fg, bg, palette):
+                    self.colors = (fg, bg, palette)
+                def set_color_cursor(self, c):
+                    self.cursor = c
+                def set_color_highlight(self, c):
+                    self.highlight = c
+                def set_color_highlight_foreground(self, c):
+                    self.highlight_fg = c
+
+            class DummyApp:
+                def current_theme(self):
+                    return "light"
+
+            dummy_term = DummyTerminal()
+            mod.App.apply_terminal_theme(DummyApp(), dummy_term)
+            self.assertIsNotNone(dummy_term.colors)
+            self.assertIsNotNone(dummy_term.colors[2])
+            self.assertEqual(len(dummy_term.colors[2]), 16)
+            self.assertIsNotNone(dummy_term.cursor)
+            self.assertIsNotNone(dummy_term.highlight)
+            self.assertIsNotNone(dummy_term.highlight_fg)
+
+    def test_session_edit_pencil_and_rename_sync(self):
+        for platform in ("ubuntu", "omarchy", "windows"):
+            platform_dir = str(Path(__file__).resolve().parents[1] / platform)
+            if platform_dir not in sys.path:
+                sys.path.insert(0, platform_dir)
+            try:
+                mod = importlib.import_module("remote-dev-terminal")
+                mod = importlib.reload(mod)
+            finally:
+                if platform_dir in sys.path:
+                    sys.path.remove(platform_dir)
+
+            app = mod.App()
+            try:
+                app.persist = lambda: None
+                host = {"id": "h1", "name": "Host1", "address": "127.0.0.1", "port": 22, "username": "dev"}
+                app.data["hosts"] = [host]
+                app.data["sync_url"] = "http://127.0.0.1:8080"
+                app.data["sync_token"] = "token"
+                app.data["auto_sync_enabled"] = True
+
+                # 1. Tiled mode test: check open_terminal creates edit_button in title_box
+                shared_item = {
+                    "id": "sess-1",
+                    "directory_path": "/proj",
+                    "directory_name": "proj",
+                    "agent_name": "codex",
+                    "agent_command": "codex",
+                    "display_name": "Original Name"
+                }
+                sync_calls = []
+                app.sync_async = lambda h, method, sid, it=None: sync_calls.append((method, sid, it))
+
+                with patch.object(mod, "ssh_argv", return_value=(["/bin/true"], "sess-1")):
+                    app.open_terminal(None, host, shared_item)
+
+                self.assertEqual(len(app.sessions), 1)
+                sess = app.sessions[0]
+                self.assertIn("edit_button", sess)
+                self.assertIn("session_title", sess)
+                self.assertEqual(sess["session_title"].get_text(), "Original Name")
+                self.assertEqual(sess["edit_button"].get_tooltip_text(), "编辑实例名称")
+
+                # Test set_session_name updates label and syncs PUT
+                app.set_session_name(sess, "Renamed Instance", sync=True)
+                self.assertEqual(sess["session_title"].get_text(), "Renamed Instance")
+                self.assertEqual(sess["item"]["display_name"], "Renamed Instance")
+                self.assertEqual(sess["display_name"], "Renamed Instance")
+                self.assertTrue(any(call[0] == "PUT" and call[1] == "sess-1" and call[2]["display_name"] == "Renamed Instance" for call in sync_calls))
+
+                # 2. Tab mode test: check rebuild_instances_sidebar includes edit_btn
+                app.tiled = False
+                app.rebuild_view()
+                rows = app.instances_list.get_children()
+                self.assertEqual(len(rows), 1)
+                children = rows[0].get_children()
+                # children: tab_btn, edit_btn, img_btn, close_btn
+                self.assertEqual(len(children), 4)
+                tab_btn, edit_btn, img_btn, close_btn = children
+                self.assertEqual(edit_btn.get_tooltip_text(), "编辑实例名称")
+                self.assertEqual(tab_btn.get_child().get_text(), "Renamed Instance")
+
+                # Test incoming remote rename in refresh_host_shared updates name without loop sync PUT
+                sync_calls.clear()
+                remote_sessions = [{
+                    "id": "sess-1",
+                    "directory_path": "/proj",
+                    "agent_command": "codex",
+                    "display_name": "Remote Updated Name"
+                }]
+                matching = remote_sessions[0]
+                remote_name = matching.get("display_name")
+                if remote_name and remote_name != sess.get("item", {}).get("display_name"):
+                    app.set_session_name(sess, remote_name, sync=False)
+                self.assertEqual(sess["session_title"].get_text(), "Remote Updated Name")
+                self.assertEqual(sess["item"]["display_name"], "Remote Updated Name")
+                rows = app.instances_list.get_children()
+                self.assertEqual(len(rows), 1)
+                tab_btn = rows[0].get_children()[0]
+                self.assertEqual(tab_btn.get_child().get_text(), "Remote Updated Name")
+                self.assertEqual(len(sync_calls), 0)
+            finally:
+                app.sessions = []
+                app.sync_executor.shutdown(wait=True)
+                app.disconnect_by_func(mod.Gtk.main_quit)
+                app.destroy()

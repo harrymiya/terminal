@@ -259,11 +259,12 @@ class MainActivity : ComponentActivity() {
 }
 
 private class TerminalSessionState(
-    var task: TerminalTask,
+    task: TerminalTask,
     private val mainHandler: Handler,
     private val appContext: Context,
     private val quotaFor: (TerminalTask) -> List<QuotaWindow>?,
 ) : AutoConfirmEngine.SessionCallback {
+    var task by mutableStateOf(task)
     val buffer = TerminalBuffer()
     var status by mutableStateOf("等待连接")
     var unread by mutableStateOf(false)
@@ -417,6 +418,8 @@ private fun RemoteTerminalApp(store: LocalStore) {
         var deletingDirectory by remember { mutableStateOf<Pair<String, ProjectDirectory>?>(null) }
         var deletingAgent by remember { mutableStateOf<AgentPreset?>(null) }
         var closingSession by remember { mutableStateOf<TerminalSessionState?>(null) }
+        var renamingSession by remember { mutableStateOf<TerminalSessionState?>(null) }
+        var renamingName by remember { mutableStateOf("") }
         var sharedSessions by remember { mutableStateOf<List<org.json.JSONObject>?>(null) }
         var sharedHost by remember { mutableStateOf<HostProfile?>(null) }
         var startupShared by remember { mutableStateOf<List<Pair<HostProfile, org.json.JSONObject>>>(emptyList()) }
@@ -863,7 +866,16 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 it.task.id.replace("-", "") == id ||
                     (it.task.host.id == host.id && it.task.directory.path == path && it.task.agent.command == command)
             }
-            if (existing >= 0) { if (activate) { activePage = existing; route = AppRoute.TERMINAL }; return }
+            if (existing >= 0) {
+                val remoteName = item.optString("display_name")
+                if (remoteName.isNotBlank() && remoteName != sessions[existing].task.displayName) {
+                    val updatedTask = sessions[existing].task.copy(displayName = remoteName)
+                    sessions[existing].task = updatedTask
+                    sessionStore.save(updatedTask)
+                }
+                if (activate) { activePage = existing; route = AppRoute.TERMINAL }
+                return
+            }
             val currentHost = hosts.firstOrNull { it.id == host.id } ?: return
             val directory = currentHost.directories.firstOrNull { it.path == path }
                 ?: ProjectDirectory(UUID.randomUUID().toString(), item.getString("directory_name"), path)
@@ -871,7 +883,10 @@ private fun RemoteTerminalApp(store: LocalStore) {
             if (updatedHost != currentHost) saveHosts(hosts.map { if (it.id == currentHost.id) updatedHost else it })
             val agent = agents.firstOrNull { it.command == command }
                 ?: AgentPreset(UUID.randomUUID().toString(), item.getString("agent_name"), command, "✳").also { agents.add(it); store.saveAgents(agents) }
-            val task = TerminalTask(id, updatedHost, directory, agent, item.getString("display_name"))
+            val displayName = item.optString("display_name").ifBlank {
+                if (directory.name.isNotBlank()) "${directory.name} · ${agent.name}" else agent.name
+            }
+            val task = TerminalTask(id, updatedHost, directory, agent, displayName)
             sessionStore.save(task)
             openTask(updatedHost, directory, agent, task)
             if (activate) { activePage = sessions.lastIndex; route = AppRoute.TERMINAL }
@@ -902,6 +917,17 @@ private fun RemoteTerminalApp(store: LocalStore) {
             scope.launch {
                 runCatching { syncSharedSessions(host) }
                     .onFailure { snackbars.showSnackbar("${host.name} 同步失败：${it.message}") }
+            }
+        }
+
+        fun renameTask(session: TerminalSessionState, newName: String) {
+            val trimmed = newName.trim()
+            if (trimmed.isNotBlank() && trimmed != session.task.displayName) {
+                val updated = session.task.copy(displayName = trimmed)
+                session.task = updated
+                sessionStore.save(updated)
+                if (!offlineMode) store.enqueueSessionSync(updated, "PUT", SyncClient.sessionItem(updated))
+                refreshShared(updated.host)
             }
         }
 
@@ -1069,6 +1095,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
                     onOpenSettings = { route = AppRoute.SETTINGS },
                     onStartTask = { host, dir, agent -> openTask(host, dir, agent) },
                     onResumeSession = { index -> activePage = index; sessions[index].unread = false; route = AppRoute.TERMINAL },
+                    onRenameSession = { session -> renamingSession = session; renamingName = session.task.displayName },
                 )
                 AppRoute.MANAGE -> ManageScreen(
                     hosts = hosts, selectedHost = selectedHost,
@@ -1155,6 +1182,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
                     onPageSelected = { index -> activePage = index; sessions.getOrNull(index)?.let { it.unread = false } },
                     onBack = { route = AppRoute.HOME }, onNewTask = { route = AppRoute.HOME },
                     onCloseTask = { index -> sessions.getOrNull(index)?.let { closingSession = it } },
+                    onRenameTask = { session -> renamingSession = session; renamingName = session.task.displayName },
                 )
             }
             SnackbarHost(snackbars, modifier = Modifier.align(Alignment.BottomCenter).padding(horizontal = 14.dp, vertical = 8.dp))
@@ -1250,6 +1278,43 @@ private fun RemoteTerminalApp(store: LocalStore) {
             onConfirm = { closeSession(session); closingSession = null },
             onDismiss = { closingSession = null },
         ) }
+        renamingSession?.let { session ->
+            AlertDialog(
+                onDismissRequest = { renamingSession = null },
+                containerColor = Panel,
+                title = { Text("修改实例名称", color = White, fontWeight = FontWeight.SemiBold) },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("请输入新的实例名称：", color = Muted, fontSize = 12.sp)
+                        OutlinedTextField(
+                            value = renamingName,
+                            onValueChange = { renamingName = it },
+                            label = { Text("实例名称") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            val target = session
+                            val newName = renamingName
+                            renamingSession = null
+                            renameTask(target, newName)
+                        },
+                        enabled = renamingName.isNotBlank(),
+                    ) {
+                        Text("确定", color = Mint)
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { renamingSession = null }) {
+                        Text("取消", color = Muted)
+                    }
+                },
+            )
+        }
 
         sessions.forEach { session ->
             session.hostFingerprint?.let { fingerprint ->
@@ -1284,6 +1349,7 @@ private fun HomeScreen(
     sessions: List<TerminalSessionState>, onSelectHost: (HostProfile) -> Unit, onSelectAgent: (AgentPreset) -> Unit,
     onManage: () -> Unit, onAddHost: () -> Unit, onAddDirectory: () -> Unit, onOpenAgents: () -> Unit, onOpenSettings: () -> Unit,
     onStartTask: (HostProfile, ProjectDirectory, AgentPreset) -> Unit, onResumeSession: (Int) -> Unit,
+    onRenameSession: (TerminalSessionState) -> Unit,
     syncLoading: Boolean,
     onReorderDirectories: (HostProfile, List<ProjectDirectory>) -> Unit,
 ) {
@@ -1382,7 +1448,13 @@ private fun HomeScreen(
                                 Text(session.task.agent.icon, fontSize = 15.sp)
                                 Spacer(Modifier.width(9.dp))
                                 Column(Modifier.weight(1f)) {
-                                    Text(sessionDisplayLabel(session.task), color = White, fontSize = 12.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(sessionDisplayLabel(session.task), color = White, fontSize = 12.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                                        Spacer(Modifier.width(4.dp))
+                                        IconButton(onClick = { onRenameSession(session) }, modifier = Modifier.size(20.dp)) {
+                                            Icon(Icons.Default.Edit, contentDescription = "编辑实例名称", tint = Muted, modifier = Modifier.size(13.dp))
+                                        }
+                                    }
                                     Text(
                                         if (session.needsAction) "需要确认" else "${session.task.host.name} · ${session.task.directory.name}",
                                         color = if (session.needsAction) Coral else Muted, fontSize = 10.sp, maxLines = 1,
@@ -1697,6 +1769,7 @@ private fun AgentsScreen(
 private fun TerminalWorkspace(
     sessions: List<TerminalSessionState>, initialIndex: Int, onPageSelected: (Int) -> Unit,
     onBack: () -> Unit, onNewTask: () -> Unit, onCloseTask: (Int) -> Unit,
+    onRenameTask: (TerminalSessionState) -> Unit,
 ) {
     if (sessions.isEmpty()) return
     val pager = rememberPagerState(initialPage = initialIndex.coerceIn(0, sessions.lastIndex), pageCount = { sessions.size })
@@ -1739,7 +1812,7 @@ private fun TerminalWorkspace(
         Row(Modifier.fillMaxWidth().height(45.dp).horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             sessions.forEachIndexed { index, session ->
                 val selected = index == pager.currentPage
-                SessionTab(session, selected, onClick = { scope.launch { pager.animateScrollToPage(index) } }, onClose = { onCloseTask(index) })
+                SessionTab(session, selected, onClick = { scope.launch { pager.animateScrollToPage(index) } }, onRename = { onRenameTask(session) }, onClose = { onCloseTask(index) })
                 Spacer(Modifier.width(6.dp))
             }
         }
@@ -1756,7 +1829,13 @@ private fun TerminalWorkspace(
 }
 
 @Composable
-private fun SessionTab(session: TerminalSessionState, selected: Boolean, onClick: () -> Unit, onClose: () -> Unit) {
+private fun SessionTab(
+    session: TerminalSessionState,
+    selected: Boolean,
+    onClick: () -> Unit,
+    onRename: () -> Unit,
+    onClose: () -> Unit,
+) {
     val transition = rememberInfiniteTransition(label = "activity")
     val pulse by transition.animateFloat(0.35f, 1f, infiniteRepeatable(tween(650), RepeatMode.Reverse), label = "pulse")
     val color = when { session.needsAction -> Coral; selected -> Mint; session.unread -> Blue; else -> statusTint(session.status) }
@@ -1780,6 +1859,7 @@ private fun SessionTab(session: TerminalSessionState, selected: Boolean, onClick
             }
             if (supportsQuota) HourlyQuotaLabel(session.quota)
             Text(sessionDisplayLabel(session.task), color = if (selected) White else Muted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            IconButton(onClick = onRename, modifier = Modifier.size(20.dp)) { Icon(Icons.Default.Edit, "编辑实例名称", tint = Muted, modifier = Modifier.size(12.dp)) }
             IconButton(onClick = onClose, modifier = Modifier.size(20.dp)) { Icon(Icons.Default.Close, null, tint = Muted, modifier = Modifier.size(13.dp)) }
         }
     }

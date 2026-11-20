@@ -485,10 +485,10 @@ THEMES = {
         "accent_bg_hover": "#cce6fc",
         "accent_fg": "#035388",
         "brand": "#0284c7",
-        "subtitle": "#5c6b7f",
-        "section": "#475569",
-        "manage_fg": "#475569",
-        "tab_fg": "#5c6b7f",
+        "subtitle": "#334155",
+        "section": "#1e293b",
+        "manage_fg": "#1e293b",
+        "tab_fg": "#334155",
         "tile_grid_bg": "#d8e1ec",
         "tile_header_bg": "#eef2f8",
         "tile_focused_bg": "#e0f2fe",
@@ -496,7 +496,7 @@ THEMES = {
         "drop_bg": "#ccfbf1",
         "drop_header": "#99f6e4",
         "hover_overlay": "rgba(2, 132, 199, 0.12)",
-        "quota_ok": "#0d9488",
+        "quota_ok": "#059669",
         "quota_warn": "#d97706",
         "quota_low": "#dc2626",
         "dot_idle": "#10b981",
@@ -504,6 +504,15 @@ THEMES = {
         "dot_wait": "#f59e0b",
         "term_bg": "#ffffff",
         "term_fg": "#182230",
+        "cursor_color": "#0284c7",
+        "highlight_bg": "#cce6fc",
+        "highlight_fg": "#035388",
+        "term_palette": (
+            "#182230", "#b91c1c", "#15803d", "#a16207",
+            "#1d4ed8", "#7e22ce", "#0e7490", "#475569",
+            "#64748b", "#dc2626", "#16a34a", "#ca8a04",
+            "#2563eb", "#9333ea", "#0284c7", "#0f172a",
+        ),
     },
     "classic": {
         "label": "经典深色",
@@ -1282,12 +1291,37 @@ class App(Gtk.Window):
         return name if name in THEMES else "cyberpunk"
 
     def apply_terminal_theme(self, terminal):
-        palette = THEMES[self.current_theme()]
+        theme = THEMES[self.current_theme()]
         fg = Gdk.RGBA()
-        fg.parse(palette["term_fg"])
+        fg.parse(theme["term_fg"])
         bg = Gdk.RGBA()
-        bg.parse(palette["term_bg"])
-        terminal.set_colors(fg, bg, None)
+        bg.parse(theme["term_bg"])
+        palette = None
+        if "term_palette" in theme:
+            palette = []
+            for color_str in theme["term_palette"]:
+                rgba = Gdk.RGBA()
+                rgba.parse(color_str)
+                palette.append(rgba)
+        terminal.set_colors(fg, bg, palette)
+        if hasattr(terminal, "set_color_cursor"):
+            if "cursor_color" in theme:
+                cur = Gdk.RGBA()
+                cur.parse(theme["cursor_color"])
+                terminal.set_color_cursor(cur)
+            else:
+                terminal.set_color_cursor(None)
+        if hasattr(terminal, "set_color_highlight") and hasattr(terminal, "set_color_highlight_foreground"):
+            if "highlight_bg" in theme and "highlight_fg" in theme:
+                hl_bg = Gdk.RGBA()
+                hl_bg.parse(theme["highlight_bg"])
+                hl_fg = Gdk.RGBA()
+                hl_fg.parse(theme["highlight_fg"])
+                terminal.set_color_highlight(hl_bg)
+                terminal.set_color_highlight_foreground(hl_fg)
+            else:
+                terminal.set_color_highlight(None)
+                terminal.set_color_highlight_foreground(None)
 
     def apply_theme(self, apply_css=True):
         self.base_css = build_theme_css(self.current_theme())
@@ -1540,7 +1574,7 @@ class App(Gtk.Window):
             return
         self.remove_floating_window(session)
         self.update_float_button(session)
-        name = session["item"]["directory_name"]
+        name = (session.get("item") or {}).get("display_name") or session.get("item", {}).get("directory_name", "终端")
         button = Gtk.Button()
         content = Gtk.Box(spacing=5)
         dot = Gtk.Box(valign=Gtk.Align.CENTER)
@@ -1550,10 +1584,11 @@ class App(Gtk.Window):
         text = Gtk.Label(label=name)
         text.set_ellipsize(Pango.EllipsizeMode.END)
         text.set_max_width_chars(20)
+        button.set_tooltip_text(name)
         content.pack_start(text, True, True, 0)
         button.add(content)
         button.connect("clicked", lambda *_: self.restore_minimized_session(session))
-        session["minimized_button"], session["minimized_dot"] = button, dot
+        session["minimized_button"], session["minimized_dot"], session["minimized_label"] = button, dot, text
         self.minimized_buttons.pack_start(button, False, False, 0)
         button.show_all()
         self.scale_layout(button)
@@ -1874,6 +1909,12 @@ class App(Gtk.Window):
             button.connect("clicked", self.activate_instance_tab, terminal)
             row.pack_start(button, True, True, 0)
             self.instance_buttons.append((button, terminal))
+            edit_btn = Gtk.Button.new_from_icon_name("document-edit-symbolic", Gtk.IconSize.MENU)
+            edit_btn.get_style_context().add_class("manage-button")
+            edit_btn.set_tooltip_text("编辑实例名称")
+            edit_btn.set_valign(Gtk.Align.CENTER)
+            edit_btn.connect("clicked", lambda *_, s=session: self.prompt_edit_session_name(s))
+            row.pack_start(edit_btn, False, False, 0)
             image_btn = Gtk.Button.new_from_icon_name("image-x-generic-symbolic", Gtk.IconSize.MENU)
             image_btn.get_style_context().add_class("manage-button")
             image_btn.set_tooltip_text("发送图片给此终端的 Agent")
@@ -1891,6 +1932,62 @@ class App(Gtk.Window):
             self.instances_list.pack_start(row, False, False, 0)
             self.scale_layout(row)
         self.instances_list.show_all()
+
+    def prompt_edit_session_name(self, session):
+        current_name = (session.get("item") or {}).get("display_name") or session.get("display_name") or ""
+        dialog = Gtk.Dialog(title="修改实例名称", transient_for=self, modal=True)
+        dialog.add_buttons("取消", Gtk.ResponseType.CANCEL, "确定", Gtk.ResponseType.OK)
+        dialog.set_default_response(Gtk.ResponseType.OK)
+        dialog.set_default_size(360, -1)
+        self.scale_layout(dialog)
+        box = dialog.get_content_area()
+        box.set_spacing(10)
+        box.set_border_width(16)
+        label = Gtk.Label(label="请输入新的实例名称：", xalign=0)
+        box.pack_start(label, False, False, 0)
+        entry = Gtk.Entry()
+        entry.set_text(current_name)
+        entry.set_activates_default(True)
+        box.pack_start(entry, False, False, 0)
+        dialog.show_all()
+        response = dialog.run()
+        new_name = entry.get_text().strip()
+        dialog.destroy()
+        if response == Gtk.ResponseType.OK and new_name and new_name != current_name:
+            self.set_session_name(session, new_name, sync=True)
+
+    def set_session_name(self, session, new_name, sync=True):
+        new_name = str(new_name).strip()
+        if not new_name:
+            return
+        if "item" not in session or not isinstance(session["item"], dict):
+            session["item"] = {}
+        session["item"]["display_name"] = new_name
+        session["display_name"] = new_name
+
+        session_title = session.get("session_title")
+        if session_title is not None and hasattr(session_title, "set_text"):
+            session_title.set_text(new_name)
+            if hasattr(session_title, "set_tooltip_text"):
+                session_title.set_tooltip_text(new_name)
+
+        minimized_label = session.get("minimized_label")
+        if minimized_label is not None and hasattr(minimized_label, "set_text"):
+            minimized_label.set_text(new_name)
+            if hasattr(minimized_label, "set_tooltip_text"):
+                minimized_label.set_tooltip_text(new_name)
+        if session.get("minimized_button") is not None and hasattr(session["minimized_button"], "set_tooltip_text"):
+            session["minimized_button"].set_tooltip_text(new_name)
+
+        if not self.tiled:
+            self.rebuild_instances_sidebar()
+
+        if sync and session.get("host") and session.get("id"):
+            key = self.shared_host_key(self.canonical_session_host(session["host"]))
+            for item in self.shared_by_host.get(key, []):
+                if item.get("id") == session["id"]:
+                    item["display_name"] = new_name
+            self.sync_async(session["host"], "PUT", session["id"], session["item"])
 
     def activate_instance_tab(self, _button, terminal):
         page = self.tabs.page_num(terminal)
@@ -3184,9 +3281,12 @@ class App(Gtk.Window):
                             session_host = self.canonical_session_host(session.get("host", {}))
                             if self.shared_host_key(session_host) == key:
                                 ws = session.get("key", (None, None, None, None, None))[3:5]
-                                matching_item = next((item for item in sessions if (item.get("directory_path"), item.get("agent_command")) == ws), None)
+                                matching_item = next((item for item in sessions if (session.get("id") and item.get("id") == session.get("id")) or (item.get("directory_path"), item.get("agent_command")) == ws), None)
                                 if matching_item and matching_item.get("id"):
                                     session["id"] = matching_item["id"]
+                                    remote_name = matching_item.get("display_name")
+                                    if remote_name and remote_name != (session.get("item") or {}).get("display_name"):
+                                        self.set_session_name(session, remote_name, sync=False)
                                 elif session.get("id") not in remote_ids and time.monotonic() - session.get("started_at", 0) > 15:
                                     state = session.get("state")
                                     if isinstance(state, dict):
@@ -3781,7 +3881,8 @@ class App(Gtk.Window):
                 if not items:
                     box.add(Gtk.Label(label="暂无共享会话"))
                 for item in items:
-                    button = Gtk.Button(label=item["display_name"] + " · " + item["directory_name"])
+                    name = item.get("display_name") or f"{item.get('directory_name')} · {item.get('agent_name')}"
+                    button = Gtk.Button(label=name)
                     def selected(_button, selected_item=item):
                         dialog.destroy()
                         self.open_terminal(None, host, selected_item)
@@ -3830,8 +3931,9 @@ class App(Gtk.Window):
         socket_path = os.path.join(socket_dir, "ssh")
         session_id = shared_item["id"] if shared_item else uuid.uuid4().hex
         argv, _ = ssh_argv(host, directory["path"], agent["command"], session_id=session_id, control_path=socket_path, restore_only=shared_item is not None)
+        display_name = (shared_item.get("display_name") if shared_item else None) or f"{directory['name']} · {agent['name']}"
         item = {"id": session_id, "directory_path": directory["path"], "directory_name": directory["name"],
-                "agent_name": agent["name"], "agent_command": agent["command"], "display_name": directory["name"] + " · " + agent["name"]}
+                "agent_name": agent["name"], "agent_command": agent["command"], "display_name": display_name}
         if not shared_item:
             self.sync_async(host, "PUT", session_id, item)
         terminal = Vte.Terminal()
@@ -3856,9 +3958,17 @@ class App(Gtk.Window):
         terminal.set_vexpand(True)
         terminal.set_scrollback_lines(10000)
         label = Gtk.Box(spacing=5)
-        session_title = Gtk.Label(label=directory["name"] + " · " + agent["name"])
+        title_box = Gtk.Box(spacing=4)
+        session_title = Gtk.Label(label=display_name, xalign=0)
         session_title.set_ellipsize(Pango.EllipsizeMode.END)
-        label.pack_start(session_title, True, True, 0)
+        session_title.set_tooltip_text(display_name)
+        title_box.pack_start(session_title, False, False, 0)
+        edit_button = Gtk.Button.new_from_icon_name("document-edit-symbolic", Gtk.IconSize.MENU)
+        edit_button.set_relief(Gtk.ReliefStyle.NONE)
+        edit_button.get_style_context().add_class("session-header-action")
+        edit_button.set_tooltip_text("编辑实例名称")
+        title_box.pack_start(edit_button, False, False, 0)
+        label.pack_start(title_box, True, True, 0)
         kind, _ = quota_agent(agent["command"])
         if kind == "codex":
             # Codex handles Page Up/Down, while tmux may capture the wheel and
@@ -3978,14 +4088,16 @@ class App(Gtk.Window):
             threading.Thread(target=cleanup_remote, daemon=True).start()
         close.connect("clicked", close_tab)
         session = {"terminal": terminal, "label": label, "key": key, "id": session_id, "host": host, "state": state,
-                              "item": item, "socket_path": socket_path, "close_button": close, "image_button": image_button,
-                              "started_at": time.monotonic(),
-                              "quota_indicators": (hourly_img, weekly_img) if kind else (),
-                              "update_quota": update_quota_display}
+                   "item": item, "socket_path": socket_path, "close_button": close, "image_button": image_button,
+                   "edit_button": edit_button, "session_title": session_title,
+                   "started_at": time.monotonic(),
+                   "quota_indicators": (hourly_img, weekly_img) if kind else (),
+                   "update_quota": update_quota_display}
         session["float_button"] = float_button
         self.update_float_button(session)
         minimize.connect("clicked", lambda *_: self.minimize_session(session))
         float_button.connect("clicked", lambda *_: self.toggle_floating_session(session))
+        edit_button.connect("clicked", lambda *_: self.prompt_edit_session_name(session))
         self.sessions.append(session)
         self.rebuild_view(selected=terminal if activate else None)
         def spawned(_terminal, pid, error, *_):

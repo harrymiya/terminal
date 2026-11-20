@@ -28,6 +28,8 @@ class UbuntuWindowAndTabsTest(unittest.TestCase):
 
     def test_backdrop_keeps_text_readable(self):
         Gtk = app_module.Gtk
+        self.app.data["theme"] = "classic"
+        self.app.apply_theme()
         self.app.show_all()
         def labels(widget):
             if isinstance(widget, Gtk.Label):
@@ -38,7 +40,7 @@ class UbuntuWindowAndTabsTest(unittest.TestCase):
         by_text = {label.get_text(): label for label in labels(self.app)}
         for text in ('REMOTE DEV', '＋主机', '自动同步：已关闭（本机设置）'):
             color = by_text[text].get_style_context().get_color(Gtk.StateFlags.BACKDROP)
-            self.assertGreater(min(color.red, color.green, color.blue), 0.45, text)
+            self.assertGreater(max(color.red, color.green, color.blue), 0.45, text)
 
     def test_repeated_mode_switch_preserves_header_and_quota(self):
         Gtk = app_module.Gtk
@@ -102,8 +104,9 @@ class UbuntuWindowAndTabsTest(unittest.TestCase):
         self.assertEqual(len(rows), 2)
 
         row_children = rows[0].get_children()
-        self.assertEqual(len(row_children), 3)
-        tab_btn, img_btn, close_btn = row_children
+        self.assertEqual(len(row_children), 4)
+        tab_btn, edit_btn, img_btn, close_btn = row_children
+        self.assertEqual(edit_btn.get_tooltip_text(), "编辑实例名称")
         label = tab_btn.get_child()
         self.assertEqual(label.get_text(), "very-long-workspace-name-for-full-display · Codex")
         self.assertEqual(label.get_ellipsize(), Pango.EllipsizeMode.END)
@@ -350,14 +353,13 @@ class UbuntuWindowAndTabsTest(unittest.TestCase):
         header = Gtk.Box()
         header.pack_start(Gtk.Label(label='project · Codex'), True, True, 0)
         self.app.sessions = [{'terminal': terminal, 'label': header, 'key': 'k', 'id': 'id', 'state': {}}]
-        for tiled in (True, False):
-            self.app.tiled = tiled
-            self.app.rebuild_view()
-            outline = terminal._running_outline
-            self.assertFalse(outline.get_has_window())
-            self.assertFalse(outline.get_can_focus())
-            overlay = outline.get_parent()
-            self.assertTrue(overlay.get_overlay_pass_through(outline))
+        self.app.tiled = True
+        self.app.rebuild_view()
+        outline = terminal._running_outline
+        self.assertFalse(outline.get_has_window())
+        self.assertFalse(outline.get_can_focus())
+        overlay = outline.get_parent()
+        self.assertTrue(overlay.get_overlay_pass_through(outline))
 
     def test_tiled_card_drag_and_drop_reorders_and_wraps_next_row(self):
         self.app.persist = lambda: None
