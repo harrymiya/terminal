@@ -1612,42 +1612,81 @@ private fun HomeScreen(
                     Modifier.fillMaxWidth().padding(bottom = 18.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    displayedSessions.forEach { session ->
-                        val originalIndex = sessions.indexOf(session).coerceAtLeast(0)
-                        Surface(
-                            onClick = { onResumeSession(originalIndex) },
-                            color = Panel,
-                            shape = RoundedCornerShape(12.dp),
-                            border = BorderStroke(1.dp, if (session.needsAction) Coral.copy(alpha = 0.7f) else Edge),
+                    displayedSessions.chunked(2).forEach { rowSessions ->
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
-                            Row(
-                                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Text(session.task.agent.icon, fontSize = 15.sp)
-                                Spacer(Modifier.width(9.dp))
-                                Column(Modifier.weight(1f)) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Text(sessionDisplayLabel(session.task), color = White, fontSize = 12.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
-                                        Spacer(Modifier.width(4.dp))
-                                        IconButton(onClick = { onRenameSession(session) }, modifier = Modifier.size(20.dp)) {
-                                            Icon(Icons.Default.Edit, contentDescription = "编辑实例名称", tint = Muted, modifier = Modifier.size(13.dp))
+                            rowSessions.forEach { session ->
+                                val originalIndex = sessions.indexOf(session).coerceAtLeast(0)
+                                Surface(
+                                    onClick = { onResumeSession(originalIndex) },
+                                    color = Panel,
+                                    shape = RoundedCornerShape(12.dp),
+                                    border = BorderStroke(1.dp, if (session.needsAction) Coral.copy(alpha = 0.7f) else Edge),
+                                    modifier = Modifier.weight(1f),
+                                ) {
+                                    Column(
+                                        Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 9.dp),
+                                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                                    ) {
+                                        Row(
+                                            Modifier.fillMaxWidth(),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                        ) {
+                                            Text(session.task.agent.icon, fontSize = 14.sp)
+                                            Spacer(Modifier.width(6.dp))
+                                            Text(
+                                                sessionDisplayLabel(session.task),
+                                                color = White,
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.Medium,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.weight(1f),
+                                            )
+                                            IconButton(
+                                                onClick = { onRenameSession(session) },
+                                                modifier = Modifier.size(18.dp),
+                                            ) {
+                                                Icon(
+                                                    Icons.Default.Edit,
+                                                    contentDescription = "编辑实例名称",
+                                                    tint = Muted,
+                                                    modifier = Modifier.size(11.dp),
+                                                )
+                                            }
+                                            if (session.needsAction) {
+                                                Spacer(Modifier.width(3.dp))
+                                                Text("!", color = Coral, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                            } else if (session.unread) {
+                                                Spacer(Modifier.width(3.dp))
+                                                Box(Modifier.size(6.dp).background(Blue, CircleShape))
+                                            }
+                                        }
+                                        Row(
+                                            Modifier.fillMaxWidth(),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                        ) {
+                                            Text(
+                                                if (session.needsAction) "需要确认" else "${session.task.host.name} · ${session.task.directory.name}",
+                                                color = if (session.needsAction) Coral else Muted,
+                                                fontSize = 10.sp,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.weight(1f, fill = false),
+                                            )
+                                            if (codexExecutable(session.task.agent.command) != null || antigravityExecutable(session.task.agent.command) != null) {
+                                                Spacer(Modifier.width(4.dp))
+                                                HourlyQuotaLabel(session.quota)
+                                            }
                                         }
                                     }
-                                    Text(
-                                        if (session.needsAction) "需要确认" else "${session.task.host.name} · ${session.task.directory.name}",
-                                        color = if (session.needsAction) Coral else Muted, fontSize = 10.sp, maxLines = 1,
-                                    )
                                 }
-                                when {
-                                    session.needsAction -> Text("!", color = Coral, fontWeight = FontWeight.Bold)
-                                    session.unread -> Box(Modifier.size(7.dp).background(Blue, CircleShape))
-                                }
-                                if (codexExecutable(session.task.agent.command) != null || antigravityExecutable(session.task.agent.command) != null) {
-                                    Column(Modifier.padding(start = 10.dp), horizontalAlignment = Alignment.End) {
-                                        HourlyQuotaLabel(session.quota)
-                                    }
-                                }
+                            }
+                            if (rowSessions.size == 1) {
+                                Spacer(Modifier.weight(1f))
                             }
                         }
                     }
@@ -1988,10 +2027,24 @@ private fun TerminalWorkspace(
             IconButton(onClick = onNewTask, modifier = Modifier.size(40.dp)) { Icon(Icons.Default.Add, "新建任务", tint = Mint) }
         }
         Divider(color = Edge)
+        val configuration = LocalConfiguration.current
+        val phoneTabModifier = if (sessions.size >= 2) {
+            val twoTabWidth = ((configuration.screenWidthDp - 22) / 2).coerceAtLeast(130).dp
+            Modifier.width(twoTabWidth)
+        } else {
+            Modifier
+        }
         Row(Modifier.fillMaxWidth().height(45.dp).horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             sessions.forEachIndexed { index, session ->
                 val selected = index == pager.currentPage
-                SessionTab(session, selected, onClick = { scope.launch { pager.animateScrollToPage(index) } }, onRename = { onRenameTask(session) }, onClose = { onCloseTask(index) })
+                SessionTab(
+                    session = session,
+                    selected = selected,
+                    onClick = { scope.launch { pager.animateScrollToPage(index) } },
+                    onRename = { onRenameTask(session) },
+                    onClose = { onCloseTask(index) },
+                    modifier = phoneTabModifier,
+                )
                 Spacer(Modifier.width(6.dp))
             }
         }
@@ -2014,6 +2067,7 @@ private fun SessionTab(
     onClick: () -> Unit,
     onRename: () -> Unit,
     onClose: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val transition = rememberInfiniteTransition(label = "activity")
     val pulse by transition.animateFloat(0.35f, 1f, infiniteRepeatable(tween(650), RepeatMode.Reverse), label = "pulse")
@@ -2028,8 +2082,13 @@ private fun SessionTab(
             kotlinx.coroutines.delay((remaining - (remainingSeconds - 1) * 1000L).coerceAtLeast(1))
         }
     }
-    Surface(onClick = onClick, color = if (selected) PanelRaised else Panel, shape = CircleShape,
-        border = androidx.compose.foundation.BorderStroke(1.dp, if (selected) color.copy(alpha = .7f) else Edge)) {
+    Surface(
+        onClick = onClick,
+        color = if (selected) PanelRaised else Panel,
+        shape = CircleShape,
+        border = androidx.compose.foundation.BorderStroke(1.dp, if (selected) color.copy(alpha = .7f) else Edge),
+        modifier = modifier,
+    ) {
         Row(Modifier.padding(start = 10.dp, end = 5.dp, top = 6.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             Box(Modifier.size(7.dp).alpha(if (session.isStreaming) pulse else 1f).background(color, CircleShape))
             val supportsQuota = codexExecutable(session.task.agent.command) != null || antigravityExecutable(session.task.agent.command) != null
@@ -2037,7 +2096,14 @@ private fun SessionTab(
                 Text(remainingSeconds.toString(), color = color, fontWeight = FontWeight.Bold, fontSize = 11.sp)
             }
             if (supportsQuota) HourlyQuotaLabel(session.quota)
-            Text(sessionDisplayLabel(session.task), color = if (selected) White else Muted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(
+                sessionDisplayLabel(session.task),
+                color = if (selected) White else Muted,
+                fontSize = 11.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = if (modifier != Modifier) Modifier.weight(1f, fill = false) else Modifier,
+            )
             IconButton(onClick = onRename, modifier = Modifier.size(20.dp)) { Icon(Icons.Default.Edit, "编辑实例名称", tint = Muted, modifier = Modifier.size(12.dp)) }
             IconButton(onClick = onClose, modifier = Modifier.size(20.dp)) { Icon(Icons.Default.Close, null, tint = Muted, modifier = Modifier.size(13.dp)) }
         }
