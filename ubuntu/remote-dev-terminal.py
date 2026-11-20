@@ -951,6 +951,7 @@ class App(Gtk.Window):
         self.set_default_size(1200, 760)
         self.set_size_request(700, 450)
         self.sessions = []
+        self.active_terminal = None
         self.floating_focus = None
         self.agent_rows = None
         self.agent_list_version = 0
@@ -1220,7 +1221,50 @@ class App(Gtk.Window):
         self.connect("destroy", on_destroy)
         self.connect("destroy", Gtk.main_quit)
 
+    def set_active_terminal(self, terminal):
+        self.active_terminal = terminal
+        if getattr(self, "tiled", False):
+            for s in self.sessions:
+                t = s.get("terminal")
+                frame = getattr(t, "_tile_frame", None)
+                if frame:
+                    ctx = frame.get_style_context()
+                    (ctx.add_class if t is terminal else ctx.remove_class)("tile-focused")
+
+    def get_selected_terminal(self):
+        docked_terms = [
+            s["terminal"] for s in self.sessions
+            if s.get("floating_window") is None and s.get("minimized_button") is None
+        ]
+        if not docked_terms:
+            return None
+
+        active = getattr(self, "active_terminal", None)
+        if active in docked_terms:
+            return active
+
+        focus_w = self.get_focus()
+        if focus_w in docked_terms:
+            return focus_w
+
+        for t in docked_terms:
+            if t.has_focus():
+                return t
+            frame = getattr(t, "_tile_frame", None)
+            if frame and frame.get_style_context().has_class("tile-focused"):
+                return t
+
+        if not self.tiled and self.tabs.get_n_pages() > 0:
+            page_idx = self.tabs.get_current_page()
+            if page_idx >= 0:
+                p = self.tabs.get_nth_page(page_idx)
+                if p in docked_terms:
+                    return p
+
+        return docked_terms[0]
+
     def change_view(self, button):
+        selected = self.get_selected_terminal()
         self.tiled = button.get_active()
         self.data["tiled"] = self.tiled
         self.view_icon.set_from_icon_name(
@@ -1233,7 +1277,11 @@ class App(Gtk.Window):
         else:
             self.layout_button.hide()
         self.persist()
-        self.rebuild_view()
+        self.rebuild_view(selected=selected)
+        if selected is not None:
+            self.set_active_terminal(selected)
+            if selected.get_can_focus():
+                selected.grab_focus()
 
     def cycle_tile_layout(self, _button):
         layouts = ["grid", "columns", "rows"]
@@ -1612,6 +1660,8 @@ class App(Gtk.Window):
     def minimize_session(self, session):
         if session.get("minimized_button") is not None:
             return
+        if session.get("terminal") is getattr(self, "active_terminal", None):
+            self.active_terminal = None
         self.remove_floating_window(session)
         self.update_float_button(session)
         name = (session.get("item") or {}).get("display_name") or session.get("item", {}).get("directory_name", "终端")
@@ -1645,6 +1695,7 @@ class App(Gtk.Window):
 
     def restore_minimized_session(self, session):
         self.remove_minimized_button(session)
+        self.set_active_terminal(session["terminal"])
         if not self.view_button.get_active():
             self.view_button.set_active(True)
         elif not self.tiled:
@@ -1657,6 +1708,8 @@ class App(Gtk.Window):
         if session.get("floating_window") is not None:
             self.restore_floating_session(session)
             return
+        if session.get("terminal") is getattr(self, "active_terminal", None):
+            self.active_terminal = None
         self.detach_session_widgets(session)
         frame, header = self.make_tile_card(session, draggable=False)
         window = FloatingSession(self, session, frame, header)
@@ -1672,6 +1725,7 @@ class App(Gtk.Window):
     def restore_floating_session(self, session):
         self.remove_floating_window(session)
         self.update_float_button(session)
+        self.set_active_terminal(session["terminal"])
         self.rebuild_view(selected=session["terminal"])
         session["terminal"].grab_focus()
 
@@ -1740,9 +1794,12 @@ class App(Gtk.Window):
         hover_widgets = set()
 
         def on_button_press(_widget, event):
-            if event.button == 1:
+            btn = getattr(event, "button", None)
+            btn_num = getattr(btn, "button", btn) if btn is not None else 0
+            if btn_num == 1:
                 drag_anchor[0] = int(event.x)
                 drag_anchor[1] = int(event.y)
+                self.set_active_terminal(terminal)
             return False
 
         def on_drag_begin(_widget, context):
@@ -1821,12 +1878,21 @@ class App(Gtk.Window):
         frame.get_style_context().add_class("tile")
         terminal = session["terminal"]
         terminal._tile_frame = frame
-        if terminal.has_focus():
+        if terminal.has_focus() or getattr(self, "active_terminal", None) is terminal:
             frame.get_style_context().add_class("tile-focused")
         header = Gtk.EventBox()
         header.get_style_context().add_class("tile-header")
         header.set_size_request(-1, 25)
         header.add(self.make_session_header(session))
+        def on_header_press(_widget, event):
+            btn = getattr(event, "button", None)
+            btn_num = getattr(btn, "button", btn) if btn is not None else 0
+            if btn_num == 1:
+                self.set_active_terminal(terminal)
+                if terminal.get_can_focus():
+                    terminal.grab_focus()
+            return False
+        header.connect("button-press-event", on_header_press)
         frame.pack_start(header, False, False, 0)
         frame.pack_start(terminal, True, True, 0)
         if draggable:
@@ -1866,8 +1932,8 @@ class App(Gtk.Window):
         return True
 
     def rebuild_view(self, selected=None):
-        if selected is None and not self.tiled:
-            selected = self.tabs.get_nth_page(self.tabs.get_current_page())
+        if selected is None:
+            selected = self.get_selected_terminal()
         docked = []
         for session in self.sessions:
             if session.get("floating_window") is not None:
@@ -1931,6 +1997,8 @@ class App(Gtk.Window):
             return
         current_page = self.tabs.get_current_page()
         active_terminal = self.tabs.get_nth_page(current_page) if current_page >= 0 else None
+        if active_terminal is None and getattr(self, "active_terminal", None) in [s["terminal"] for s in docked]:
+            active_terminal = self.active_terminal
         for session in docked:
             terminal = session["terminal"]
             item = session.get("item") or {}
@@ -2078,12 +2146,14 @@ class App(Gtk.Window):
             self.sync_async(session["host"], "PUT", session["id"], session["item"])
 
     def activate_instance_tab(self, _button, terminal):
+        self.set_active_terminal(terminal)
         page = self.tabs.page_num(terminal)
         if page >= 0:
             self.tabs.set_current_page(page)
         terminal.grab_focus()
 
     def on_tab_switched(self, _notebook, page, _page_num):
+        self.active_terminal = page
         for button, terminal in self.instance_buttons:
             ctx = button.get_style_context()
             (ctx.add_class if terminal is page else ctx.remove_class)("host-selected")
@@ -3975,13 +4045,11 @@ class App(Gtk.Window):
         # Wait until VTE has finished updating its selection before copying it.
         terminal.connect("selection-changed", lambda widget: GLib.idle_add(copy_selection, widget))
         def update_tile_focus(widget, _event, focused):
-            frame = getattr(widget, "_tile_frame", None)
-            if frame:
-                context = frame.get_style_context()
-                (context.add_class if focused else context.remove_class)("tile-focused")
+            if focused:
+                self.set_active_terminal(widget)
             return False
         terminal.connect("focus-in-event", update_tile_focus, True)
-        terminal.connect("focus-out-event", update_tile_focus, False)
+        terminal.connect("button-press-event", lambda widget, _ev: (self.set_active_terminal(widget), False)[1])
         terminal.set_font_scale(self.terminal_font_scale())
         terminal.set_size(24, 8)
         terminal.set_hexpand(True)
@@ -4091,6 +4159,8 @@ class App(Gtk.Window):
             self.remove_floating_window(session)
             self.detach_session_widgets(session)
             self.sessions[:] = [item for item in self.sessions if item["terminal"] is not terminal]
+            if getattr(self, "active_terminal", None) is terminal:
+                self.active_terminal = None
             self.rebuild_view()
             # Terminate local SSH child process, kill remote tmux session & processes, then close multiplex master.
             pid = state.pop("pid", None)
@@ -4131,6 +4201,8 @@ class App(Gtk.Window):
         float_button.connect("clicked", lambda *_: self.toggle_floating_session(session))
         edit_button.connect("clicked", lambda *_: self.prompt_edit_session_name(session))
         self.sessions.append(session)
+        if activate:
+            self.set_active_terminal(terminal)
         self.rebuild_view(selected=terminal if activate else None)
         def spawned(_terminal, pid, error, *_):
             if error:

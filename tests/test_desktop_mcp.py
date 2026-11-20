@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import sys
 import threading
+import time
 import unittest
 from unittest.mock import patch
 import urllib.request
@@ -204,7 +205,12 @@ class DesktopMCPIntegrationTest(unittest.TestCase):
                     GLib.idle_add(lambda: (feed_output(), done_feed.set(), False)[2])
                     done_feed.wait(5)
 
-                    screen = self._call_tool(url, "read_terminal_screen", {"session_id": sid})
+                    screen = {"text": ""}
+                    for _ in range(20):
+                        screen = self._call_tool(url, "read_terminal_screen", {"session_id": sid})
+                        if "hello from agent" in screen.get("text", ""):
+                            break
+                        time.sleep(0.05)
                     self.assertIn("hello from agent", screen["text"])
 
                     with patch.object(app.sessions[0]["terminal"], "feed_child") as mock_feed:

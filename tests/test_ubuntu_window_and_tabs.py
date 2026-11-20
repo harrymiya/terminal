@@ -492,6 +492,68 @@ class UbuntuWindowAndTabsTest(unittest.TestCase):
         self.assertEqual([s["item"]["directory_name"] for s in self.app.sessions], ["c", "d", "a", "b"])
         self.app.toggle_floating_session(d)
 
+    def test_switch_from_tiled_to_tab_preserves_selected_card(self):
+        s0, _ = self.make_session("s0")
+        s1, _ = self.make_session("s1")
+        s2, _ = self.make_session("s2")
+
+        self.app.view_button.set_active(True)
+        self.app.rebuild_view()
+        self.app.show_all()
+        while app_module.Gtk.events_pending():
+            app_module.Gtk.main_iteration()
+
+        # In tiled mode, select/focus card 1 (s1)
+        s1_frame = s1["terminal"]._tile_frame
+        s1_header = s1_frame.get_children()[0]
+        ev = app_module.Gdk.Event.new(app_module.Gdk.EventType.BUTTON_PRESS)
+        ev.button.window = s1_header.get_window()
+        ev.button.button = 1
+        s1_header.emit("button-press-event", ev)
+        while app_module.Gtk.events_pending():
+            app_module.Gtk.main_iteration()
+
+        # Switch to tab mode
+        self.app.view_button.set_active(False)
+        while app_module.Gtk.events_pending():
+            app_module.Gtk.main_iteration()
+
+        # Tab page 1 should be active
+        self.assertEqual(self.app.tabs.get_current_page(), 1)
+        self.assertIs(self.app.tabs.get_nth_page(1), s1["terminal"])
+
+        # In instances list, row 1 must be highlighted with host-selected
+        rows = self.app.instances_list.get_children()
+        self.assertTrue(rows[1].get_children()[0].get_style_context().has_class("host-selected"))
+        self.assertFalse(rows[0].get_children()[0].get_style_context().has_class("host-selected"))
+
+    def test_switch_from_tab_to_tiled_preserves_selected_tab(self):
+        s0, _ = self.make_session("s0")
+        s1, _ = self.make_session("s1")
+        s2, _ = self.make_session("s2")
+
+        self.app.view_button.set_active(False)
+        self.app.rebuild_view()
+        self.app.show_all()
+        while app_module.Gtk.events_pending():
+            app_module.Gtk.main_iteration()
+
+        # Select tab 2
+        self.app.tabs.set_current_page(2)
+        while app_module.Gtk.events_pending():
+            app_module.Gtk.main_iteration()
+
+        # Switch to tiled mode
+        self.app.view_button.set_active(True)
+        while app_module.Gtk.events_pending():
+            app_module.Gtk.main_iteration()
+
+        # Card 2 should have tile-focused class
+        s2_frame = s2["terminal"]._tile_frame
+        self.assertTrue(s2_frame.get_style_context().has_class("tile-focused"))
+        s0_frame = s0["terminal"]._tile_frame
+        self.assertFalse(s0_frame.get_style_context().has_class("tile-focused"))
+
 
 if __name__ == '__main__':
     unittest.main()
