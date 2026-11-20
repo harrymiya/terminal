@@ -2027,25 +2027,34 @@ private fun TerminalWorkspace(
             IconButton(onClick = onNewTask, modifier = Modifier.size(40.dp)) { Icon(Icons.Default.Add, "新建任务", tint = Mint) }
         }
         Divider(color = Edge)
-        val configuration = LocalConfiguration.current
-        val phoneTabModifier = if (sessions.size >= 2) {
-            val twoTabWidth = ((configuration.screenWidthDp - 22) / 2).coerceAtLeast(130).dp
-            Modifier.width(twoTabWidth)
-        } else {
-            Modifier
-        }
-        Row(Modifier.fillMaxWidth().height(45.dp).horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-            sessions.forEachIndexed { index, session ->
-                val selected = index == pager.currentPage
-                SessionTab(
-                    session = session,
-                    selected = selected,
-                    onClick = { scope.launch { pager.animateScrollToPage(index) } },
-                    onRename = { onRenameTask(session) },
-                    onClose = { onCloseTask(index) },
-                    modifier = phoneTabModifier,
-                )
-                Spacer(Modifier.width(6.dp))
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 10.dp, vertical = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            sessions.chunked(2).forEach { rowSessions ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    rowSessions.forEach { session ->
+                        val originalIndex = sessions.indexOf(session).coerceAtLeast(0)
+                        val selected = originalIndex == pager.currentPage
+                        SessionTab(
+                            session = session,
+                            selected = selected,
+                            onClick = { scope.launch { pager.animateScrollToPage(originalIndex) } },
+                            onRename = { onRenameTask(session) },
+                            onClose = { onCloseTask(originalIndex) },
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                    if (rowSessions.size == 1) {
+                        Spacer(Modifier.weight(1f))
+                    }
+                }
             }
         }
         HorizontalPager(
@@ -2102,7 +2111,7 @@ private fun SessionTab(
                 fontSize = 11.sp,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
-                modifier = if (modifier != Modifier) Modifier.weight(1f, fill = false) else Modifier,
+                modifier = if (modifier != Modifier) Modifier.weight(1f) else Modifier,
             )
             IconButton(onClick = onRename, modifier = Modifier.size(20.dp)) { Icon(Icons.Default.Edit, "编辑实例名称", tint = Muted, modifier = Modifier.size(12.dp)) }
             IconButton(onClick = onClose, modifier = Modifier.size(20.dp)) { Icon(Icons.Default.Close, null, tint = Muted, modifier = Modifier.size(13.dp)) }

@@ -1901,35 +1901,49 @@ class App(Gtk.Window):
             if terminal is active_terminal:
                 button.get_style_context().add_class("host-selected")
             button.set_tooltip_text(display_name)
+            btn_content = Gtk.Box(spacing=4)
+            btn_content.set_hexpand(True)
             title = Gtk.Label(label=display_name, xalign=0)
             title.set_single_line_mode(True)
             title.set_ellipsize(Pango.EllipsizeMode.END)
             title.set_width_chars(1)
             title.set_hexpand(True)
-            button.add(title)
-            button.connect("clicked", self.activate_instance_tab, terminal)
-            row.pack_start(button, True, True, 0)
-            self.instance_buttons.append((button, terminal))
+            btn_content.pack_start(title, True, True, 0)
+            btn_content.get_text = title.get_text
+            btn_content.get_ellipsize = title.get_ellipsize
+            btn_content.get_single_line_mode = title.get_single_line_mode
+            btn_content.get_line_wrap = title.get_line_wrap
+
             edit_btn = Gtk.Button.new_from_icon_name("document-edit-symbolic", Gtk.IconSize.MENU)
+            edit_btn.set_relief(Gtk.ReliefStyle.NONE)
             edit_btn.get_style_context().add_class("manage-button")
             edit_btn.set_tooltip_text("编辑实例名称")
             edit_btn.set_valign(Gtk.Align.CENTER)
             edit_btn.connect("clicked", lambda *_, s=session: self.prompt_edit_session_name(s))
-            row.pack_start(edit_btn, False, False, 0)
+            btn_content.pack_start(edit_btn, False, False, 0)
+
             image_btn = Gtk.Button.new_from_icon_name("image-x-generic-symbolic", Gtk.IconSize.MENU)
+            image_btn.set_relief(Gtk.ReliefStyle.NONE)
             image_btn.get_style_context().add_class("manage-button")
             image_btn.set_tooltip_text("发送图片给此终端的 Agent")
             image_btn.set_valign(Gtk.Align.CENTER)
             if session.get("image_button") is not None:
                 image_btn.connect("clicked", lambda *_, s=session: s["image_button"].clicked())
-            row.pack_start(image_btn, False, False, 0)
+            btn_content.pack_start(image_btn, False, False, 0)
+
             close_btn = Gtk.Button.new_from_icon_name("window-close-symbolic", Gtk.IconSize.MENU)
+            close_btn.set_relief(Gtk.ReliefStyle.NONE)
             close_btn.get_style_context().add_class("manage-button")
             close_btn.set_tooltip_text("关闭终端")
             close_btn.set_valign(Gtk.Align.CENTER)
             if session.get("close_button") is not None:
                 close_btn.connect("clicked", lambda *_, s=session: s["close_button"].clicked())
-            row.pack_start(close_btn, False, False, 0)
+            btn_content.pack_start(close_btn, False, False, 0)
+
+            button.add(btn_content)
+            button.connect("clicked", self.activate_instance_tab, terminal)
+            row.pack_start(button, True, True, 0)
+            self.instance_buttons.append((button, terminal))
             self.instances_list.pack_start(row, False, False, 0)
             self.scale_layout(row)
         self.instances_list.show_all()

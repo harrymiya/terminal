@@ -422,11 +422,13 @@ class DesktopThemeBuildTest(unittest.TestCase):
                 rows = app.instances_list.get_children()
                 self.assertEqual(len(rows), 1)
                 children = rows[0].get_children()
-                # children: tab_btn, edit_btn, img_btn, close_btn
-                self.assertEqual(len(children), 4)
-                tab_btn, edit_btn, img_btn, close_btn = children
+                self.assertEqual(len(children), 1)
+                tab_btn = children[0]
+                btn_children = tab_btn.get_child().get_children()
+                self.assertEqual(len(btn_children), 4)
+                title_lbl, edit_btn, img_btn, close_btn = btn_children
                 self.assertEqual(edit_btn.get_tooltip_text(), "编辑实例名称")
-                self.assertEqual(tab_btn.get_child().get_text(), "Renamed Instance")
+                self.assertEqual(title_lbl.get_text(), "Renamed Instance")
 
                 # Test incoming remote rename in refresh_host_shared updates name without loop sync PUT
                 sync_calls.clear()

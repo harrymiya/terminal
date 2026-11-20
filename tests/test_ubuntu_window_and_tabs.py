@@ -104,14 +104,16 @@ class UbuntuWindowAndTabsTest(unittest.TestCase):
         self.assertEqual(len(rows), 2)
 
         row_children = rows[0].get_children()
-        self.assertEqual(len(row_children), 4)
-        tab_btn, edit_btn, img_btn, close_btn = row_children
+        self.assertEqual(len(row_children), 1)
+        tab_btn = row_children[0]
+        btn_children = tab_btn.get_child().get_children()
+        self.assertEqual(len(btn_children), 4)
+        title_lbl, edit_btn, img_btn, close_btn = btn_children
         self.assertEqual(edit_btn.get_tooltip_text(), "编辑实例名称")
-        label = tab_btn.get_child()
-        self.assertEqual(label.get_text(), "very-long-workspace-name-for-full-display · Codex")
-        self.assertEqual(label.get_ellipsize(), Pango.EllipsizeMode.END)
-        self.assertTrue(label.get_single_line_mode())
-        self.assertFalse(label.get_line_wrap())
+        self.assertEqual(title_lbl.get_text(), "very-long-workspace-name-for-full-display · Codex")
+        self.assertEqual(title_lbl.get_ellipsize(), Pango.EllipsizeMode.END)
+        self.assertTrue(title_lbl.get_single_line_mode())
+        self.assertFalse(title_lbl.get_line_wrap())
 
         # Clicking second tab switches active page and updates highlight
         second_btn = rows[1].get_children()[0]
