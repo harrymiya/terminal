@@ -152,12 +152,18 @@ class SshTerminalController(
     fun resize(cols: Int, lines: Int, force: Boolean = false) {
         val nextColumns = cols.coerceIn(24, 200)
         val nextRows = lines.coerceIn(8, 100)
-        synchronized(writeLock) {
+        val connection = synchronized(writeLock) {
             if (!force && nextColumns == columns && nextRows == rows) return
             columns = nextColumns
             rows = nextRows
-            val connection = activeConnection.get() ?: return@synchronized
-            runCatching { connection.channel.setPtySize(columns, rows, 0, 0) }
+            activeConnection.get()
+        } ?: return
+        if (!running.get()) return
+        runCatching {
+            pageScrollExecutor.execute {
+                if (!running.get() || activeConnection.get() !== connection) return@execute
+                runCatching { connection.channel.setPtySize(nextColumns, nextRows, 0, 0) }
+            }
         }
     }
 

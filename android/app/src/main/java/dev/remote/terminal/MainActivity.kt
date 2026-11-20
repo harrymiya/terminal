@@ -27,6 +27,7 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -45,6 +46,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -89,6 +92,7 @@ import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.AlertDialog
 import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -127,6 +131,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.input.pointer.pointerInput
@@ -798,8 +803,9 @@ private fun RemoteTerminalApp(store: LocalStore) {
             runCatching { TerminalKeepAliveService.start(appContext) }
                 .onFailure { error -> scope.launch { snackbars.showSnackbar("后台 SSH 保活未能启动：${error.message ?: "系统拒绝启动服务"}") } }
             val same = sessions.count { it.task.host.id == host.id && it.task.directory.id == directory.id && it.task.agent.id == agent.id }
-            val task = restoredTask ?: TerminalTask(UUID.randomUUID().toString(), host, directory, agent,
-                if (same == 0) agent.name else "${agent.name} ${same + 1}")
+            val agentLabel = if (same == 0) agent.name else "${agent.name} ${same + 1}"
+            val displayName = if (directory.name.isNotBlank()) "${directory.name} · $agentLabel" else agentLabel
+            val task = restoredTask ?: TerminalTask(UUID.randomUUID().toString(), host, directory, agent, displayName)
             if (restoredTask == null) {
                 sessionStore.save(task)
                 if (!offlineMode) store.enqueueSessionSync(task, "PUT", SyncClient.sessionItem(task))
@@ -1239,7 +1245,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
             onDismiss = { deletingAgent = null },
         ) }
         closingSession?.let { session -> ConfirmDeleteDialog(
-            title = "关闭会话？", detail = "${session.task.displayName} 的 SSH 连接将断开。",
+            title = "关闭会话？", detail = "${sessionDisplayLabel(session.task)} 的 SSH 连接将断开。",
             confirmLabel = "关闭",
             onConfirm = { closeSession(session); closingSession = null },
             onDismiss = { closingSession = null },
@@ -1357,33 +1363,42 @@ private fun HomeScreen(
                     }
                 }
             } else {
-                Column(Modifier.fillMaxWidth().padding(bottom = 18.dp)) {
-                    displayedSessions.forEachIndexed { dispIndex, session ->
+                Column(
+                    Modifier.fillMaxWidth().padding(bottom = 18.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    displayedSessions.forEach { session ->
                         val originalIndex = sessions.indexOf(session).coerceAtLeast(0)
-                        Row(
-                            Modifier.fillMaxWidth().clickable { onResumeSession(originalIndex) }.padding(horizontal = 8.dp, vertical = 7.dp),
-                            verticalAlignment = Alignment.CenterVertically,
+                        Surface(
+                            onClick = { onResumeSession(originalIndex) },
+                            color = Panel,
+                            shape = RoundedCornerShape(12.dp),
+                            border = BorderStroke(1.dp, if (session.needsAction) Coral.copy(alpha = 0.7f) else Edge),
                         ) {
-                            Text(session.task.agent.icon, fontSize = 15.sp)
-                            Spacer(Modifier.width(9.dp))
-                            Column(Modifier.weight(1f)) {
-                                Text(session.task.displayName, color = White, fontSize = 12.sp, fontWeight = FontWeight.Medium, maxLines = 1)
-                                Text(
-                                    if (session.needsAction) "需要确认" else "${session.task.host.name} · ${session.task.directory.name}",
-                                    color = if (session.needsAction) Coral else Muted, fontSize = 10.sp, maxLines = 1,
-                                )
-                            }
-                            when {
-                                session.needsAction -> Text("!", color = Coral, fontWeight = FontWeight.Bold)
-                                session.unread -> Box(Modifier.size(7.dp).background(Blue, CircleShape))
-                            }
-                            if (codexExecutable(session.task.agent.command) != null || antigravityExecutable(session.task.agent.command) != null) {
-                                Column(Modifier.padding(start = 10.dp), horizontalAlignment = Alignment.End) {
-                                    HourlyQuotaLabel(session.quota)
+                            Row(
+                                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(session.task.agent.icon, fontSize = 15.sp)
+                                Spacer(Modifier.width(9.dp))
+                                Column(Modifier.weight(1f)) {
+                                    Text(sessionDisplayLabel(session.task), color = White, fontSize = 12.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Text(
+                                        if (session.needsAction) "需要确认" else "${session.task.host.name} · ${session.task.directory.name}",
+                                        color = if (session.needsAction) Coral else Muted, fontSize = 10.sp, maxLines = 1,
+                                    )
+                                }
+                                when {
+                                    session.needsAction -> Text("!", color = Coral, fontWeight = FontWeight.Bold)
+                                    session.unread -> Box(Modifier.size(7.dp).background(Blue, CircleShape))
+                                }
+                                if (codexExecutable(session.task.agent.command) != null || antigravityExecutable(session.task.agent.command) != null) {
+                                    Column(Modifier.padding(start = 10.dp), horizontalAlignment = Alignment.End) {
+                                        HourlyQuotaLabel(session.quota)
+                                    }
                                 }
                             }
                         }
-                        if (dispIndex < displayedSessions.lastIndex) Divider(color = Edge, thickness = 1.dp)
                     }
                 }
             }
@@ -1444,25 +1459,13 @@ private fun HomeScreen(
                 if (agents.isEmpty()) {
                     EmptyRow("还没有开发者", "添加一个启动命令，例如 codex 或 opencode。", onOpenAgents, "添加")
                 } else {
-                    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                        agents.forEach { agent ->
-                            val selected = selectedAgent?.id == agent.id
-                            Row(
-                                Modifier.fillMaxWidth().clip(RoundedCornerShape(9.dp))
-                                    .background(if (selected) PanelRaised else Color.Transparent)
-                                    .selectable(selected = selected, onClick = { onSelectAgent(agent) })
-                                    .padding(horizontal = 10.dp, vertical = 8.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            ) {
-                                Text("${agent.icon}  ${agent.name}", color = if (selected) White else Muted,
-                                    fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                                if (quotaExecutable(agent.command) != null) {
-                                    AgentQuotaDetails(quotaFor(host, agent))
-                                }
-                            }
-                        }
-                    }
+                    AgentSelectorGrid(
+                        agents = agents,
+                        selectedAgent = selectedAgent,
+                        host = host,
+                        quotaFor = quotaFor,
+                        onSelectAgent = onSelectAgent,
+                    )
                 }
                 Row(Modifier.fillMaxWidth().padding(top = 14.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                     SectionTitle("开发目录", "${host.directories.size} 个")
@@ -1722,6 +1725,9 @@ private fun TerminalWorkspace(
                 }
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("${currentSession.task.directory.icon}  ", color = Muted, fontSize = 10.sp, maxLines = 1)
+                    if (currentSession.task.directory.name.isNotBlank()) {
+                        Text("${currentSession.task.directory.name}  ·  ", color = White.copy(alpha = 0.78f), fontSize = 10.sp, maxLines = 1)
+                    }
                     Text(currentSession.task.directory.path, color = Muted, fontSize = 10.sp, maxLines = 1,
                         overflow = TextOverflow.StartEllipsis, modifier = Modifier.weight(1f, fill = false))
                     Text("  ·  ${currentSession.task.agent.name}", color = Muted, fontSize = 10.sp, maxLines = 1)
@@ -1737,7 +1743,13 @@ private fun TerminalWorkspace(
                 Spacer(Modifier.width(6.dp))
             }
         }
-        HorizontalPager(state = pager, modifier = Modifier.weight(1f), userScrollEnabled = false, key = { sessions.getOrNull(it)?.task?.id ?: "removed-$it" }) { page ->
+        HorizontalPager(
+            state = pager,
+            modifier = Modifier.weight(1f),
+            userScrollEnabled = false,
+            beyondViewportPageCount = (sessions.size - 1).coerceIn(0, 4),
+            key = { sessions.getOrNull(it)?.task?.id ?: "removed-$it" },
+        ) { page ->
             TerminalPage(sessions.getOrNull(page) ?: currentSession, page == pager.currentPage)
         }
     }
@@ -1767,7 +1779,7 @@ private fun SessionTab(session: TerminalSessionState, selected: Boolean, onClick
                 Text(remainingSeconds.toString(), color = color, fontWeight = FontWeight.Bold, fontSize = 11.sp)
             }
             if (supportsQuota) HourlyQuotaLabel(session.quota)
-            Text(session.task.displayName, color = if (selected) White else Muted, fontSize = 11.sp, maxLines = 1)
+            Text(sessionDisplayLabel(session.task), color = if (selected) White else Muted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             IconButton(onClick = onClose, modifier = Modifier.size(20.dp)) { Icon(Icons.Default.Close, null, tint = Muted, modifier = Modifier.size(13.dp)) }
         }
     }
@@ -1822,6 +1834,59 @@ private fun QuotaNumber(value: String, columns: Int, color: Color, modifier: Mod
         maxLines = 1, overflow = TextOverflow.Ellipsis)
 }
 
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun AgentSelectorGrid(
+    agents: List<AgentPreset>,
+    selectedAgent: AgentPreset?,
+    host: HostProfile,
+    quotaFor: (HostProfile, AgentPreset) -> List<QuotaWindow>?,
+    onSelectAgent: (AgentPreset) -> Unit,
+) {
+    FlowRow(
+        modifier = Modifier.fillMaxWidth().selectableGroup(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        agents.forEach { agent ->
+            val selected = selectedAgent?.id == agent.id
+            val supportsQuota = quotaExecutable(agent.command) != null
+            Surface(
+                color = if (selected) Color(0xFF20342F) else Panel,
+                shape = RoundedCornerShape(12.dp),
+                border = BorderStroke(
+                    width = if (selected) 1.5.dp else 1.dp,
+                    color = if (selected) Mint else Edge,
+                ),
+                modifier = Modifier
+                    .clip(RoundedCornerShape(12.dp))
+                    .selectable(
+                        selected = selected,
+                        role = Role.RadioButton,
+                        onClick = { onSelectAgent(agent) },
+                    ),
+            ) {
+                Column(
+                    modifier = Modifier.padding(horizontal = 11.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(5.dp),
+                ) {
+                    Text(
+                        "${agent.icon}  ${agent.name}",
+                        color = if (selected) White else Muted,
+                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                        fontSize = 12.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    if (supportsQuota) {
+                        AgentQuotaDetails(quotaFor(host, agent))
+                    }
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun AgentQuotaDetails(quota: List<QuotaWindow>?) {
     val hourly = quota.hourlyQuota()
@@ -1832,12 +1897,20 @@ private fun AgentQuotaDetails(quota: List<QuotaWindow>?) {
         remaining in 1L until 86_400L -> "<1"
         else -> (remaining / 86_400L).coerceAtLeast(0).toString()
     }
+    val resetText = if (remaining == null) "--" else "${reset}天"
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         QuotaBattery(quotaPeriod(hourly?.minutes ?: 300), hourly?.remainingPercent, compact = true)
         QuotaBattery("周", weekly?.remainingPercent, compact = true)
-        QuotaNumber(reset, columns = 2, color = Muted, modifier = Modifier.clearAndSetSemantics {
-            contentDescription = "周额度重置 ${if (remaining == null) "未知" else "${reset}天"}"
-        })
+        Text(
+            resetText,
+            color = Muted,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 10.sp,
+            maxLines = 1,
+            modifier = Modifier.clearAndSetSemantics {
+                contentDescription = "周额度重置 ${if (remaining == null) "未知" else "${reset}天"}"
+            },
+        )
     }
 }
 
@@ -1911,15 +1984,13 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
     }
     val viewportColumns = (terminalViewport.width / charWidthPx).toInt().coerceIn(24, 200)
     val viewportRows = (terminalViewport.height / lineHeightPx).toInt().coerceIn(8, 100)
-    // Keep the remote grid stable while the keyboard moves; resize it once the
-    // viewport has settled so tmux can redraw for the final dimensions.
-    LaunchedEffect(session.task.id, terminalViewport, keyboardVisible) {
+    // Keep the remote grid stable while the keyboard moves; only resize when
+    // the terminal character grid dimensions actually change.
+    LaunchedEffect(session.task.id, viewportColumns, viewportRows, terminalViewport.width > 0 && terminalViewport.height > 0) {
         if (terminalViewport.width > 0 && terminalViewport.height > 0) {
             kotlinx.coroutines.delay(220)
             session.buffer.resize(viewportColumns, viewportRows)
-            // Re-send the settled dimensions even if our cached dimensions match:
-            // the remote program may not have applied an earlier window change.
-            session.controller.resize(viewportColumns, viewportRows, force = true)
+            session.controller.resize(viewportColumns, viewportRows)
         }
     }
 
@@ -2317,6 +2388,14 @@ private fun TerminalPage(session: TerminalSessionState, isCurrent: Boolean) {
         }
         }
     }
+}
+
+private fun sessionDisplayLabel(task: TerminalTask): String {
+    val workspace = task.directory.name.trim()
+    val name = task.displayName.trim()
+    if (workspace.isEmpty()) return name
+    if (name.isEmpty()) return workspace
+    return if (name.contains(workspace)) name else "$workspace · $name"
 }
 
 private fun statusTint(status: String): Color = when {

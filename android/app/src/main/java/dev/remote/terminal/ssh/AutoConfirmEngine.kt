@@ -53,7 +53,7 @@ object AutoConfirmEngine {
 
     // 积极肯定的选项文字（包含 Yes, Allow, Approve, Proceed, Continue, Resume, Restore, 允许, 确认, 恢复 等）
     private val AffirmativeRegex = Regex(
-        "(?i)^(?:yes\b|allow\b|approve\b|proceed\b|continue\b|resume\b|restore\b|confirm\b|always\b|accept\b|apply\b|run\b|execute\b|ok\b|允许|批准|同意|继续|确认|总是|恢复|执行|确定|应用)"
+        """(?i)^(?:yes\b|allow\b|approve\b|proceed\b|continue\b|resume\b|restore\b|confirm\b|always\b|accept\b|apply\b|run\b|execute\b|ok\b|允许|批准|同意|继续|确认|总是|恢复|执行|确定|应用)"""
     )
 
     fun init(context: Context) {
@@ -161,7 +161,7 @@ object AutoConfirmEngine {
         if (continuation.isEmpty()) return null
         val label = (listOf(choice.groupValues[1]) + continuation)
             .joinToString(" ").replace(Regex("""\s+"""), " ").trim()
-        if (!ApproveOnce.matches(label)) return null
+        if (!ApproveOnce.matches(label) && !AffirmativeRegex.containsMatchIn(label)) return null
         return normalizeSignature((lines.subList(maxOf(0, selected - 2), selected) + label).joinToString("\n"))
     }
 
