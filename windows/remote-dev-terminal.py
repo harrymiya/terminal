@@ -631,6 +631,22 @@ class App(Gtk.Window):
                 min-height: 24px;
             }
             .manage-button:hover { background-image: none; background-color: #213548; border-color: #86dbb8; color: #ffffff; }
+            .host-button button, .host-button .manage-button, .instance-action-button {
+                background-image: none;
+                background-color: transparent;
+                border: none;
+                box-shadow: none;
+                padding: 1px 4px;
+                min-height: 20px;
+                border-radius: 4px;
+            }
+            .host-button button:hover, .host-button .manage-button:hover, .instance-action-button:hover {
+                background-image: none;
+                background-color: #213548;
+                border: none;
+                box-shadow: none;
+                color: #ffffff;
+            }
         '''
         self.apply_scale_css()
         Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), self.css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
@@ -1522,6 +1538,7 @@ class App(Gtk.Window):
             edit_btn = Gtk.Button.new_from_icon_name("document-edit-symbolic", Gtk.IconSize.MENU)
             edit_btn.set_relief(Gtk.ReliefStyle.NONE)
             edit_btn.get_style_context().add_class("manage-button")
+            edit_btn.get_style_context().add_class("instance-action-button")
             edit_btn.set_tooltip_text("编辑实例名称")
             edit_btn.set_valign(Gtk.Align.CENTER)
             edit_btn.connect("clicked", lambda *_, s=session: self.prompt_edit_session_name(s))
@@ -1530,6 +1547,7 @@ class App(Gtk.Window):
             image_btn = Gtk.Button.new_from_icon_name("image-x-generic-symbolic", Gtk.IconSize.MENU)
             image_btn.set_relief(Gtk.ReliefStyle.NONE)
             image_btn.get_style_context().add_class("manage-button")
+            image_btn.get_style_context().add_class("instance-action-button")
             image_btn.set_tooltip_text("发送图片给此终端的 Agent")
             image_btn.set_valign(Gtk.Align.CENTER)
             if session.get("image_button") is not None:
@@ -1539,6 +1557,7 @@ class App(Gtk.Window):
             close_btn = Gtk.Button.new_from_icon_name("window-close-symbolic", Gtk.IconSize.MENU)
             close_btn.set_relief(Gtk.ReliefStyle.NONE)
             close_btn.get_style_context().add_class("manage-button")
+            close_btn.get_style_context().add_class("instance-action-button")
             close_btn.set_tooltip_text("关闭终端")
             close_btn.set_valign(Gtk.Align.CENTER)
             if session.get("close_button") is not None:
