@@ -1682,7 +1682,7 @@ class App(Gtk.Window):
             img.set_from_icon_name(
                 "view-restore-symbolic" if floating else "window-restore-symbolic", Gtk.IconSize.MENU,
             )
-            img.set_pixel_size(12)
+            img.set_pixel_size(14)
         button.set_tooltip_text("还原到工作区" if floating else "悬浮终端")
 
     def make_session_header(self, session):
@@ -4025,7 +4025,7 @@ class App(Gtk.Window):
         minimize.set_tooltip_text("最小化到顶部栏")
         float_button = Gtk.Button.new_from_icon_name("window-restore-symbolic", Gtk.IconSize.MENU)
         if float_button.get_image() is not None:
-            float_button.get_image().set_pixel_size(12)
+            float_button.get_image().set_pixel_size(14)
         close = Gtk.Button.new_from_icon_name("window-close-symbolic", Gtk.IconSize.MENU)
         close.set_tooltip_text("关闭终端")
         actions_box = Gtk.Box(spacing=2)
