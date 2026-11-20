@@ -436,6 +436,18 @@ class LocalStore(context: Context) {
         preferences.edit().putInt("agent_quota_interval_seconds", seconds.coerceIn(15, 300)).apply()
     }
 
+    fun loadDeviceLayoutMode(): String = preferences.getString("device_layout_mode", "auto").orEmpty().ifBlank { "auto" }
+
+    fun saveDeviceLayoutMode(mode: String) {
+        preferences.edit().putString("device_layout_mode", mode.trim().lowercase()).apply()
+    }
+
+    fun loadTiledMode(): Boolean = preferences.getBoolean("tiled_mode", true)
+
+    fun saveTiledMode(tiled: Boolean) {
+        preferences.edit().putBoolean("tiled_mode", tiled).apply()
+    }
+
     fun isHostKeyTrusted(address: String, port: Int, fingerprint: String): Boolean =
         preferences.getStringSet("trusted_host_keys", emptySet()).orEmpty().contains("$address:$port|$fingerprint")
 

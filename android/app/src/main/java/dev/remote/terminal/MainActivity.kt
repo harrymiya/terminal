@@ -53,6 +53,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.ime
@@ -72,6 +73,11 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.animation.expandHorizontally
+import androidx.compose.animation.shrinkHorizontally
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
@@ -81,14 +87,18 @@ import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.Fullscreen
+import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.MoreHoriz
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material.icons.filled.Terminal
+import androidx.compose.material.icons.filled.ViewAgenda
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.AlertDialog
 import androidx.compose.foundation.selection.selectable
@@ -104,6 +114,7 @@ import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
@@ -114,6 +125,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
@@ -391,6 +403,15 @@ private fun RemoteTerminalApp(store: LocalStore) {
         var autoEnterEnabled by remember { mutableStateOf(store.loadAutoEnterEnabled()) }
         var autoEnterDelaySeconds by remember { mutableIntStateOf(store.loadAutoEnterDelaySeconds()) }
         var quotaIntervalSeconds by remember { mutableIntStateOf(store.loadQuotaIntervalSeconds()) }
+        var deviceLayoutMode by remember { mutableStateOf(store.loadDeviceLayoutMode()) }
+        var tiledMode by remember { mutableStateOf(store.loadTiledMode()) }
+        val configuration = LocalConfiguration.current
+        val isTablet = configuration.smallestScreenWidthDp >= 600 || configuration.screenWidthDp >= 840
+        val isPad = when (deviceLayoutMode) {
+            "pad" -> true
+            "phone" -> false
+            else -> isTablet
+        }
         AutoConfirmEngine.init(appContext)
         AutoConfirmEngine.globalEnabled = autoEnterEnabled
         AutoConfirmEngine.globalDelaySeconds = autoEnterDelaySeconds
@@ -1066,124 +1087,282 @@ private fun RemoteTerminalApp(store: LocalStore) {
             }
         }
 
-        BackHandler(enabled = route != AppRoute.HOME) {
-            if (route == AppRoute.TERMINAL) route = AppRoute.HOME else route = AppRoute.HOME
+        BackHandler(enabled = if (isPad) (route == AppRoute.SETTINGS || route == AppRoute.LOGIN) else (route != AppRoute.HOME)) {
+            route = AppRoute.HOME
         }
 
         Box(Modifier.fillMaxSize().background(Ink).statusBarsPadding().imePadding().navigationBarsPadding()) {
-            when (route) {
-                AppRoute.HOME -> HomeScreen(
-                    hosts = hosts, agents = agents, selectedHost = selectedHost, selectedAgent = selectedAgent,
-                    quotaFor = { host, agent -> quotaKey(host, agent.command)?.let(quotas::get) },
-                    sessions = sessions, onSelectHost = { selectHost(it) }, onSelectAgent = { agent ->
-                        selectedAgentId = agent.id
-                        selectedHost?.let { host ->
-                            store.saveHostSelectedAgent(host.id, agent.id)
-                            if (!offlineMode && syncUrl.isNotBlank() && syncToken.isNotBlank()) {
-                                scope.launch { runCatching { withContext(SyncClient.dispatcher) { SyncClient.updateCurrentAgent(host, agent.command) } } }
+            if (!isPad) {
+                when (route) {
+                    AppRoute.HOME -> HomeScreen(
+                        hosts = hosts, agents = agents, selectedHost = selectedHost, selectedAgent = selectedAgent,
+                        quotaFor = { host, agent -> quotaKey(host, agent.command)?.let(quotas::get) },
+                        sessions = sessions, onSelectHost = { selectHost(it) }, onSelectAgent = { agent ->
+                            selectedAgentId = agent.id
+                            selectedHost?.let { host ->
+                                store.saveHostSelectedAgent(host.id, agent.id)
+                                if (!offlineMode && syncUrl.isNotBlank() && syncToken.isNotBlank()) {
+                                    scope.launch { runCatching { withContext(SyncClient.dispatcher) { SyncClient.updateCurrentAgent(host, agent.command) } } }
+                                }
                             }
-                        }
-                    },
-                    syncLoading = syncLoading,
-                    onManage = { route = AppRoute.MANAGE }, onAddHost = { addingHost = true },
-                    onAddDirectory = { selectedHost?.let { editingDirectory = it.id to null } },
-                    onReorderDirectories = { host, ordered ->
-                        saveHosts(hosts.map { if (it.id == host.id) it.copy(directories = ordered) else it })
-                        syncWorkspaceList(host, ordered)
-                    },
-                    onOpenAgents = { route = AppRoute.AGENTS },
-                    onOpenSettings = { route = AppRoute.SETTINGS },
-                    onStartTask = { host, dir, agent -> openTask(host, dir, agent) },
-                    onResumeSession = { index -> activePage = index; sessions[index].unread = false; route = AppRoute.TERMINAL },
-                    onRenameSession = { session -> renamingSession = session; renamingName = session.task.displayName },
-                )
-                AppRoute.MANAGE -> ManageScreen(
-                    hosts = hosts, selectedHost = selectedHost,
-                    onBack = { route = AppRoute.HOME }, onSelectHost = { selectHost(it) }, onAddHost = { addingHost = true },
-                    onEditHost = { editingHost = it }, onDeleteHost = { deletingHost = it },
-                    onAddDirectory = { selectedHost?.let { editingDirectory = it.id to null } },
-                    onEditDirectory = { host, dir -> editingDirectory = host.id to dir },
-                    onDeleteDirectory = { host, dir -> deletingDirectory = host.id to dir },
-                )
-                AppRoute.AGENTS -> AgentsScreen(
-                    agents = agents, onBack = { route = AppRoute.HOME }, onAdd = { addingAgent = true },
-                    onEdit = { editingAgent = it }, onDelete = { deletingAgent = it },
-                    onMove = { index, offset ->
-                        val agent = agents.removeAt(index)
-                        agents.add(index + offset, agent)
-                        val ordered = agents.toList()
-                        store.saveAgents(ordered)
-                        selectedHost?.let { syncAgentList(it, ordered) }
-                    },
-                )
-                AppRoute.SETTINGS -> SettingsScreen(
-                    store = store,
-                    syncUrl = syncUrl,
-                    syncToken = syncToken,
-                    offlineMode = offlineMode,
-                    autoSyncEnabled = autoSyncEnabled,
-                    syncIntervalSeconds = syncIntervalSeconds,
-                    onOfflineModeChange = { enabled -> offlineMode = enabled; store.saveOfflineMode(enabled) },
-                    onAutoSyncEnabledChange = { enabled -> autoSyncEnabled = enabled; store.saveAutoSyncEnabled(enabled) },
-                    onSyncIntervalSecondsChange = { seconds -> syncIntervalSeconds = seconds; store.saveSyncIntervalSeconds(seconds) },
-                    syncUsername = store.loadSyncUsername(),
-                    onSyncSettingsChange = { url, token ->
-                        if (syncUrl != url) syncToken = ""
-                        syncUrl = url
-                        syncToken = token
-                        store.saveSyncSettings(url, token)
-                    },
-                    onLogin = { route = AppRoute.LOGIN },
-                    enabled = autoEnterEnabled,
-                    delaySeconds = autoEnterDelaySeconds,
-                    quotaIntervalSeconds = quotaIntervalSeconds,
-                    onQuotaIntervalChange = { seconds ->
-                        quotaIntervalSeconds = seconds
-                        store.saveQuotaIntervalSeconds(seconds)
-                    },
-                    onEnabledChange = { enabled ->
-                        autoEnterEnabled = enabled
-                        store.saveAutoEnterEnabled(enabled)
-                        AutoConfirmEngine.globalEnabled = enabled
-                        sessions.forEach { session ->
-                            if (enabled) session.resumeAutoEnter(autoEnterDelaySeconds, enabled)
-                            else session.cancelAutoEnter()
-                        }
-                    },
-                    onDelaySecondsChange = { seconds ->
-                        autoEnterDelaySeconds = seconds
-                        store.saveAutoEnterDelaySeconds(seconds)
-                        AutoConfirmEngine.globalDelaySeconds = seconds
-                        if (autoEnterEnabled) sessions.forEach { it.resumeAutoEnter(seconds, autoEnterEnabled) }
-                    },
-                    onBack = { route = if (!offlineMode && syncUrl.isNotBlank() && syncToken.isBlank()) AppRoute.LOGIN else AppRoute.HOME },
-                )
-                AppRoute.LOGIN -> SyncLoginScreen(
-                    syncUrl = syncUrl,
-                    initialUsername = store.loadSyncUsername(),
-                    initialPassword = store.loadSyncPassword(),
-                    onBack = { route = AppRoute.HOME },
-                    onOfflineMode = {
-                        offlineMode = true
-                        store.saveOfflineMode(true)
-                        route = AppRoute.HOME
-                    },
-                    onSuccess = { username, password, token, remember ->
-                        offlineMode = false
-                        store.saveOfflineMode(false)
-                        syncToken = token
-                        store.saveSyncSettings(syncUrl, token)
-                        store.saveSyncCredentials(username, password, remember)
-                        route = AppRoute.HOME
-                    },
-                )
-                AppRoute.TERMINAL -> TerminalWorkspace(
-                    sessions = sessions, initialIndex = activePage,
-                    onPageSelected = { index -> activePage = index; sessions.getOrNull(index)?.let { it.unread = false } },
-                    onBack = { route = AppRoute.HOME }, onNewTask = { route = AppRoute.HOME },
-                    onCloseTask = { index -> sessions.getOrNull(index)?.let { closingSession = it } },
-                    onRenameTask = { session -> renamingSession = session; renamingName = session.task.displayName },
-                )
+                        },
+                        syncLoading = syncLoading,
+                        onManage = { route = AppRoute.MANAGE }, onAddHost = { addingHost = true },
+                        onAddDirectory = { selectedHost?.let { editingDirectory = it.id to null } },
+                        onReorderDirectories = { host, ordered ->
+                            saveHosts(hosts.map { if (it.id == host.id) it.copy(directories = ordered) else it })
+                            syncWorkspaceList(host, ordered)
+                        },
+                        onOpenAgents = { route = AppRoute.AGENTS },
+                        onOpenSettings = { route = AppRoute.SETTINGS },
+                        onStartTask = { host, dir, agent -> openTask(host, dir, agent) },
+                        onResumeSession = { index -> activePage = index; sessions[index].unread = false; route = AppRoute.TERMINAL },
+                        onRenameSession = { session -> renamingSession = session; renamingName = session.task.displayName },
+                    )
+                    AppRoute.MANAGE -> ManageScreen(
+                        hosts = hosts, selectedHost = selectedHost,
+                        onBack = { route = AppRoute.HOME }, onSelectHost = { selectHost(it) }, onAddHost = { addingHost = true },
+                        onEditHost = { editingHost = it }, onDeleteHost = { deletingHost = it },
+                        onAddDirectory = { selectedHost?.let { editingDirectory = it.id to null } },
+                        onEditDirectory = { host, dir -> editingDirectory = host.id to dir },
+                        onDeleteDirectory = { host, dir -> deletingDirectory = host.id to dir },
+                    )
+                    AppRoute.AGENTS -> AgentsScreen(
+                        agents = agents, onBack = { route = AppRoute.HOME }, onAdd = { addingAgent = true },
+                        onEdit = { editingAgent = it }, onDelete = { deletingAgent = it },
+                        onMove = { index, offset ->
+                            val agent = agents.removeAt(index)
+                            agents.add(index + offset, agent)
+                            val ordered = agents.toList()
+                            store.saveAgents(ordered)
+                            selectedHost?.let { syncAgentList(it, ordered) }
+                        },
+                    )
+                    AppRoute.SETTINGS -> SettingsScreen(
+                        store = store,
+                        syncUrl = syncUrl,
+                        syncToken = syncToken,
+                        offlineMode = offlineMode,
+                        autoSyncEnabled = autoSyncEnabled,
+                        syncIntervalSeconds = syncIntervalSeconds,
+                        onOfflineModeChange = { enabled -> offlineMode = enabled; store.saveOfflineMode(enabled) },
+                        onAutoSyncEnabledChange = { enabled -> autoSyncEnabled = enabled; store.saveAutoSyncEnabled(enabled) },
+                        onSyncIntervalSecondsChange = { seconds -> syncIntervalSeconds = seconds; store.saveSyncIntervalSeconds(seconds) },
+                        syncUsername = store.loadSyncUsername(),
+                        onSyncSettingsChange = { url, token ->
+                            if (syncUrl != url) syncToken = ""
+                            syncUrl = url
+                            syncToken = token
+                            store.saveSyncSettings(url, token)
+                        },
+                        onLogin = { route = AppRoute.LOGIN },
+                        enabled = autoEnterEnabled,
+                        delaySeconds = autoEnterDelaySeconds,
+                        quotaIntervalSeconds = quotaIntervalSeconds,
+                        onQuotaIntervalChange = { seconds ->
+                            quotaIntervalSeconds = seconds
+                            store.saveQuotaIntervalSeconds(seconds)
+                        },
+                        onEnabledChange = { enabled ->
+                            autoEnterEnabled = enabled
+                            store.saveAutoEnterEnabled(enabled)
+                            AutoConfirmEngine.globalEnabled = enabled
+                            sessions.forEach { session ->
+                                if (enabled) session.resumeAutoEnter(autoEnterDelaySeconds, enabled)
+                                else session.cancelAutoEnter()
+                            }
+                        },
+                        onDelaySecondsChange = { seconds ->
+                            autoEnterDelaySeconds = seconds
+                            store.saveAutoEnterDelaySeconds(seconds)
+                            AutoConfirmEngine.globalDelaySeconds = seconds
+                            if (autoEnterEnabled) sessions.forEach { it.resumeAutoEnter(seconds, autoEnterEnabled) }
+                        },
+                        deviceLayoutMode = deviceLayoutMode,
+                        onDeviceLayoutModeChange = { mode ->
+                            deviceLayoutMode = mode
+                            store.saveDeviceLayoutMode(mode)
+                        },
+                        isTablet = isTablet,
+                        onBack = { route = if (!offlineMode && syncUrl.isNotBlank() && syncToken.isBlank()) AppRoute.LOGIN else AppRoute.HOME },
+                    )
+                    AppRoute.LOGIN -> SyncLoginScreen(
+                        syncUrl = syncUrl,
+                        initialUsername = store.loadSyncUsername(),
+                        initialPassword = store.loadSyncPassword(),
+                        onBack = { route = AppRoute.HOME },
+                        onOfflineMode = {
+                            offlineMode = true
+                            store.saveOfflineMode(true)
+                            route = AppRoute.HOME
+                        },
+                        onSuccess = { username, password, token, remember ->
+                            offlineMode = false
+                            store.saveOfflineMode(false)
+                            syncToken = token
+                            store.saveSyncSettings(syncUrl, token)
+                            store.saveSyncCredentials(username, password, remember)
+                            route = AppRoute.HOME
+                        },
+                    )
+                    AppRoute.TERMINAL -> TerminalWorkspace(
+                        sessions = sessions, initialIndex = activePage,
+                        onPageSelected = { index -> activePage = index; sessions.getOrNull(index)?.let { it.unread = false } },
+                        onBack = { route = AppRoute.HOME }, onNewTask = { route = AppRoute.HOME },
+                        onCloseTask = { index -> sessions.getOrNull(index)?.let { closingSession = it } },
+                        onRenameTask = { session -> renamingSession = session; renamingName = session.task.displayName },
+                    )
+                }
+            } else {
+                when (route) {
+                    AppRoute.SETTINGS -> SettingsScreen(
+                        store = store,
+                        syncUrl = syncUrl,
+                        syncToken = syncToken,
+                        offlineMode = offlineMode,
+                        autoSyncEnabled = autoSyncEnabled,
+                        syncIntervalSeconds = syncIntervalSeconds,
+                        onOfflineModeChange = { enabled -> offlineMode = enabled; store.saveOfflineMode(enabled) },
+                        onAutoSyncEnabledChange = { enabled -> autoSyncEnabled = enabled; store.saveAutoSyncEnabled(enabled) },
+                        onSyncIntervalSecondsChange = { seconds -> syncIntervalSeconds = seconds; store.saveSyncIntervalSeconds(seconds) },
+                        syncUsername = store.loadSyncUsername(),
+                        onSyncSettingsChange = { url, token ->
+                            if (syncUrl != url) syncToken = ""
+                            syncUrl = url
+                            syncToken = token
+                            store.saveSyncSettings(url, token)
+                        },
+                        onLogin = { route = AppRoute.LOGIN },
+                        enabled = autoEnterEnabled,
+                        delaySeconds = autoEnterDelaySeconds,
+                        quotaIntervalSeconds = quotaIntervalSeconds,
+                        onQuotaIntervalChange = { seconds ->
+                            quotaIntervalSeconds = seconds
+                            store.saveQuotaIntervalSeconds(seconds)
+                        },
+                        onEnabledChange = { enabled ->
+                            autoEnterEnabled = enabled
+                            store.saveAutoEnterEnabled(enabled)
+                            AutoConfirmEngine.globalEnabled = enabled
+                            sessions.forEach { session ->
+                                if (enabled) session.resumeAutoEnter(autoEnterDelaySeconds, enabled)
+                                else session.cancelAutoEnter()
+                            }
+                        },
+                        onDelaySecondsChange = { seconds ->
+                            autoEnterDelaySeconds = seconds
+                            store.saveAutoEnterDelaySeconds(seconds)
+                            AutoConfirmEngine.globalDelaySeconds = seconds
+                            if (autoEnterEnabled) sessions.forEach { it.resumeAutoEnter(seconds, autoEnterEnabled) }
+                        },
+                        deviceLayoutMode = deviceLayoutMode,
+                        onDeviceLayoutModeChange = { mode ->
+                            deviceLayoutMode = mode
+                            store.saveDeviceLayoutMode(mode)
+                        },
+                        isTablet = isTablet,
+                        onBack = { route = if (!offlineMode && syncUrl.isNotBlank() && syncToken.isBlank()) AppRoute.LOGIN else AppRoute.HOME },
+                    )
+                    AppRoute.LOGIN -> SyncLoginScreen(
+                        syncUrl = syncUrl,
+                        initialUsername = store.loadSyncUsername(),
+                        initialPassword = store.loadSyncPassword(),
+                        onBack = { route = AppRoute.HOME },
+                        onOfflineMode = {
+                            offlineMode = true
+                            store.saveOfflineMode(true)
+                            route = AppRoute.HOME
+                        },
+                        onSuccess = { username, password, token, remember ->
+                            offlineMode = false
+                            store.saveOfflineMode(false)
+                            syncToken = token
+                            store.saveSyncSettings(syncUrl, token)
+                            store.saveSyncCredentials(username, password, remember)
+                            route = AppRoute.HOME
+                        },
+                    )
+                    else -> PadWorkspace(
+                        hosts = hosts,
+                        agents = agents,
+                        sessions = sessions,
+                        selectedHost = selectedHost,
+                        selectedAgent = selectedAgent,
+                        activePage = activePage,
+                        tiled = tiledMode,
+                        onToggleTiled = { tiled ->
+                            tiledMode = tiled
+                            store.saveTiledMode(tiled)
+                        },
+                        onSelectHost = { selectHost(it) },
+                        onSelectAgent = { agent ->
+                            selectedAgentId = agent.id
+                            selectedHost?.let { host ->
+                                store.saveHostSelectedAgent(host.id, agent.id)
+                                if (!offlineMode && syncUrl.isNotBlank() && syncToken.isNotBlank()) {
+                                    scope.launch { runCatching { withContext(SyncClient.dispatcher) { SyncClient.updateCurrentAgent(host, agent.command) } } }
+                                }
+                            }
+                        },
+                        onSelectSession = { index ->
+                            activePage = index
+                            sessions.getOrNull(index)?.let { it.unread = false }
+                        },
+                        onStartTask = { host, dir, agent -> openTask(host, dir, agent) },
+                        onCloseSession = { session -> closingSession = session },
+                        onRenameSession = { session -> renamingSession = session; renamingName = session.task.displayName },
+                        onOpenSettings = { route = AppRoute.SETTINGS },
+                        onRefresh = {
+                            scope.launch {
+                                syncLoading = true
+                                selectedHost?.let { refreshShared(it) }
+                                syncLoading = false
+                            }
+                        },
+                        syncLoading = syncLoading,
+                        offlineMode = offlineMode,
+                        autoSyncEnabled = autoSyncEnabled,
+                        quotaFor = { host, agent -> quotaKey(host, agent.command)?.let(quotas::get) },
+                        onAddHost = { addingHost = true },
+                        onEditHost = { editingHost = it },
+                        onDeleteHost = { deletingHost = it },
+                        onMoveHost = { from, offset ->
+                            val to = (from + offset).coerceIn(0, hosts.lastIndex)
+                            if (from != to) {
+                                val item = hosts.removeAt(from)
+                                hosts.add(to, item)
+                                saveHosts(hosts.toList())
+                            }
+                        },
+                        onAddDirectory = { host -> editingDirectory = host.id to null },
+                        onEditDirectory = { host, dir -> editingDirectory = host.id to dir },
+                        onDeleteDirectory = { host, dir -> deletingDirectory = host.id to dir },
+                        onMoveDirectory = { host, from, offset ->
+                            val dirs = host.directories.toMutableList()
+                            val to = (from + offset).coerceIn(0, dirs.lastIndex)
+                            if (from != to) {
+                                val item = dirs.removeAt(from)
+                                dirs.add(to, item)
+                                val updatedHosts = hosts.map { if (it.id == host.id) it.copy(directories = dirs) else it }
+                                saveHosts(updatedHosts)
+                                syncWorkspaceList(host, dirs)
+                            }
+                        },
+                        onAddAgent = { addingAgent = true },
+                        onEditAgent = { editingAgent = it },
+                        onDeleteAgent = { deletingAgent = it },
+                        onMoveAgent = { from, offset ->
+                            val to = (from + offset).coerceIn(0, agents.lastIndex)
+                            if (from != to) {
+                                val item = agents.removeAt(from)
+                                agents.add(to, item)
+                                val ordered = agents.toList()
+                                store.saveAgents(ordered)
+                                selectedHost?.let { syncAgentList(it, ordered) }
+                            }
+                        },
+                    )
+                }
             }
             SnackbarHost(snackbars, modifier = Modifier.align(Alignment.BottomCenter).padding(horizontal = 14.dp, vertical = 8.dp))
         }
@@ -2530,6 +2709,842 @@ private fun SyncLoginScreen(
 }
 
 @Composable
+private fun TerminalTileCard(
+    session: TerminalSessionState,
+    isCurrent: Boolean,
+    onSelect: () -> Unit,
+    onRename: () -> Unit,
+    onClose: () -> Unit,
+    onMaximize: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier
+            .clip(RoundedCornerShape(8.dp))
+            .background(Panel)
+            .border(if (isCurrent) BorderStroke(1.5.dp, Mint) else BorderStroke(1.dp, Edge), RoundedCornerShape(8.dp))
+    ) {
+        // Card Header
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(38.dp)
+                .background(PanelRaised)
+                .padding(horizontal = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                Modifier
+                    .size(8.dp)
+                    .clip(CircleShape)
+                    .background(statusTint(session.status))
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(
+                text = sessionDisplayLabel(session.task),
+                color = White,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false)
+            )
+            IconButton(onClick = onRename, modifier = Modifier.size(26.dp)) {
+                Icon(Icons.Default.Edit, contentDescription = "编辑实例名称", tint = Muted, modifier = Modifier.size(13.dp))
+            }
+            Spacer(Modifier.width(4.dp))
+            HourlyQuotaLabel(quota = session.quota)
+            Spacer(Modifier.weight(1f))
+            IconButton(onClick = onMaximize, modifier = Modifier.size(26.dp)) {
+                Icon(Icons.Default.Fullscreen, contentDescription = "最大化标签模式", tint = Muted, modifier = Modifier.size(16.dp))
+            }
+            Spacer(Modifier.width(2.dp))
+            IconButton(onClick = onClose, modifier = Modifier.size(26.dp)) {
+                Icon(Icons.Default.Close, contentDescription = "关闭会话", tint = Muted, modifier = Modifier.size(14.dp))
+            }
+        }
+        Divider(color = Edge)
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .clickable(
+                    interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                    indication = null,
+                    onClick = onSelect
+                )
+        ) {
+            TerminalPage(session = session, isCurrent = isCurrent)
+        }
+    }
+}
+
+@Composable
+private fun PadSidebar(
+    modifier: Modifier = Modifier,
+    hosts: List<HostProfile>,
+    agents: List<AgentPreset>,
+    sessions: List<TerminalSessionState>,
+    selectedHost: HostProfile?,
+    selectedAgent: AgentPreset?,
+    activePage: Int,
+    onSelectHost: (HostProfile) -> Unit,
+    onSelectAgent: (AgentPreset) -> Unit,
+    onSelectSession: (Int) -> Unit,
+    onStartTask: (HostProfile, ProjectDirectory, AgentPreset) -> Unit,
+    onCloseSession: (TerminalSessionState) -> Unit,
+    onRenameSession: (TerminalSessionState) -> Unit,
+    onOpenSettings: () -> Unit,
+    onRefresh: () -> Unit,
+    syncLoading: Boolean,
+    offlineMode: Boolean,
+    autoSyncEnabled: Boolean,
+    quotaFor: (HostProfile, AgentPreset) -> List<QuotaWindow>?,
+    onAddHost: () -> Unit,
+    onEditHost: (HostProfile) -> Unit,
+    onDeleteHost: (HostProfile) -> Unit,
+    onMoveHost: (Int, Int) -> Unit,
+    onAddDirectory: (HostProfile) -> Unit,
+    onEditDirectory: (HostProfile, ProjectDirectory) -> Unit,
+    onDeleteDirectory: (HostProfile, ProjectDirectory) -> Unit,
+    onMoveDirectory: (HostProfile, Int, Int) -> Unit,
+    onAddAgent: () -> Unit,
+    onEditAgent: (AgentPreset) -> Unit,
+    onDeleteAgent: (AgentPreset) -> Unit,
+    onMoveAgent: (Int, Int) -> Unit,
+) {
+    var editMode by rememberSaveable { mutableStateOf(false) }
+    Column(
+        modifier = modifier
+            .background(Panel)
+            .padding(horizontal = 14.dp, vertical = 10.dp)
+            .verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        // Brand & Action Row
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "REMOTE DEV",
+                    color = Mint,
+                    fontSize = 17.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 0.5.sp
+                )
+                Text(
+                    text = "远程开发工作台 · v${BuildConfig.VERSION_NAME}",
+                    color = Muted,
+                    fontSize = 11.sp
+                )
+            }
+            // Edit toggle capsule
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(if (editMode) Mint else PanelRaised)
+                    .border(1.dp, if (editMode) Mint else Edge, RoundedCornerShape(12.dp))
+                    .clickable { editMode = !editMode }
+                    .padding(horizontal = 9.dp, vertical = 5.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = if (editMode) "完成" else "编辑",
+                    color = if (editMode) Ink else White,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+            Spacer(Modifier.width(2.dp))
+            IconButton(onClick = onRefresh, modifier = Modifier.size(32.dp)) {
+                if (syncLoading) {
+                    CircularProgressIndicator(modifier = Modifier.size(16.dp), color = Mint, strokeWidth = 2.dp)
+                } else {
+                    Icon(Icons.Default.Refresh, contentDescription = "刷新", tint = White, modifier = Modifier.size(18.dp))
+                }
+            }
+            IconButton(onClick = onOpenSettings, modifier = Modifier.size(32.dp)) {
+                Icon(Icons.Default.Settings, contentDescription = "设置", tint = White, modifier = Modifier.size(18.dp))
+            }
+        }
+
+        // Section: 主机
+        SectionTitle(title = "主机", trailing = if (hosts.isEmpty()) "" else "${hosts.size} 台")
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            hosts.forEachIndexed { index, host ->
+                val isSelected = host.id == selectedHost?.id
+                if (!editMode) {
+                    Surface(
+                        onClick = { onSelectHost(host) },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(8.dp),
+                        color = if (isSelected) Color(0xFF162A24) else PanelRaised,
+                        border = BorderStroke(1.dp, if (isSelected) Mint else Edge)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(host.icon.ifBlank { "⌘" }, fontSize = 15.sp)
+                            Spacer(Modifier.width(8.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(host.name, color = White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                                    Spacer(Modifier.width(6.dp))
+                                    Box(
+                                        Modifier
+                                            .size(7.dp)
+                                            .clip(CircleShape)
+                                            .background(if (host.syncFingerprint.isNotBlank()) Mint else Color(0xFFFFB86C))
+                                    )
+                                }
+                                Text("${host.address}:${host.port}", color = Muted, fontSize = 10.sp, maxLines = 1)
+                            }
+                        }
+                    }
+                } else {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(PanelRaised)
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(host.name, color = White, fontSize = 13.sp, modifier = Modifier.weight(1f), maxLines = 1)
+                        if (index > 0) {
+                            IconButton(onClick = { onMoveHost(index, -1) }, modifier = Modifier.size(28.dp)) {
+                                Text("↑", color = White, fontSize = 14.sp)
+                            }
+                        }
+                        if (index < hosts.lastIndex) {
+                            IconButton(onClick = { onMoveHost(index, 1) }, modifier = Modifier.size(28.dp)) {
+                                Text("↓", color = White, fontSize = 14.sp)
+                            }
+                        }
+                        IconButton(onClick = { onEditHost(host) }, modifier = Modifier.size(28.dp)) {
+                            Icon(Icons.Default.Edit, contentDescription = "编辑", tint = White, modifier = Modifier.size(15.dp))
+                        }
+                        IconButton(onClick = { onDeleteHost(host) }, modifier = Modifier.size(28.dp)) {
+                            Icon(Icons.Default.Close, contentDescription = "删除", tint = Coral, modifier = Modifier.size(15.dp))
+                        }
+                    }
+                }
+            }
+            if (editMode) {
+                OutlinedButton(
+                    onClick = onAddHost,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(8.dp),
+                    border = BorderStroke(1.dp, Edge)
+                ) {
+                    Text("＋ 主机", color = Mint, fontSize = 12.sp)
+                }
+            }
+            Text(
+                text = if (offlineMode) "离线模式（仅本机）" else if (autoSyncEnabled) "自动同步已开启" else "手动同步",
+                color = Muted,
+                fontSize = 10.sp
+            )
+        }
+
+        // Section: 工作实例 (if sessions exist)
+        if (sessions.isNotEmpty()) {
+            SectionTitle(title = "工作实例", trailing = "${sessions.size} 个")
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                sessions.forEachIndexed { index, session ->
+                    val isSelected = index == activePage
+                    Surface(
+                        onClick = { onSelectSession(index) },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(8.dp),
+                        color = if (isSelected) Color(0xFF162A24) else PanelRaised,
+                        border = BorderStroke(1.dp, if (isSelected) Mint else Edge)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                Modifier
+                                    .size(8.dp)
+                                    .clip(CircleShape)
+                                    .background(statusTint(session.status))
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                text = sessionDisplayLabel(session.task),
+                                color = White,
+                                fontSize = 12.sp,
+                                fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f)
+                            )
+                            IconButton(onClick = { onRenameSession(session) }, modifier = Modifier.size(26.dp)) {
+                                Icon(Icons.Default.Edit, contentDescription = "修改名称", tint = Muted, modifier = Modifier.size(14.dp))
+                            }
+                            IconButton(onClick = { onCloseSession(session) }, modifier = Modifier.size(26.dp)) {
+                                Icon(Icons.Default.Close, contentDescription = "关闭", tint = Muted, modifier = Modifier.size(14.dp))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Section: 开发者
+        SectionTitle(title = "开发者", trailing = if (agents.isEmpty()) "" else "${agents.size} 个")
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            agents.forEachIndexed { index, agent ->
+                val isSelected = agent.id == selectedAgent?.id
+                if (!editMode) {
+                    Surface(
+                        onClick = { onSelectAgent(agent) },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(8.dp),
+                        color = if (isSelected) Color(0xFF162A24) else PanelRaised,
+                        border = BorderStroke(1.dp, if (isSelected) Mint else Edge)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(agent.name, color = White, fontSize = 13.sp, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
+                            selectedHost?.let { host ->
+                                HourlyQuotaLabel(quota = quotaFor(host, agent))
+                            }
+                        }
+                    }
+                } else {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(PanelRaised)
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(agent.name, color = White, fontSize = 13.sp, modifier = Modifier.weight(1f), maxLines = 1)
+                        if (index > 0) {
+                            IconButton(onClick = { onMoveAgent(index, -1) }, modifier = Modifier.size(28.dp)) {
+                                Text("↑", color = White, fontSize = 14.sp)
+                            }
+                        }
+                        if (index < agents.lastIndex) {
+                            IconButton(onClick = { onMoveAgent(index, 1) }, modifier = Modifier.size(28.dp)) {
+                                Text("↓", color = White, fontSize = 14.sp)
+                            }
+                        }
+                        IconButton(onClick = { onEditAgent(agent) }, modifier = Modifier.size(28.dp)) {
+                            Icon(Icons.Default.Edit, contentDescription = "编辑", tint = White, modifier = Modifier.size(15.dp))
+                        }
+                        IconButton(onClick = { onDeleteAgent(agent) }, modifier = Modifier.size(28.dp)) {
+                            Icon(Icons.Default.Close, contentDescription = "删除", tint = Coral, modifier = Modifier.size(15.dp))
+                        }
+                    }
+                }
+            }
+            if (editMode) {
+                OutlinedButton(
+                    onClick = onAddAgent,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(8.dp),
+                    border = BorderStroke(1.dp, Edge)
+                ) {
+                    Text("＋ 开发者", color = Mint, fontSize = 12.sp)
+                }
+            }
+        }
+
+        // Section: 工作区 · 点击直达
+        val directories = selectedHost?.directories.orEmpty()
+        SectionTitle(title = "工作区 · 点击直达", trailing = if (directories.isEmpty()) "" else "${directories.size} 个")
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            if (directories.isEmpty()) {
+                Surface(
+                    onClick = { selectedHost?.let { onAddDirectory(it) } },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(8.dp),
+                    color = PanelRaised,
+                    border = BorderStroke(1.dp, Edge)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        Text("＋ 添加开发目录", color = Mint, fontSize = 12.sp)
+                    }
+                }
+            } else {
+                directories.forEachIndexed { index, dir ->
+                    if (!editMode) {
+                        Surface(
+                            onClick = {
+                                val runningIndex = sessions.indexOfFirst { it.task.host.id == selectedHost?.id && it.task.directory.id == dir.id }
+                                if (runningIndex >= 0) {
+                                    onSelectSession(runningIndex)
+                                } else if (selectedHost != null && selectedAgent != null) {
+                                    onStartTask(selectedHost, dir, selectedAgent)
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(8.dp),
+                            color = PanelRaised,
+                            border = BorderStroke(1.dp, Edge)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(dir.icon.ifBlank { "📁" }, fontSize = 15.sp)
+                                Spacer(Modifier.width(8.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(dir.name, color = White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                                    Text(dir.path, color = Muted, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.StartEllipsis)
+                                }
+                            }
+                        }
+                    } else {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(PanelRaised)
+                                .padding(horizontal = 8.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(dir.name, color = White, fontSize = 13.sp, maxLines = 1)
+                                Text(dir.path, color = Muted, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.StartEllipsis)
+                            }
+                            if (index > 0) {
+                                IconButton(onClick = { selectedHost?.let { onMoveDirectory(it, index, -1) } }, modifier = Modifier.size(28.dp)) {
+                                    Text("↑", color = White, fontSize = 14.sp)
+                                }
+                            }
+                            if (index < directories.lastIndex) {
+                                IconButton(onClick = { selectedHost?.let { onMoveDirectory(it, index, 1) } }, modifier = Modifier.size(28.dp)) {
+                                    Text("↓", color = White, fontSize = 14.sp)
+                                }
+                            }
+                            IconButton(onClick = { selectedHost?.let { onEditDirectory(it, dir) } }, modifier = Modifier.size(28.dp)) {
+                                Icon(Icons.Default.Edit, contentDescription = "编辑", tint = White, modifier = Modifier.size(15.dp))
+                            }
+                            IconButton(onClick = { selectedHost?.let { onDeleteDirectory(it, dir) } }, modifier = Modifier.size(28.dp)) {
+                                Icon(Icons.Default.Close, contentDescription = "删除", tint = Coral, modifier = Modifier.size(15.dp))
+                            }
+                        }
+                    }
+                }
+                if (editMode) {
+                    OutlinedButton(
+                        onClick = { selectedHost?.let { onAddDirectory(it) } },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(8.dp),
+                        border = BorderStroke(1.dp, Edge)
+                    ) {
+                        Text("＋ 工作区", color = Mint, fontSize = 12.sp)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PadWorkspaceMain(
+    modifier: Modifier = Modifier,
+    sessions: List<TerminalSessionState>,
+    activePage: Int,
+    tiled: Boolean,
+    sidebarVisible: Boolean,
+    onToggleSidebar: () -> Unit,
+    onToggleTiled: (Boolean) -> Unit,
+    onSelectSession: (Int) -> Unit,
+    onCloseSession: (TerminalSessionState) -> Unit,
+    onRenameSession: (TerminalSessionState) -> Unit,
+    selectedHost: HostProfile?,
+    selectedAgent: AgentPreset?,
+    onStartTask: (HostProfile, ProjectDirectory, AgentPreset) -> Unit,
+) {
+    Column(modifier = modifier.background(Ink)) {
+        // Toolbar
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(48.dp)
+                .background(Panel)
+                .padding(horizontal = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = onToggleSidebar, modifier = Modifier.size(36.dp)) {
+                Icon(Icons.Default.Menu, contentDescription = "切换侧边栏", tint = if (sidebarVisible) Mint else White)
+            }
+            Spacer(Modifier.width(6.dp))
+            Text(
+                text = "工作区",
+                color = White,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = "${sessions.size} / 8",
+                color = Muted,
+                fontSize = 12.sp
+            )
+            Spacer(Modifier.weight(1f))
+            // Capsule Mode Switcher: [ 平铺模式 | 标签模式 ]
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(PanelRaised)
+                    .border(1.dp, Edge, RoundedCornerShape(16.dp))
+                    .padding(2.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Tiled Mode Pill
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(if (tiled) Mint else Color.Transparent)
+                        .clickable { onToggleTiled(true) }
+                        .padding(horizontal = 10.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Icon(Icons.Default.GridView, contentDescription = null, tint = if (tiled) Ink else Muted, modifier = Modifier.size(13.dp))
+                    Text("平铺", color = if (tiled) Ink else Muted, fontSize = 11.sp, fontWeight = if (tiled) FontWeight.Bold else FontWeight.Normal)
+                }
+                // Tab Mode Pill
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(if (!tiled) Mint else Color.Transparent)
+                        .clickable { onToggleTiled(false) }
+                        .padding(horizontal = 10.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Icon(Icons.Default.ViewAgenda, contentDescription = null, tint = if (!tiled) Ink else Muted, modifier = Modifier.size(13.dp))
+                    Text("标签", color = if (!tiled) Ink else Muted, fontSize = 11.sp, fontWeight = if (!tiled) FontWeight.Bold else FontWeight.Normal)
+                }
+            }
+        }
+        Divider(color = Edge)
+
+        // Body Content
+        if (sessions.isEmpty()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(24.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Icon(Icons.Default.Terminal, contentDescription = null, tint = Edge, modifier = Modifier.size(64.dp))
+                    Text("暂无活动终端", color = White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "从左侧工作区列表中点击项目目录，即可直接启动远程终端并连接 AI Agent。",
+                        color = Muted,
+                        fontSize = 13.sp,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                        modifier = Modifier.widthIn(max = 400.dp)
+                    )
+                    val dirs = selectedHost?.directories.orEmpty()
+                    if (selectedHost != null && selectedAgent != null && dirs.isNotEmpty()) {
+                        Spacer(Modifier.height(8.dp))
+                        Text("快捷启动：", color = White.copy(alpha = 0.8f), fontSize = 12.sp)
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.horizontalScroll(rememberScrollState())
+                        ) {
+                            dirs.take(4).forEach { dir ->
+                                OutlinedButton(
+                                    onClick = { onStartTask(selectedHost, dir, selectedAgent) },
+                                    shape = RoundedCornerShape(8.dp),
+                                    border = BorderStroke(1.dp, Mint)
+                                ) {
+                                    Text("${dir.icon.ifBlank { "📁" }} ${dir.name}", color = Mint, fontSize = 12.sp)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else if (!tiled) {
+            // Tab Mode
+            val currentIndex = activePage.coerceIn(0, sessions.lastIndex)
+            val currentSession = sessions[currentIndex]
+            // Tabs Row
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(44.dp)
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                sessions.forEachIndexed { index, session ->
+                    val selected = index == currentIndex
+                    SessionTab(
+                        session = session,
+                        selected = selected,
+                        onClick = { onSelectSession(index) },
+                        onRename = { onRenameSession(session) },
+                        onClose = { onCloseSession(session) }
+                    )
+                }
+            }
+            Divider(color = Edge)
+            Box(Modifier.weight(1f).fillMaxWidth()) {
+                TerminalPage(session = currentSession, isCurrent = true)
+            }
+        } else {
+            // Tiled Mode
+            val configuration = LocalConfiguration.current
+            val isLandscape = configuration.screenWidthDp > configuration.screenHeightDp
+            Box(Modifier.weight(1f).fillMaxWidth().padding(6.dp)) {
+                when {
+                    sessions.size == 1 -> {
+                        TerminalTileCard(
+                            session = sessions[0],
+                            isCurrent = true,
+                            onSelect = { onSelectSession(0) },
+                            onRename = { onRenameSession(sessions[0]) },
+                            onClose = { onCloseSession(sessions[0]) },
+                            onMaximize = { onSelectSession(0); onToggleTiled(false) },
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
+                    sessions.size == 2 -> {
+                        if (isLandscape) {
+                            Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                TerminalTileCard(
+                                    session = sessions[0],
+                                    isCurrent = (activePage == 0),
+                                    onSelect = { onSelectSession(0) },
+                                    onRename = { onRenameSession(sessions[0]) },
+                                    onClose = { onCloseSession(sessions[0]) },
+                                    onMaximize = { onSelectSession(0); onToggleTiled(false) },
+                                    modifier = Modifier.weight(1f).fillMaxHeight()
+                                )
+                                TerminalTileCard(
+                                    session = sessions[1],
+                                    isCurrent = (activePage == 1),
+                                    onSelect = { onSelectSession(1) },
+                                    onRename = { onRenameSession(sessions[1]) },
+                                    onClose = { onCloseSession(sessions[1]) },
+                                    onMaximize = { onSelectSession(1); onToggleTiled(false) },
+                                    modifier = Modifier.weight(1f).fillMaxHeight()
+                                )
+                            }
+                        } else {
+                            Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                TerminalTileCard(
+                                    session = sessions[0],
+                                    isCurrent = (activePage == 0),
+                                    onSelect = { onSelectSession(0) },
+                                    onRename = { onRenameSession(sessions[0]) },
+                                    onClose = { onCloseSession(sessions[0]) },
+                                    onMaximize = { onSelectSession(0); onToggleTiled(false) },
+                                    modifier = Modifier.weight(1f).fillMaxWidth()
+                                )
+                                TerminalTileCard(
+                                    session = sessions[1],
+                                    isCurrent = (activePage == 1),
+                                    onSelect = { onSelectSession(1) },
+                                    onRename = { onRenameSession(sessions[1]) },
+                                    onClose = { onCloseSession(sessions[1]) },
+                                    onMaximize = { onSelectSession(1); onToggleTiled(false) },
+                                    modifier = Modifier.weight(1f).fillMaxWidth()
+                                )
+                            }
+                        }
+                    }
+                    sessions.size in 3..4 -> {
+                        Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Row(Modifier.weight(1f).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                TerminalTileCard(
+                                    session = sessions[0],
+                                    isCurrent = (activePage == 0),
+                                    onSelect = { onSelectSession(0) },
+                                    onRename = { onRenameSession(sessions[0]) },
+                                    onClose = { onCloseSession(sessions[0]) },
+                                    onMaximize = { onSelectSession(0); onToggleTiled(false) },
+                                    modifier = Modifier.weight(1f).fillMaxHeight()
+                                )
+                                TerminalTileCard(
+                                    session = sessions[1],
+                                    isCurrent = (activePage == 1),
+                                    onSelect = { onSelectSession(1) },
+                                    onRename = { onRenameSession(sessions[1]) },
+                                    onClose = { onCloseSession(sessions[1]) },
+                                    onMaximize = { onSelectSession(1); onToggleTiled(false) },
+                                    modifier = Modifier.weight(1f).fillMaxHeight()
+                                )
+                            }
+                            Row(Modifier.weight(1f).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                TerminalTileCard(
+                                    session = sessions[2],
+                                    isCurrent = (activePage == 2),
+                                    onSelect = { onSelectSession(2) },
+                                    onRename = { onRenameSession(sessions[2]) },
+                                    onClose = { onCloseSession(sessions[2]) },
+                                    onMaximize = { onSelectSession(2); onToggleTiled(false) },
+                                    modifier = Modifier.weight(1f).fillMaxHeight()
+                                )
+                                if (sessions.size > 3) {
+                                    TerminalTileCard(
+                                        session = sessions[3],
+                                        isCurrent = (activePage == 3),
+                                        onSelect = { onSelectSession(3) },
+                                        onRename = { onRenameSession(sessions[3]) },
+                                        onClose = { onCloseSession(sessions[3]) },
+                                        onMaximize = { onSelectSession(3); onToggleTiled(false) },
+                                        modifier = Modifier.weight(1f).fillMaxHeight()
+                                    )
+                                } else {
+                                    Spacer(Modifier.weight(1f))
+                                }
+                            }
+                        }
+                    }
+                    else -> {
+                        LazyVerticalGrid(
+                            columns = GridCells.Fixed(2),
+                            modifier = Modifier.fillMaxSize(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            itemsIndexed(sessions, key = { _, s -> s.task.id }) { idx, session ->
+                                TerminalTileCard(
+                                    session = session,
+                                    isCurrent = (activePage == idx),
+                                    onSelect = { onSelectSession(idx) },
+                                    onRename = { onRenameSession(session) },
+                                    onClose = { onCloseSession(session) },
+                                    onMaximize = { onSelectSession(idx); onToggleTiled(false) },
+                                    modifier = Modifier.height(340.dp).fillMaxWidth()
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PadWorkspace(
+    hosts: List<HostProfile>,
+    agents: List<AgentPreset>,
+    sessions: List<TerminalSessionState>,
+    selectedHost: HostProfile?,
+    selectedAgent: AgentPreset?,
+    activePage: Int,
+    tiled: Boolean,
+    onToggleTiled: (Boolean) -> Unit,
+    onSelectHost: (HostProfile) -> Unit,
+    onSelectAgent: (AgentPreset) -> Unit,
+    onSelectSession: (Int) -> Unit,
+    onStartTask: (HostProfile, ProjectDirectory, AgentPreset) -> Unit,
+    onCloseSession: (TerminalSessionState) -> Unit,
+    onRenameSession: (TerminalSessionState) -> Unit,
+    onOpenSettings: () -> Unit,
+    onRefresh: () -> Unit,
+    syncLoading: Boolean,
+    offlineMode: Boolean,
+    autoSyncEnabled: Boolean,
+    quotaFor: (HostProfile, AgentPreset) -> List<QuotaWindow>?,
+    onAddHost: () -> Unit,
+    onEditHost: (HostProfile) -> Unit,
+    onDeleteHost: (HostProfile) -> Unit,
+    onMoveHost: (Int, Int) -> Unit,
+    onAddDirectory: (HostProfile) -> Unit,
+    onEditDirectory: (HostProfile, ProjectDirectory) -> Unit,
+    onDeleteDirectory: (HostProfile, ProjectDirectory) -> Unit,
+    onMoveDirectory: (HostProfile, Int, Int) -> Unit,
+    onAddAgent: () -> Unit,
+    onEditAgent: (AgentPreset) -> Unit,
+    onDeleteAgent: (AgentPreset) -> Unit,
+    onMoveAgent: (Int, Int) -> Unit,
+) {
+    var sidebarVisible by rememberSaveable { mutableStateOf(true) }
+    Row(Modifier.fillMaxSize()) {
+        AnimatedVisibility(
+            visible = sidebarVisible,
+            enter = expandHorizontally(),
+            exit = shrinkHorizontally()
+        ) {
+            Row(Modifier.width(300.dp).fillMaxHeight()) {
+                PadSidebar(
+                    modifier = Modifier.weight(1f).fillMaxHeight(),
+                    hosts = hosts,
+                    agents = agents,
+                    sessions = sessions,
+                    selectedHost = selectedHost,
+                    selectedAgent = selectedAgent,
+                    activePage = activePage,
+                    onSelectHost = onSelectHost,
+                    onSelectAgent = onSelectAgent,
+                    onSelectSession = onSelectSession,
+                    onStartTask = onStartTask,
+                    onCloseSession = onCloseSession,
+                    onRenameSession = onRenameSession,
+                    onOpenSettings = onOpenSettings,
+                    onRefresh = onRefresh,
+                    syncLoading = syncLoading,
+                    offlineMode = offlineMode,
+                    autoSyncEnabled = autoSyncEnabled,
+                    quotaFor = quotaFor,
+                    onAddHost = onAddHost,
+                    onEditHost = onEditHost,
+                    onDeleteHost = onDeleteHost,
+                    onMoveHost = onMoveHost,
+                    onAddDirectory = onAddDirectory,
+                    onEditDirectory = onEditDirectory,
+                    onDeleteDirectory = onDeleteDirectory,
+                    onMoveDirectory = onMoveDirectory,
+                    onAddAgent = onAddAgent,
+                    onEditAgent = onEditAgent,
+                    onDeleteAgent = onDeleteAgent,
+                    onMoveAgent = onMoveAgent,
+                )
+                Divider(
+                    modifier = Modifier.fillMaxHeight().width(1.dp),
+                    color = Edge
+                )
+            }
+        }
+        PadWorkspaceMain(
+            modifier = Modifier.weight(1f).fillMaxHeight(),
+            sessions = sessions,
+            activePage = activePage,
+            tiled = tiled,
+            sidebarVisible = sidebarVisible,
+            onToggleSidebar = { sidebarVisible = !sidebarVisible },
+            onToggleTiled = onToggleTiled,
+            onSelectSession = onSelectSession,
+            onCloseSession = onCloseSession,
+            onRenameSession = onRenameSession,
+            selectedHost = selectedHost,
+            selectedAgent = selectedAgent,
+            onStartTask = onStartTask,
+        )
+    }
+}
+
+@Composable
 private fun SettingsScreen(
     store: LocalStore,
     syncUrl: String,
@@ -2549,6 +3564,9 @@ private fun SettingsScreen(
     onQuotaIntervalChange: (Int) -> Unit,
     onEnabledChange: (Boolean) -> Unit,
     onDelaySecondsChange: (Int) -> Unit,
+    deviceLayoutMode: String,
+    onDeviceLayoutModeChange: (String) -> Unit,
+    isTablet: Boolean,
     onBack: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -2570,11 +3588,62 @@ private fun SettingsScreen(
             IconButton(onClick = { finish() }) { Icon(Icons.Default.ArrowBack, contentDescription = "返回", tint = White) }
             Column(Modifier.weight(1f)) {
                 Text("设置", color = White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
-                Text("管理密钥、同步与自动回车", color = Muted, fontSize = 12.sp)
+                Text("管理布局、密钥、同步与自动回车", color = Muted, fontSize = 12.sp)
             }
             TextButton(onClick = { finish() }) { Text("完成", color = Mint) }
         }
         Column(Modifier.fillMaxWidth().padding(bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text("界面与设备模式", color = White, fontWeight = FontWeight.SemiBold)
+            Text("根据设备类型选择布局。Pad 模式按 PC 端的双栏侧边栏、工作区直达和平铺/标签交互运行。", color = Muted, fontSize = 12.sp)
+            var draftDeviceLayoutMode by remember(deviceLayoutMode) { mutableStateOf(deviceLayoutMode) }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(24.dp))
+                    .background(Panel)
+                    .border(1.dp, Edge, RoundedCornerShape(24.dp))
+                    .padding(4.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                val options = listOf(
+                    "auto" to "自动检测",
+                    "pad" to "Pad 模式",
+                    "phone" to "手机模式"
+                )
+                options.forEach { (mode, label) ->
+                    val selected = draftDeviceLayoutMode == mode
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(20.dp))
+                            .background(if (selected) Mint else Color.Transparent)
+                            .clickable {
+                                draftDeviceLayoutMode = mode
+                                onDeviceLayoutModeChange(mode)
+                            }
+                            .padding(vertical = 9.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = label,
+                            color = if (selected) Ink else White,
+                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                            fontSize = 12.sp,
+                            maxLines = 1
+                        )
+                    }
+                }
+            }
+            Text(
+                text = when (draftDeviceLayoutMode) {
+                    "pad" -> "已强制开启 Pad 模式：启用 PC 端双栏侧边栏、工作区直接连接及平铺/标签交互。"
+                    "phone" -> "已强制开启手机模式：采用单栏紧凑视图与独立工作区导航。"
+                    else -> if (isTablet) "当前设备识别为 Pad / 平板设备（宽屏），自动使用 PC 布局与交互。" else "当前设备识别为手机，自动使用单栏模式。"
+                },
+                color = Mint,
+                fontSize = 11.sp
+            )
+            Divider()
             Text("SSH 密钥", color = White, fontWeight = FontWeight.SemiBold)
             Text("生成本机密钥后，将公钥添加到服务器用户的 ~/.ssh/authorized_keys。连接时会优先尝试密钥认证。", color = Muted, fontSize = 12.sp)
             if (publicKey == null) {
