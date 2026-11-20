@@ -126,6 +126,53 @@ class UbuntuWindowAndTabsTest(unittest.TestCase):
         close_btn.clicked()
         self.assertEqual(clicked, [("image", "first"), ("close", "first")])
 
+    def test_tab_mode_inner_action_buttons_handle_pointer_press(self):
+        clicked = []
+        for name in ("sess_a", "sess_b"):
+            s, _ = self.make_session(name)
+            s["image_button"] = app_module.Gtk.Button()
+            s["image_button"].connect("clicked", lambda *_, n=name: clicked.append(("image", n)))
+            s["close_button"] = app_module.Gtk.Button()
+            s["close_button"].connect("clicked", lambda *_, n=name: clicked.append(("close", n)))
+
+        self.app.view_button.set_active(False)
+        self.app.rebuild_view()
+        self.app.show_all()
+        while app_module.Gtk.events_pending():
+            app_module.Gtk.main_iteration()
+
+        # Set active tab to page 1
+        self.app.tabs.set_current_page(1)
+        self.assertEqual(self.app.tabs.get_current_page(), 1)
+
+        rows = self.app.instances_list.get_children()
+        tab_btn = rows[0].get_children()[0]
+        btn_children = tab_btn.get_child().get_children()
+        _title, _edit, _img, close_btn = btn_children
+
+        # Synthesize button press on tab_btn at close_btn coordinates
+        alloc = close_btn.get_allocation()
+        bx, by = close_btn.translate_coordinates(tab_btn, alloc.width // 2, alloc.height // 2)
+
+        ev = app_module.Gdk.Event.new(app_module.Gdk.EventType.BUTTON_PRESS)
+        ev.button.window = tab_btn.get_event_window()
+        ev.button.send_event = False
+        ev.button.time = 0
+        ev.button.x = float(bx)
+        ev.button.y = float(by)
+        ev.button.button = 1
+        ev.button.type = app_module.Gdk.EventType.BUTTON_PRESS
+        device = app_module.Gdk.Display.get_default().get_default_seat().get_pointer()
+        ev.set_device(device)
+
+        handled = tab_btn.emit("button-press-event", ev)
+        self.assertTrue(handled)
+        while app_module.Gtk.events_pending():
+            app_module.Gtk.main_iteration()
+
+        self.assertIn(("close", "sess_a"), clicked)
+        self.assertEqual(self.app.tabs.get_current_page(), 1)
+
     def make_session(self, name):
         Gtk, Vte = app_module.Gtk, app_module.Vte
         terminal = Vte.Terminal()

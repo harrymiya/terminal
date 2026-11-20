@@ -1583,6 +1583,34 @@ class App(Gtk.Window):
                 close_btn.connect("clicked", lambda *_, s=session: s["close_button"].clicked())
             btn_content.pack_start(close_btn, False, False, 0)
 
+            inner_actions = (edit_btn, image_btn, close_btn)
+
+            def raise_inner_actions(*_, actions=inner_actions):
+                for b in actions:
+                    ew = b.get_event_window()
+                    if ew:
+                        ew.raise_()
+
+            for b in inner_actions:
+                b.connect("realize", lambda w: w.get_event_window() and w.get_event_window().raise_())
+                b.connect("map", lambda w: w.get_event_window() and w.get_event_window().raise_())
+
+            button.connect("map", raise_inner_actions)
+            button.connect("size-allocate", raise_inner_actions)
+
+            def on_tab_button_press(btn, event, actions=inner_actions):
+                for b in actions:
+                    alloc = b.get_allocation()
+                    coords = b.translate_coordinates(btn, 0, 0)
+                    if coords:
+                        bx, by = coords
+                        if bx <= event.x <= bx + alloc.width and by <= event.y <= by + alloc.height:
+                            b.clicked()
+                            return True
+                return False
+
+            button.connect("button-press-event", on_tab_button_press)
+
             button.add(btn_content)
             button.connect("clicked", self.activate_instance_tab, terminal)
             row.pack_start(button, True, True, 0)
