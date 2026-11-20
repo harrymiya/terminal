@@ -412,7 +412,7 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "auto_enter": {"type": "boolean"},
-                "auto_enter_delay": {"type": "integer", "minimum": 1, "maximum": 30},
+                "auto_enter_delay": {"type": "integer", "minimum": 1, "maximum": 60000},
                 "auto_sync_enabled": {"type": "boolean"},
                 "sync_interval_seconds": {"type": "integer", "minimum": 5, "maximum": 300},
                 "sync_url": {"type": "string"},
@@ -995,7 +995,9 @@ def execute_app_tool_sync(app, name, args, deps):
         if "auto_enter" in args and args["auto_enter"] is not None:
             app.auto_enter.set_active(bool(args["auto_enter"]))
         if "auto_enter_delay" in args and args["auto_enter_delay"] is not None:
-            d = max(1, min(30, int(args["auto_enter_delay"])))
+            raw_d = int(args["auto_enter_delay"])
+            d = raw_d * 1000 if raw_d <= 30 else raw_d
+            d = max(50, min(60000, d))
             app.delay.set_value(d)
         if "auto_sync_enabled" in args and args["auto_sync_enabled"] is not None:
             app.data["auto_sync_enabled"] = bool(args["auto_sync_enabled"])

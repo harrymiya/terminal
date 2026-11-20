@@ -501,7 +501,7 @@ class AutoEnterController:
             self.detected_at = now
             self.handled = False
             return False
-        if not self.handled and now - self.detected_at >= max(1, delay):
+        if not self.handled and now - self.detected_at >= max(0.05, delay):
             self.handled = True
             return True
         return False

@@ -53,6 +53,37 @@ class DesktopAutoConfirmTest(unittest.TestCase):
                 self.assertFalse(controller.observe('first', 22, 3))
                 self.assertTrue(controller.observe('first', 25, 3))
 
+    def test_auto_enter_subsecond_delay_support(self):
+        for platform in ('omarchy', 'ubuntu', 'windows'):
+            with self.subTest(platform=platform):
+                controller = load_core(platform).AutoEnterController()
+                # 500ms delay (0.5s)
+                self.assertFalse(controller.observe('test_sub', 0.0, 0.5))
+                self.assertFalse(controller.observe('test_sub', 0.49, 0.5))
+                self.assertTrue(controller.observe('test_sub', 0.5, 0.5))
+
+    def test_app_auto_enter_delay_default_and_migration(self):
+        try:
+            spec = importlib.util.spec_from_file_location("app_mod", ROOT / "ubuntu" / "remote-dev-terminal.py")
+            app_mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(app_mod)
+        except (ImportError, ValueError):
+            return
+        if not app_mod.Gtk.init_check([])[0]:
+            return
+        from unittest.mock import patch
+        # Default value is 1000ms
+        with patch.object(app_mod, "load_config", return_value={"hosts": [], "agents": []}):
+            app = app_mod.App()
+            self.assertEqual(app.delay.get_value_as_int(), 1000)
+            app.destroy()
+
+        # Legacy seconds <= 30 is migrated by * 1000
+        with patch.object(app_mod, "load_config", return_value={"hosts": [], "agents": [], "auto_enter_delay": 3}):
+            app = app_mod.App()
+            self.assertEqual(app.delay.get_value_as_int(), 3000)
+            app.destroy()
+
     def test_prompt_change_restarts_countdown_and_sessions_are_independent(self):
         for platform in ('omarchy', 'ubuntu', 'windows'):
             core = load_core(platform)

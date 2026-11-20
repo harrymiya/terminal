@@ -186,9 +186,9 @@ class DesktopMCPIntegrationTest(unittest.TestCase):
                     self._call_tool(url, "set_ui_scale", {"scale": 120})
                     self.assertEqual(app.scale, 120)
 
-                    self._call_tool(url, "update_settings", {"auto_enter": True, "auto_enter_delay": 7})
+                    self._call_tool(url, "update_settings", {"auto_enter": True, "auto_enter_delay": 7000})
                     self.assertTrue(app.auto_enter.get_active())
-                    self.assertEqual(app.delay.get_value_as_int(), 7)
+                    self.assertEqual(app.delay.get_value_as_int(), 7000)
 
                     # 4. Open terminal (mock spawn_async so no real SSH runs), send/read VTE text, close
                     with patch.object(app_module.Vte.Terminal, "spawn_async"):

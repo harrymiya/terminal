@@ -1087,8 +1087,11 @@ class App(Gtk.Window):
         self.auto_enter = Gtk.CheckButton(label="自动回车")
         self.auto_enter.set_active(self.data.get("auto_enter", False))
         self.auto_enter.connect("toggled", self.save_settings)
-        self.delay = Gtk.SpinButton.new_with_range(1, 30, 1)
-        self.delay.set_value(self.data.get("auto_enter_delay", 3))
+        self.delay = Gtk.SpinButton.new_with_range(50, 30000, 50)
+        initial_delay = self.data.get("auto_enter_delay", 1000)
+        if initial_delay <= 30:
+            initial_delay = initial_delay * 1000
+        self.delay.set_value(initial_delay)
         self.delay.connect("value-changed", self.save_settings)
         workspace = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         root.pack2(workspace, resize=True, shrink=False)
@@ -2313,7 +2316,7 @@ class App(Gtk.Window):
         grid.attach(sync_interval_row, 0, 3, 2, 1)
         grid.attach(self.auto_enter, 0, 4, 2, 1)
         delay_row = Gtk.Box(spacing=6); delay_row.pack_start(Gtk.Label(label="自动回车延迟"), False, False, 0)
-        delay_row.pack_start(self.delay, False, False, 0); delay_row.pack_start(Gtk.Label(label="秒"), False, False, 0)
+        delay_row.pack_start(self.delay, False, False, 0); delay_row.pack_start(Gtk.Label(label="ms"), False, False, 0)
         grid.attach(delay_row, 0, 5, 2, 1)
         quota_interval = Gtk.SpinButton.new_with_range(15, 300, 5)
         quota_interval.set_value(int(self.data.get("agent_quota_interval_seconds", 60)))
@@ -4167,7 +4170,7 @@ class App(Gtk.Window):
             signature = auto_enter_signature(text) if text else None
             if minimized:
                 state["needs_action"] = signature is not None or confirmation_pending(text)
-            if auto_confirm.observe(signature, time.monotonic(), self.delay.get_value_as_int(), enabled):
+            if auto_confirm.observe(signature, time.monotonic(), self.delay.get_value_as_int() / 1000.0, enabled):
                 # A changed selection or prompt must start a fresh countdown.
                 if visible_signature() == signature:
                     terminal.feed_child(b"\r")
