@@ -1929,6 +1929,12 @@ class App(Gtk.Window):
                     outline.hide()
                 if is_active:
                     outline.queue_draw()
+            tab_button = getattr(terminal, "_running_tab_button", None)
+            if tab_button is not None:
+                was_active = getattr(tab_button, "_running_active", False)
+                tab_button._running_active = is_active
+                if is_active or was_active:
+                    tab_button.queue_draw()
         return True
 
     def rebuild_view(self, selected=None):
@@ -1941,6 +1947,7 @@ class App(Gtk.Window):
             self.detach_session_widgets(session)
             session["terminal"]._tile_frame = None
             session["terminal"]._running_outline = None
+            session["terminal"]._running_tab_button = None
             if session.get("minimized_button") is None:
                 docked.append(session)
                 for indicator in session.get("quota_indicators", ()):
@@ -2083,6 +2090,9 @@ class App(Gtk.Window):
 
             button.add(btn_content)
             button.connect("clicked", self.activate_instance_tab, terminal)
+            button._running_active = False
+            button.connect_after("draw", self.draw_tab_running_outline)
+            terminal._running_tab_button = button
             row.pack_start(button, True, True, 0)
             self.instance_buttons.append((button, terminal))
             self.instances_list.pack_start(row, False, False, 0)
@@ -2158,15 +2168,20 @@ class App(Gtk.Window):
             ctx = button.get_style_context()
             (ctx.add_class if terminal is page else ctx.remove_class)("host-selected")
 
-    def draw_running_outline(self, widget, cr):
+    def draw_running_outline(self, widget, cr, inset=0.0):
         allocation = widget.get_allocation()
         width, height = allocation.width, allocation.height
-        if width > 2 and height > 2:
+        if width > 2 * inset + 2 and height > 2 * inset + 2:
             cr.set_source_rgb(0.12, 0.65, 1.0)
             cr.set_line_width(1.0)
             cr.set_dash([4.0, 4.0], -(time.monotonic() * 16.0 % 8.0))
-            cr.rectangle(0.5, 0.5, width - 1.0, height - 1.0)
+            cr.rectangle(inset + 0.5, inset + 0.5, width - 2 * inset - 1.0, height - 2 * inset - 1.0)
             cr.stroke()
+        return False
+
+    def draw_tab_running_outline(self, widget, cr):
+        if getattr(widget, "_running_active", False):
+            self.draw_running_outline(widget, cr, inset=3.0)
         return False
 
     def activate_tab_from_label(self, _widget, event, terminal):
