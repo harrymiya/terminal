@@ -869,7 +869,23 @@ def build_theme_css(theme_name):
         paned.tile-paned.vertical > separator {{ min-height: 2px; }}
         paned.tile-paned > separator:hover, paned.tile-paned > separator:active {{ background-color: {t["accent"]}; }}
         .floating-session {{ background: {t["border_subtle"]}; }}
-        .session-header-action {{ padding-left: 4px; padding-right: 4px; }}
+        .session-header-actions {{ margin: 0; padding: 0; }}
+        .session-header-action {{
+            background-image: none;
+            background-color: transparent;
+            border: none;
+            box-shadow: none;
+            padding: 1px 2px;
+            min-height: 18px;
+            min-width: 18px;
+            border-radius: 3px;
+        }}
+        .session-header-action:hover {{
+            background-image: none;
+            background-color: rgba(255, 255, 255, 0.12);
+            border: none;
+            box-shadow: none;
+        }}
         .minimized-dot {{ border-radius: 8px; background: {t["dot_idle"]}; }}
         .minimized-dot.running {{ background: {t["dot_run"]}; }}
         .minimized-dot.waiting {{ background: {t["dot_wait"]}; }}
@@ -1661,9 +1677,12 @@ class App(Gtk.Window):
         if button is None:
             return
         floating = session.get("floating_window") is not None
-        button.get_image().set_from_icon_name(
-            "view-restore-symbolic" if floating else "window-new-symbolic", Gtk.IconSize.MENU,
-        )
+        img = button.get_image()
+        if img is not None:
+            img.set_from_icon_name(
+                "view-restore-symbolic" if floating else "window-restore-symbolic", Gtk.IconSize.MENU,
+            )
+            img.set_pixel_size(12)
         button.set_tooltip_text("还原到工作区" if floating else "悬浮终端")
 
     def make_session_header(self, session):
@@ -4001,19 +4020,21 @@ class App(Gtk.Window):
             weekly_img.set_tooltip_text("周剩余 --" if weekly is None else f"周剩余 {weekly}%")
 
         image_button = Gtk.Button.new_from_icon_name("image-x-generic-symbolic", Gtk.IconSize.MENU)
-        image_button.set_relief(Gtk.ReliefStyle.NONE)
         image_button.set_tooltip_text("发送图片给此终端的 Agent")
-        label.pack_start(image_button, False, False, 0)
         minimize = Gtk.Button.new_from_icon_name("window-minimize-symbolic", Gtk.IconSize.MENU)
         minimize.set_tooltip_text("最小化到顶部栏")
-        float_button = Gtk.Button.new_from_icon_name("window-new-symbolic", Gtk.IconSize.MENU)
-        for button in (minimize, float_button):
+        float_button = Gtk.Button.new_from_icon_name("window-restore-symbolic", Gtk.IconSize.MENU)
+        if float_button.get_image() is not None:
+            float_button.get_image().set_pixel_size(12)
+        close = Gtk.Button.new_from_icon_name("window-close-symbolic", Gtk.IconSize.MENU)
+        close.set_tooltip_text("关闭终端")
+        actions_box = Gtk.Box(spacing=2)
+        actions_box.get_style_context().add_class("session-header-actions")
+        for button in (image_button, minimize, float_button, close):
             button.set_relief(Gtk.ReliefStyle.NONE)
             button.get_style_context().add_class("session-header-action")
-            label.pack_start(button, False, False, 0)
-        close = Gtk.Button.new_from_icon_name("window-close-symbolic", Gtk.IconSize.MENU)
-        close.set_relief(Gtk.ReliefStyle.NONE)
-        label.pack_start(close, False, False, 0)
+            actions_box.pack_start(button, False, False, 0)
+        label.pack_start(actions_box, False, False, 0)
         state = {
             "closed": False,
             "connected": False,

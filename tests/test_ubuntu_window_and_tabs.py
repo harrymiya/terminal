@@ -208,7 +208,7 @@ class UbuntuWindowAndTabsTest(unittest.TestCase):
         self.assertNotIn("floating_window", session)
         self.assertEqual(self.app.tabs.get_n_pages(), 1)
         self.assertIs(session["terminal"].get_pty(), pty)
-        self.assertEqual(session["float_button"].get_image().get_icon_name()[0], "window-new-symbolic")
+        self.assertEqual(session["float_button"].get_image().get_icon_name()[0], "window-restore-symbolic")
 
     def test_weekly_quota_is_next_to_hourly_in_the_live_card_header(self):
         self.app.persist = lambda: None
