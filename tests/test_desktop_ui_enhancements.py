@@ -344,3 +344,12 @@ class DesktopThemeBuildTest(unittest.TestCase):
             self.assertNotIn("{{", glow_css)
             self.assertNotIn("{{", neon_css)
             self.assertNotIn("{{", light_css)
+
+    def test_neon_theme_has_no_top_toolbar_neon_bar(self):
+        for platform in ("ubuntu", "omarchy"):
+            src = (Path(__file__).resolve().parents[1] / platform / "remote-dev-terminal.py").read_text(encoding="utf-8")
+            self.assertNotIn("toolbar_neon_bar", src)
+            self.assertNotIn("toolbar-neon-bar", src)
+            self.assertNotIn("_draw_toolbar_neon_bar", src)
+            self.assertNotIn("_update_cyber_animations", src)
+            self.assertNotIn("cyber_anim_timer", src)

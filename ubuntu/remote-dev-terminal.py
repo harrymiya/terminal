@@ -621,9 +621,6 @@ def build_theme_css(theme_name):
         entry:focus {{
             box-shadow: 0 0 10px rgba(0, 240, 255, 0.6), inset 0 0 4px rgba(0, 240, 255, 0.2);
         }}
-        .cyber-banner, .toolbar-neon-bar {{
-            background: transparent;
-        }}
         """
     return f"""
         * {{ font-size: 13px; }}
@@ -917,9 +914,6 @@ class App(Gtk.Window):
         self.quota_attempts = {}
         self.quota_pending = set()
         self.quota_shutdown = False
-        self.cyber_anim_timer = None
-        self.cyber_phase = 0.0
-        self.toolbar_neon_bar = None
         self.metrics_cache = {}
         self.metrics_attempts = {}
         self.metrics_pending = set()
@@ -1058,13 +1052,6 @@ class App(Gtk.Window):
         toolbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         toolbar.get_style_context().add_class("toolbar")
         workspace.pack_start(toolbar, False, False, 0)
-        self.toolbar_neon_bar = Gtk.DrawingArea()
-        self.toolbar_neon_bar.set_size_request(-1, 4)
-        self.toolbar_neon_bar.set_no_show_all(True)
-        self.toolbar_neon_bar.get_style_context().add_class("toolbar-neon-bar")
-        self.toolbar_neon_bar.connect("draw", self._draw_toolbar_neon_bar)
-        workspace.pack_start(self.toolbar_neon_bar, False, False, 0)
-        self._update_cyber_animations()
         menu = Gtk.ToggleButton()
         self.menu_toggle = menu
         menu.get_style_context().add_class("menu-toggle")
@@ -1311,49 +1298,6 @@ class App(Gtk.Window):
             terminal = session.get("terminal")
             if terminal is not None:
                 self.apply_terminal_theme(terminal)
-        self._update_cyber_animations()
-
-    def _update_cyber_animations(self):
-        active = self.current_theme() == "neon_glow" and not getattr(self, "quota_shutdown", False)
-        bar = getattr(self, "toolbar_neon_bar", None)
-        if bar is not None:
-            bar.set_visible(active)
-        if active and self.cyber_anim_timer is None:
-            self.cyber_anim_timer = GLib.timeout_add(45, self._tick_cyber_animations)
-        elif not active and self.cyber_anim_timer is not None:
-            GLib.source_remove(self.cyber_anim_timer)
-            self.cyber_anim_timer = None
-
-    def _tick_cyber_animations(self):
-        if self.current_theme() != "neon_glow" or getattr(self, "quota_shutdown", False):
-            self.cyber_anim_timer = None
-            return False
-        self.cyber_phase = (self.cyber_phase + 0.08) % (math.tau * 100.0)
-        if self.toolbar_neon_bar is not None and self.toolbar_neon_bar.get_visible():
-            self.toolbar_neon_bar.queue_draw()
-        return True
-
-    def _draw_toolbar_neon_bar(self, widget, cr):
-        w = widget.get_allocated_width()
-        h = widget.get_allocated_height()
-        if w <= 0 or h <= 0:
-            return False
-        cr.set_source_rgba(0.03, 0.02, 0.08, 0.95)
-        cr.rectangle(0, 0, w, h)
-        cr.fill()
-        pulse = 0.55 + 0.45 * math.sin(self.cyber_phase * 1.1)
-        cr.set_source_rgba(0.0, 0.94, 1.0, 0.22 * pulse)
-        cr.rectangle(0, 0, w, h)
-        cr.fill()
-        colors = ((0.0, 0.94, 1.0), (1.0, 0.18, 0.93), (0.0, 1.0, 0.64), (0.99, 0.93, 0.04))
-        seg_w = max(60.0, w * 0.22)
-        for idx, (r, g, b) in enumerate(colors):
-            pos = ((self.cyber_phase * 55.0 + idx * (w / len(colors))) % (w + seg_w)) - seg_w
-            for glow_pad, alpha in ((18.0, 0.18), (6.0, 0.45), (0.0, 0.95)):
-                cr.set_source_rgba(r, g, b, alpha * (0.75 + 0.25 * pulse))
-                cr.rectangle(pos - glow_pad, 0, seg_w + glow_pad * 2, h)
-                cr.fill()
-        return False
 
     @staticmethod
     def apply_hand_cursor(widget):
