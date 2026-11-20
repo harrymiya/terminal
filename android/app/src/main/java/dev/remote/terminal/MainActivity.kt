@@ -46,8 +46,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -2168,7 +2167,6 @@ private fun QuotaNumber(value: String, columns: Int, color: Color, modifier: Mod
         maxLines = 1, overflow = TextOverflow.Ellipsis)
 }
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun AgentSelectorGrid(
     agents: List<AgentPreset>,
@@ -2177,44 +2175,55 @@ private fun AgentSelectorGrid(
     quotaFor: (HostProfile, AgentPreset) -> List<QuotaWindow>?,
     onSelectAgent: (AgentPreset) -> Unit,
 ) {
-    FlowRow(
+    Column(
         modifier = Modifier.fillMaxWidth().selectableGroup(),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        agents.forEach { agent ->
-            val selected = selectedAgent?.id == agent.id
-            val supportsQuota = quotaExecutable(agent.command) != null
-            Surface(
-                color = if (selected) Color(0xFF20342F) else Panel,
-                shape = RoundedCornerShape(12.dp),
-                border = BorderStroke(
-                    width = if (selected) 1.5.dp else 1.dp,
-                    color = if (selected) Mint else Edge,
-                ),
-                modifier = Modifier
-                    .clip(RoundedCornerShape(12.dp))
-                    .selectable(
-                        selected = selected,
-                        role = Role.RadioButton,
-                        onClick = { onSelectAgent(agent) },
-                    ),
+        agents.chunked(2).forEach { rowAgents ->
+            Row(
+                modifier = Modifier.fillMaxWidth().height(IntrinsicSize.Min),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Column(
-                    modifier = Modifier.padding(horizontal = 11.dp, vertical = 8.dp),
-                    verticalArrangement = Arrangement.spacedBy(5.dp),
-                ) {
-                    Text(
-                        "${agent.icon}  ${agent.name}",
-                        color = if (selected) White else Muted,
-                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
-                        fontSize = 12.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    if (supportsQuota) {
-                        AgentQuotaDetails(quotaFor(host, agent))
+                rowAgents.forEach { agent ->
+                    val selected = selectedAgent?.id == agent.id
+                    val supportsQuota = quotaExecutable(agent.command) != null
+                    Surface(
+                        color = if (selected) Color(0xFF20342F) else Panel,
+                        shape = RoundedCornerShape(12.dp),
+                        border = BorderStroke(
+                            width = if (selected) 1.5.dp else 1.dp,
+                            color = if (selected) Mint else Edge,
+                        ),
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxHeight()
+                            .clip(RoundedCornerShape(12.dp))
+                            .selectable(
+                                selected = selected,
+                                role = Role.RadioButton,
+                                onClick = { onSelectAgent(agent) },
+                            ),
+                    ) {
+                        Column(
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 9.dp),
+                            verticalArrangement = Arrangement.spacedBy(5.dp),
+                        ) {
+                            Text(
+                                "${agent.icon}  ${agent.name}",
+                                color = if (selected) White else Muted,
+                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                                fontSize = 12.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            if (supportsQuota) {
+                                AgentQuotaDetails(quotaFor(host, agent))
+                            }
+                        }
                     }
+                }
+                if (rowAgents.size == 1) {
+                    Spacer(Modifier.weight(1f))
                 }
             }
         }
@@ -2232,7 +2241,7 @@ private fun AgentQuotaDetails(quota: List<QuotaWindow>?) {
         else -> (remaining / 86_400L).coerceAtLeast(0).toString()
     }
     val resetText = if (remaining == null) "--" else "${reset}天"
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
         QuotaBattery(quotaPeriod(hourly?.minutes ?: 300), hourly?.remainingPercent, compact = true)
         QuotaBattery("周", weekly?.remainingPercent, compact = true)
         Text(
