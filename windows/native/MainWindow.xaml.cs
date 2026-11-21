@@ -1010,7 +1010,22 @@ public partial class MainWindow : Window
         try
         {
             using var client = new TcpClient();
-            return client.ConnectAsync(address, port).Wait(TimeSpan.FromMilliseconds(900)) && client.Connected;
+            if (!client.ConnectAsync(address, port).Wait(TimeSpan.FromMilliseconds(900)) || !client.Connected) return false;
+            client.ReceiveTimeout = 900;
+            using var stream = client.GetStream();
+            var line = new List<byte>(128);
+            for (var count = 0; count < 1024; count++)
+            {
+                var value = stream.ReadByte();
+                if (value < 0) return false;
+                if (value == '\n')
+                {
+                    if (Encoding.ASCII.GetString(line.ToArray()).StartsWith("SSH-", StringComparison.Ordinal)) return true;
+                    line.Clear();
+                }
+                else if (value != '\r') line.Add((byte)value);
+            }
+            return false;
         }
         catch { return false; }
     }
