@@ -23,6 +23,7 @@ const pendingMcp = new Map();
 const sessions = new Map();
 const metricsByHost = new Map();
 const quotaByAgent = new Map();
+const sshEndpoints = new Map();
 const encoder = new TextEncoder();
 
 function post(message) {
@@ -35,6 +36,15 @@ function escapeHtml(value) {
 function currentHost() { return config.hosts.find((h) => h.id === activeHost) || null; }
 function agentsForHost(host) { return host?.agents?.length ? host.agents : config.agents; }
 function currentAgent() { const list=agentsForHost(currentHost()); return list[Math.max(0, Number(currentHost()?.selected_agent)||0)] || null; }
+function sshEndpointSignature(host) {
+  const lan=String(host.lan_address||'');
+  let external=String(host.external_address||'');
+  if(!lan&&!external)external=String(host.address||'');
+  const parsePort=(value,fallback)=>{const port=Number(value);return Number.isInteger(port)&&port>=1&&port<=65535?port:fallback;};
+  const lanPort=parsePort(host.lan_port,parsePort(host.port,22));
+  const externalPort=parsePort(host.external_port,parsePort(host.port,22));
+  return [String(host.id||''),String(host.username||''),lan,String(lanPort),external,String(externalPort)].join('\u001f');
+}
 function quotaKey(hostId,command) { return `${hostId||''}\0${command||''}`; }
 function supportsQuota(command) { const executable=String(command||'').trim().replace(/^["']|["']$/g,'').split(/\s+/,1)[0].split(/[\\/]/).pop().toLowerCase(); return ['codex','codex2','codx','agy','agy2'].includes(executable); }
 function makeId() { return crypto.randomUUID().replaceAll('-', ''); }
@@ -199,9 +209,11 @@ function renderHosts() {
     const row=document.createElement('div');row.className='flat-list-row';
     const button=document.createElement('button');button.type='button';button.className=`flat-list-button${host.id===activeHost?' selected':''}`;
     const name=document.createElement('span');name.className='flat-list-name';name.textContent=host.name||host.username||'主机';
-    const address=host.lan_address||host.external_address||host.address||'';
-    const port=host.lan_address?host.lan_port||host.port||22:host.external_port||host.port||22;
-    const detail=document.createElement('span');detail.className='flat-list-detail';detail.textContent=`${host.username||''}@${address}:${port}`;
+    const endpoint=sshEndpoints.get(host.id);
+    const probing=!endpoint&&host.lan_address&&host.external_address;
+    const address=endpoint?.address||host.lan_address||host.external_address||host.address||'';
+    const port=endpoint?.port||(host.lan_address?host.lan_port||host.port||22:host.external_port||host.port||22);
+    const detail=document.createElement('span');detail.className='flat-list-detail';detail.textContent=probing?`${host.username||''}@正在探测 SSH 地址…`:`${host.username||''}@${address}:${port}`;
     button.append(name,detail);
     const metrics=metricsByHost.get(host.id);
     if(metrics){const chips=document.createElement('span');chips.className='metric-pair';for(const [label,value] of [['MEM',metrics.memory],['CPU',metrics.cpu]]){const chip=document.createElement('span');chip.className='metric-chip';chip.textContent=`${label} ${value.toFixed(0)}%`;chips.append(chip);}button.append(chips);}
@@ -411,6 +423,7 @@ function handleNativeMessage(event) {
   if(msg.type==='admin-users'){renderAdminUsers(msg.users||[]);return;}
   if(msg.type==='browse-result'){renderBrowse(msg);return;}
   if(msg.type==='host-metrics'){metricsByHost.set(msg.host_id,{memory:Number(msg.memory),cpu:Number(msg.cpu)});renderHosts();return;}
+  if(msg.type==='host-endpoint'){const host=config.hosts.find(item=>item.id===msg.host_id);if(host&&sshEndpointSignature(host)===msg.signature){sshEndpoints.set(msg.host_id,{address:msg.address,port:Number(msg.port)||22});renderHosts();}return;}
   if(msg.type==='agent-quota'){quotaByAgent.set(quotaKey(msg.host_id||activeHost,msg.command),{windows:msg.windows||[],error:msg.error||''});renderAgents();return;}
   if(msg.type==='admin-result'){if(!msg.success)showError(msg.message);else post({action:'admin-users'});return;}
   if(msg.type==='mcp-info'){showError(msg.message);return;}

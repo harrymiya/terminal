@@ -22,6 +22,7 @@ public partial class MainWindow : Window
     private readonly Dictionary<string, JsonObject> _sessionHosts = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, TaskCompletionSource<JsonElement>> _mcpCalls = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, (string Address, int Port)> _sshEndpointCache = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, string> _announcedSshEndpoints = new(StringComparer.Ordinal);
     private McpServer? _mcpServer;
     private bool _ready;
     private bool _syncInFlight;
@@ -1005,22 +1006,53 @@ public partial class MainWindow : Window
         if (candidates.Count == 0) throw new ArgumentException("请填写主机 SSH 地址。");
 
         var key = string.Join("\u001f", Text(host, "id"), Text(host, "username"), lan, lanPort.ToString(CultureInfo.InvariantCulture), external, externalPort.ToString(CultureInfo.InvariantCulture));
-        if (_sshEndpointCache.TryGetValue(key, out var remembered)) return remembered;
+        if (_sshEndpointCache.TryGetValue(key, out var remembered))
+        {
+            AnnounceSshEndpoint(host, key, remembered);
+            return remembered;
+        }
 
         var selected = ProbeSshEndpoint(candidates);
         if (selected.Verified)
-            return _sshEndpointCache.GetOrAdd(key, (selected.Address, selected.Port));
+        {
+            remembered = _sshEndpointCache.GetOrAdd(key, (selected.Address, selected.Port));
+            AnnounceSshEndpoint(host, key, remembered);
+            return remembered;
+        }
 
         // If another SSH operation verified and cached an endpoint while this probe was running,
         // keep all operations on that same endpoint for this application launch.
-        return _sshEndpointCache.TryGetValue(key, out remembered) ? remembered : (selected.Address, selected.Port);
+        remembered = _sshEndpointCache.TryGetValue(key, out var cached) ? cached : (selected.Address, selected.Port);
+        AnnounceSshEndpoint(host, key, remembered);
+        return remembered;
+    }
+
+    private void AnnounceSshEndpoint(JsonElement host, string signature, (string Address, int Port) endpoint)
+    {
+        var hostId = Text(host, "id");
+        if (hostId.Length == 0) return;
+        var value = endpoint.Address + ":" + endpoint.Port.ToString(CultureInfo.InvariantCulture);
+        while (true)
+        {
+            if (_announcedSshEndpoints.TryGetValue(hostId, out var previous))
+            {
+                if (previous == value) return;
+                if (_announcedSshEndpoints.TryUpdate(hostId, value, previous)) break;
+            }
+            else if (_announcedSshEndpoints.TryAdd(hostId, value)) break;
+        }
+        Dispatcher.BeginInvoke(() =>
+        {
+            if (_announcedSshEndpoints.TryGetValue(hostId, out var current) && current == value)
+                Send(new { type = "host-endpoint", host_id = hostId, signature, address = endpoint.Address, port = endpoint.Port });
+        });
     }
 
     private static (string Address, int Port, bool Verified) ProbeSshEndpoint(List<(string Address, int Port)> candidates)
     {
         foreach (var candidate in candidates)
             if (CanConnect(candidate.Address, candidate.Port)) return (candidate.Address, candidate.Port, true);
-        return (candidates[0].Address, candidates[0].Port, false);
+        return (candidates[candidates.Count - 1].Address, candidates[candidates.Count - 1].Port, false);
     }
     private static int ParsePort(string value, int fallback) => int.TryParse(value, out var port) && port is >= 1 and <= 65535 ? port : fallback;
     private static bool CanConnect(string address, int port)
