@@ -348,7 +348,7 @@ function editHost(host=null) {
     {key:'external_address',label:'外网地址（可选）',placeholder:'dev.example.com'},
     {key:'external_port',label:'外网端口',value:'22'},
     {key:'sync_id',label:'多端同步标识（可选）',placeholder:'同一主机在各设备使用相同标识'},
-    {key:'password',label:'SSH 密码（存入 Windows 凭据管理器）',type:'password',placeholder:'留空保留已保存凭据'},
+    {key:'password',label:'SSH 密码（存入 Windows 凭据管理器）',type:'password',placeholder:host?.credential_saved?'••••••••（已保存，留空保持）':'输入 SSH 密码'},
     {key:'clear_password',label:'删除已保存的 SSH 密码',type:'checkbox'}
   ],{...host,password:'',clear_password:false,lan_port:String(host?.lan_port||host?.port||22),external_port:String(host?.external_port||host?.port||22)},(v)=>{
     if(!v.name || !v.username || (!v.lan_address && !v.external_address)) return '请填写名称、SSH 用户名和至少一个 SSH 地址。';
@@ -400,7 +400,7 @@ function openSession(workspaceIndex, sharedItem=null) {
   term.onData(data=>{session.autoState.signature='';session.autoState.since=0;session.autoState.sent=false;post({action:'input',id,data});});
   term.onResize(({cols,rows})=>post({action:'resize',id,cols,rows}));
   session.autoTimer=setInterval(()=>watchAutoEnter(session),250);
-  sessions.set(id,session);activeSession=id;renderSessions();term.writeln('\x1b[90m正在探测 SSH 地址…\x1b[0m');
+  sessions.set(id,session);activeSession=id;renderSessions();term.writeln('\x1b[90m正在连接 SSH…\x1b[0m');
   post({action:'session-sync',method:'PUT',host:session.host,item:{id,directory_path:workspace.path,directory_name:workspace.name,agent_name:agent.name,agent_command:agent.command,display_name:title}});
   connectSession(session);
   return id;
@@ -434,7 +434,7 @@ function handleNativeMessage(event) {
   if(msg.type==='output'&&session){const raw=atob(msg.data);const bytes=Uint8Array.from(raw,c=>c.charCodeAt(0));session.term.write(bytes);}
   else if(msg.type==='endpoint-selected'&&session){const address=String(msg.address||'').replace(/[\x00-\x1f\x7f]/g,'');session.term.writeln(`\r\n\x1b[90m连接目标 ${address}:${Number(msg.port)||22} …\x1b[0m`);}
   else if(msg.type==='connected'&&session){session.connected=true;setBusy(false);session.term.focus();}
-  else if(msg.type==='closed'&&session){session.connected=false;setBusy([...sessions.values()].some(s=>s.connected));session.term.writeln(`\r\n\x1b[90m[SSH 已断开，点击右上角 ↻ 重新连接]\x1b[0m`);}
+  else if(msg.type==='closed'&&session){session.connected=false;setBusy([...sessions.values()].some(s=>s.connected));session.term.writeln(`\r\n\x1b[90m[SSH 已断开，退出码 ${Number(msg.code)}；点击右上角 ↻ 重新连接]\x1b[0m`);}
   else if(msg.type==='error'&&session){session.connected=false;setBusy(false);session.term.writeln(`\r\n\x1b[31m${msg.message}\x1b[0m`);}
   else if(msg.type==='saved'){ $('connection-status').title='配置已保存'; }
   else if(msg.type==='notice')showError(msg.message);

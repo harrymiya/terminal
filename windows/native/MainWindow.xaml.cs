@@ -109,7 +109,21 @@ public partial class MainWindow : Window
     private void SendConfig()
     {
         if (!_ready) return;
-        try { Send(new { type = "config", config = ConfigStore.Load() }); }
+        try
+        {
+            var config = ConfigStore.Load();
+            if (config["hosts"] is JsonArray hosts)
+            {
+                foreach (var node in hosts.OfType<JsonObject>())
+                {
+                    var credentialId = Text(node, "credential_id");
+                    var saved = credentialId.Length > 0 &&
+                        !string.IsNullOrEmpty(CredentialStore.Read("RemoteDevTerminal:host:" + credentialId)?.Secret);
+                    node["credential_saved"] = saved;
+                }
+            }
+            Send(new { type = "config", config });
+        }
         catch (Exception ex)
         {
             Send(new { type = "notice", message = ex.Message });
@@ -121,6 +135,8 @@ public partial class MainWindow : Window
     {
         var node = JsonNode.Parse(message.GetProperty("config").GetRawText()) as JsonObject
             ?? throw new InvalidDataException("收到的配置格式无效。");
+        if (node["hosts"] is JsonArray hosts)
+            foreach (var host in hosts.OfType<JsonObject>()) host.Remove("credential_saved");
         ConfigStore.Save(node);
         Send(new { type = "saved" });
         ConfigureSyncTimer();
@@ -160,7 +176,7 @@ public partial class MainWindow : Window
                 session.Dispose();
                 Send(new { type = "closed", id, code });
             }
-        });
+        }, DispatcherPriority.ContextIdle);
 
         _sessions[id] = session;
         try
