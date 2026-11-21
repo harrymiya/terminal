@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using System.IO;
 using System.Text;
 using System.Text.Json;
 
@@ -77,7 +78,7 @@ internal static class CredentialStore
         var entropy = Encoding.UTF8.GetBytes(target);
         try
         {
-            return Convert.ToBase64String(ProtectedData.Protect(clear, entropy, DataProtectionScope.CurrentUser));
+            return Convert.ToBase64String(ProtectWithDpapi(clear, entropy));
         }
         finally
         {
@@ -93,7 +94,7 @@ internal static class CredentialStore
         byte[]? clear = null;
         try
         {
-            clear = ProtectedData.Unprotect(blob, entropy, DataProtectionScope.CurrentUser);
+            clear = UnprotectWithDpapi(blob, entropy);
             var payload = JsonSerializer.Deserialize<CredentialPayload>(clear)
                 ?? throw new JsonException("Credential payload is empty.");
             return (payload.UserName ?? "", payload.Secret ?? "");
@@ -141,6 +142,80 @@ internal static class CredentialStore
         CredDelete(target, Generic, 0);
     }
 
+    private static byte[] ProtectWithDpapi(byte[] clear, byte[] entropy)
+    {
+        var input = AllocateBlob(clear);
+        var optionalEntropy = AllocateBlob(entropy);
+        DataBlob output = default;
+        try
+        {
+            if (!CryptProtectData(ref input, null, ref optionalEntropy, IntPtr.Zero, IntPtr.Zero,
+                    CryptProtectUiForbidden, out output))
+                throw new CryptographicException(Marshal.GetLastWin32Error());
+            return CopyBlob(output);
+        }
+        finally
+        {
+            ClearAndFreeBlob(ref input);
+            ClearAndFreeBlob(ref optionalEntropy);
+            ClearAndFreeLocalBlob(ref output);
+        }
+    }
+
+    private static byte[] UnprotectWithDpapi(byte[] encrypted, byte[] entropy)
+    {
+        var input = AllocateBlob(encrypted);
+        var optionalEntropy = AllocateBlob(entropy);
+        DataBlob output = default;
+        IntPtr description = IntPtr.Zero;
+        try
+        {
+            if (!CryptUnprotectData(ref input, out description, ref optionalEntropy, IntPtr.Zero, IntPtr.Zero,
+                    CryptProtectUiForbidden, out output))
+                throw new CryptographicException(Marshal.GetLastWin32Error());
+            return CopyBlob(output);
+        }
+        finally
+        {
+            ClearAndFreeBlob(ref input);
+            ClearAndFreeBlob(ref optionalEntropy);
+            ClearAndFreeLocalBlob(ref output);
+            if (description != IntPtr.Zero) LocalFree(description);
+        }
+    }
+
+    private static DataBlob AllocateBlob(byte[] bytes)
+    {
+        if (bytes.Length == 0) return default;
+        var pointer = Marshal.AllocHGlobal(bytes.Length);
+        Marshal.Copy(bytes, 0, pointer, bytes.Length);
+        return new DataBlob { Size = bytes.Length, Data = pointer };
+    }
+
+    private static byte[] CopyBlob(DataBlob blob)
+    {
+        if (blob.Size == 0) return Array.Empty<byte>();
+        var result = new byte[blob.Size];
+        Marshal.Copy(blob.Data, result, 0, result.Length);
+        return result;
+    }
+
+    private static void ClearAndFreeBlob(ref DataBlob blob)
+    {
+        if (blob.Data == IntPtr.Zero) return;
+        for (var index = 0; index < blob.Size; index++) Marshal.WriteByte(blob.Data, index, 0);
+        Marshal.FreeHGlobal(blob.Data);
+        blob = default;
+    }
+
+    private static void ClearAndFreeLocalBlob(ref DataBlob blob)
+    {
+        if (blob.Data == IntPtr.Zero) return;
+        for (var index = 0; index < blob.Size; index++) Marshal.WriteByte(blob.Data, index, 0);
+        LocalFree(blob.Data);
+        blob = default;
+    }
+
     private sealed class CredentialPayload
     {
         public CredentialPayload() { }
@@ -149,6 +224,14 @@ internal static class CredentialStore
     }
 
     private const uint Generic = 1;
+    private const uint CryptProtectUiForbidden = 0x1;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct DataBlob
+    {
+        public int Size;
+        public IntPtr Data;
+    }
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct NativeCredential
@@ -173,4 +256,14 @@ internal static class CredentialStore
     private static extern bool CredDelete(string target, uint type, uint flags);
     [DllImport("advapi32.dll", EntryPoint = "CredFree")]
     private static extern void CredFree(IntPtr buffer);
+    [DllImport("crypt32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CryptProtectData(ref DataBlob dataIn, string? description, ref DataBlob optionalEntropy,
+        IntPtr reserved, IntPtr promptStruct, uint flags, out DataBlob dataOut);
+    [DllImport("crypt32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CryptUnprotectData(ref DataBlob dataIn, out IntPtr description, ref DataBlob optionalEntropy,
+        IntPtr reserved, IntPtr promptStruct, uint flags, out DataBlob dataOut);
+    [DllImport("kernel32.dll", EntryPoint = "LocalFree")]
+    private static extern IntPtr LocalFree(IntPtr memory);
 }
