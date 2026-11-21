@@ -44,8 +44,7 @@ internal sealed class SshTerminalSession : IDisposable
             throw new ArgumentException("远端工作区必须使用绝对路径。");
         if (port is < 1 or > 65535) throw new ArgumentOutOfRangeException(nameof(port));
 
-        var ssh = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "OpenSSH", "ssh.exe");
-        if (!File.Exists(ssh)) throw new FileNotFoundException("未找到 Windows OpenSSH Client。请在“设置 → 系统 → 可选功能”中安装 OpenSSH 客户端。", ssh);
+        var ssh = ResolveSshExecutable();
 
         SafeFileHandle? childInput = null;
         SafeFileHandle? childOutput = null;
@@ -127,6 +126,28 @@ internal sealed class SshTerminalSession : IDisposable
     {
         if (_disposed || _closed || _input is null || _input.IsInvalid) return;
         Write(Encoding.UTF8.GetBytes(text));
+    }
+
+    internal static string ResolveSshExecutable()
+    {
+        var bundled = Path.Combine(AppContext.BaseDirectory, "OpenSSH", "ssh.exe");
+        var candidates = new[]
+        {
+            bundled,
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "OpenSSH", "ssh.exe"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "System32", "OpenSSH", "ssh.exe")
+        };
+        foreach (var candidate in candidates)
+            if (File.Exists(candidate)) return candidate;
+        foreach (var directory in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator))
+        {
+            if (string.IsNullOrWhiteSpace(directory)) continue;
+            var candidate = Path.Combine(directory.Trim('"'), "ssh.exe");
+            if (File.Exists(candidate)) return candidate;
+        }
+        throw new FileNotFoundException(
+            "找不到 SSH 客户端。请重新安装 Remote Dev Terminal，并确认程序目录内包含 OpenSSH\\ssh.exe。",
+            bundled);
     }
 
     private void Write(byte[] bytes)

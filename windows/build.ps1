@@ -38,6 +38,14 @@ if (-not $NoRestore) {
 }
 if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed with exit code $LASTEXITCODE" }
 
+$sshSource = Join-Path $nativeRoot 'vendor\openssh'
+$sshTarget = Join-Path $publishDir 'OpenSSH'
+if (-not (Test-Path -LiteralPath (Join-Path $sshSource 'ssh.exe'))) {
+    throw 'Bundled OpenSSH client is missing from windows\native\vendor\openssh.'
+}
+New-Item -ItemType Directory -Force -Path $sshTarget | Out-Null
+Copy-Item -Path (Join-Path $sshSource '*') -Destination $sshTarget -Recurse -Force
+
 $www = Join-Path $publishDir 'www'
 New-Item -ItemType Directory -Force -Path $www | Out-Null
 Copy-Item (Join-Path $nativeRoot 'www\*') $www -Recurse -Force

@@ -1,6 +1,6 @@
 ﻿# Remote Dev Terminal · Windows
 
-Windows 11 原生桌面版，安装和运行都不需要 WSL、Ubuntu 或 Python。界面采用与 Ubuntu 版相同的深色侧栏、主机/开发者/工作区和多终端布局；终端使用 Windows ConPTY 与 xterm.js，支持 ANSI、全屏交互、鼠标和终端尺寸调整。SSH 连接由 Windows 自带的 OpenSSH Client 发起。
+Windows 11 原生桌面版，安装和运行都不需要 WSL、Ubuntu 或 Python。界面采用与 Ubuntu 版相同的深色侧栏、主机/开发者/工作区和多终端布局；终端使用 Windows ConPTY 与 xterm.js，支持 ANSI、全屏交互、鼠标和终端尺寸调整。SSH 客户端随程序打包，不要求安装 Windows 可选 OpenSSH 功能。
 
 ## 安装
 
@@ -12,7 +12,7 @@ Windows 11 原生桌面版，安装和运行都不需要 WSL、Ubuntu 或 Python
 
 安装程序将应用复制到 `%LOCALAPPDATA%\Programs\RemoteDevTerminal`，创建开始菜单快捷方式并启动程序，不需要管理员权限。应用使用 Windows 自带的 .NET Framework 4.8.1 和 WebView2 Runtime；若系统缺少 WebView2 Runtime，请先安装 Microsoft Edge WebView2 Runtime。
 
-如果缺少 OpenSSH Client，请打开“设置 → 系统 → 可选功能 → 查看功能”，安装 OpenSSH 客户端。建议先配置 Windows SSH 密钥，首次连接时在终端确认服务器指纹。远端安装 tmux 后，SSH 断线时可以重新连接原会话。
+建议先配置 Windows SSH 密钥，首次连接时在终端确认服务器指纹。SSH 密钥和主机指纹仍由程序读取或保存到 `%USERPROFILE%\.ssh`。远端安装 tmux 后，SSH 断线时可以重新连接原会话。
 
 ## 使用
 

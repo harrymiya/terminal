@@ -13,6 +13,9 @@ $sourceExe = Join-Path $sourceDir 'RemoteDevTerminal.exe'
 if (-not (Test-Path -LiteralPath $sourceExe)) {
     throw "未找到原生程序。请先从仓库根目录运行 windows\build.ps1，然后重新运行 install.bat。"
 }
+if (-not (Test-Path -LiteralPath (Join-Path $sourceDir 'OpenSSH\ssh.exe'))) {
+    throw '安装包缺少内置 SSH 客户端。请重新运行 windows\build.ps1 后再次安装。'
+}
 
 $installDir = Join-Path $env:LOCALAPPDATA 'Programs\RemoteDevTerminal'
 New-Item -ItemType Directory -Force -Path $installDir | Out-Null
@@ -32,10 +35,6 @@ $shortcut.WorkingDirectory = $installDir
 $shortcut.Description = 'Windows 原生 SSH 开发终端'
 $shortcut.Save()
 
-$ssh = Join-Path $env:SystemRoot 'System32\OpenSSH\ssh.exe'
-if (-not (Test-Path -LiteralPath $ssh)) {
-    Write-Warning '尚未找到 Windows OpenSSH Client。请在“设置 → 系统 → 可选功能”中安装 OpenSSH 客户端。'
-}
 Write-Host "安装完成：$installDir"
 Write-Host '开始菜单中已添加 Remote Dev Terminal。'
 if (-not $NoLaunch) {

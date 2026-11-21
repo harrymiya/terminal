@@ -159,17 +159,19 @@ public partial class MainWindow : Window
             }
         });
 
+        _sessions[id] = session;
         try
         {
             session.Start(username, address, port, Text(workspace, "path"), Text(agent, "command"),
                 Number(message, "cols", 100), Number(message, "rows", 30), savedPassword);
-            _sessions[id] = session;
             Send(new { type = "connected", id });
         }
-        catch
+        catch (Exception ex)
         {
+            _sessions.Remove(id);
+            _sessionHosts.Remove(id);
             session.Dispose();
-            throw;
+            Send(new { type = "error", id, message = ex.Message });
         }
     }
 
@@ -393,19 +395,31 @@ public partial class MainWindow : Window
             var hostList = config["hosts"] as JsonArray;
             var host = hostList?.OfType<JsonObject>().FirstOrDefault(item => Text(item, "id") == Text(config, "current_host_id")) ?? hostList?.OfType<JsonObject>().FirstOrDefault();
             if (host is null) return;
-            var agents = config["agents"] as JsonArray ?? new JsonArray();
-            foreach (var agent in agents.OfType<JsonObject>())
+            var hostId = Text(host, "id");
+            var hostAgents = host["agents"] as JsonArray;
+            var agents = hostAgents is { Count: > 0 } ? hostAgents : config["agents"] as JsonArray ?? new JsonArray();
+            using var throttle = new SemaphoreSlim(4);
+            var jobs = agents.OfType<JsonObject>().Select(async agent =>
             {
-                var command = Text(agent, "command"); var executable = command.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? "";
+                var command = Text(agent, "command");
+                var executable = command.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? "";
+                var name = executable.Trim('"', '\'').Replace('\\', '/').Split('/').LastOrDefault()?.ToLowerInvariant() ?? "";
+                if (name is not ("codex" or "codex2" or "codx" or "agy" or "agy2")) return;
+                string? error = null;
+                JsonArray? quota = null;
+                await throttle.WaitAsync().ConfigureAwait(false);
                 try
                 {
-                    JsonArray? quota = null;
-                    if (Path.GetFileName(executable).ToLowerInvariant() is "codex" or "codex2" or "codx") quota = await ReadCodexQuotaAsync(host, executable).ConfigureAwait(false);
-                    else if (Path.GetFileName(executable).ToLowerInvariant() is "agy" or "agy2") quota = await ReadAgyQuotaAsync(host, executable).ConfigureAwait(false);
-                    if (quota is not null) Dispatcher.BeginInvoke(() => Send(new { type = "agent-quota", command, windows = quota }));
+                    quota = name is "codex" or "codex2" or "codx"
+                        ? await ReadCodexQuotaAsync(host, executable).ConfigureAwait(false)
+                        : await ReadAgyQuotaAsync(host, executable).ConfigureAwait(false);
+                    if (quota is null) error = "未获取到额度，请检查 SSH 连接和远端 Agent 登录状态。";
                 }
-                catch { }
-            }
+                catch (Exception ex) { error = ex.Message; }
+                finally { throttle.Release(); }
+                Dispatcher.BeginInvoke(() => Send(new { type = "agent-quota", host_id = hostId, command, windows = quota ?? new JsonArray(), error }));
+            }).ToArray();
+            await Task.WhenAll(jobs).ConfigureAwait(false);
         }
         finally { _quotaInFlight = false; }
     }
@@ -975,7 +989,7 @@ public partial class MainWindow : Window
         else completion.TrySetResult(JsonDocument.Parse("null").RootElement.Clone());
     }
 
-    private static string SshExecutable() => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "OpenSSH", "ssh.exe");
+    private static string SshExecutable() => SshTerminalSession.ResolveSshExecutable();
     private static (string Address, int Port) ResolveSshEndpoint(JsonElement host)
     {
         var lan = Text(host, "lan_address");

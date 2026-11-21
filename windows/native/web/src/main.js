@@ -35,6 +35,8 @@ function escapeHtml(value) {
 function currentHost() { return config.hosts.find((h) => h.id === activeHost) || null; }
 function agentsForHost(host) { return host?.agents?.length ? host.agents : config.agents; }
 function currentAgent() { const list=agentsForHost(currentHost()); return list[Math.max(0, Number(currentHost()?.selected_agent)||0)] || null; }
+function quotaKey(hostId,command) { return `${hostId||''}\0${command||''}`; }
+function supportsQuota(command) { const executable=String(command||'').trim().replace(/^["']|["']$/g,'').split(/\s+/,1)[0].split(/[\\/]/).pop().toLowerCase(); return ['codex','codex2','codx','agy','agy2'].includes(executable); }
 function makeId() { return crypto.randomUUID().replaceAll('-', ''); }
 function currentTheme() { return THEMES[config.theme] || THEMES.cyberpunk; }
 function applyTheme() {
@@ -219,8 +221,8 @@ function renderAgents() {
     const row=document.createElement('div');row.className='flat-list-row';
     const button=document.createElement('button');button.type='button';button.className=`flat-list-button${index===(host?.selected_agent||0)?' selected':''}`;
     const name=document.createElement('span');name.className='flat-list-name';name.textContent=agent.name||agent.command;
-    const quota=quotaByAgent.get(agent.command);const detail=document.createElement('span');detail.className='flat-list-detail';detail.textContent=quota?.length?quota.map(item=>`${item.label} ${item.remaining}%`).join(' · '):agent.command;
-    button.append(name,detail);button.title=`${agent.command}\n点击选择开发者`;button.addEventListener('click',()=>{if(!host)return;host.selected_agent=index;sendConfig();render();});row.append(button);
+    const quota=quotaByAgent.get(quotaKey(host?.id,agent.command));const windows=quota?.windows||[];const detail=document.createElement('span');detail.className='flat-list-detail';detail.textContent=windows.length?windows.map(item=>`${item.label} ${item.remaining}%${item.reset?` · ${item.reset}`:''}`).join(' · '):quota?.error?'额度暂不可用':supportsQuota(agent.command)?'正在获取额度…':agent.command;
+    button.append(name,detail);button.title=`${agent.command}${quota?.error?`\n${quota.error}`:''}\n点击选择开发者`;button.addEventListener('click',()=>{if(!host)return;host.selected_agent=index;sendConfig();render();});row.append(button);
     if(editing){const actions=document.createElement('span');actions.className='flat-list-actions';const up=document.createElement('button');up.type='button';up.textContent='↑';up.title='上移开发者';up.disabled=index===0;up.addEventListener('click',()=>moveAgentAt(index,-1));const down=document.createElement('button');down.type='button';down.textContent='↓';down.title='下移开发者';down.disabled=index===list.length-1;down.addEventListener('click',()=>moveAgentAt(index,1));const edit=document.createElement('button');edit.type='button';edit.textContent='✎';edit.title='编辑开发者';edit.addEventListener('click',()=>editAgent(index));const remove=document.createElement('button');remove.type='button';remove.textContent='×';remove.title='删除开发者';remove.addEventListener('click',()=>{const target=host&&host.agents?.length?host.agents:config.agents;if(!confirm(`删除开发者“${agent.name}”？`))return;target.splice(index,1);if(host)host.selected_agent=Math.max(0,index-1);sendConfig();render();});actions.append(up,down,edit,remove);row.append(actions);}
     agentList.append(row);
   });
@@ -229,7 +231,7 @@ function renderAgents() {
   renderAgentQuota();
 }
 function renderSyncStatus(){const root=$('sync-status');if(config.offline_mode)root.textContent='离线模式';else if(config.auto_sync_enabled&&config.sync_username)root.textContent=`跨设备同步 · ${config.sync_username}`;else if(config.sync_username)root.textContent=`已登录 · ${config.sync_username}`;else if(config.sync_url)root.textContent='同步账号未登录';else root.textContent='跨设备同步未配置';}
-function renderAgentQuota(){const agent=currentAgent(),q=agent?quotaByAgent.get(agent.command):null;const root=$('agent-quota');root.textContent='';if(!q?.length)return;root.textContent=q.map(item=>`${item.label} ${item.remaining}%${item.reset?` · ${item.reset}`:''}`).join('   ');}
+function renderAgentQuota(){const host=currentHost(),agent=currentAgent(),q=agent?quotaByAgent.get(quotaKey(host?.id,agent.command)):null,windows=q?.windows||[];const root=$('agent-quota');root.textContent='';root.title=q?.error||'';if(windows.length){root.textContent=windows.map(item=>`${item.label} ${item.remaining}%${item.reset?` · ${item.reset}`:''}`).join('   ');return;}if(agent&&supportsQuota(agent.command))root.textContent=q?.error?'额度暂不可用':'正在获取开发者额度…';}
 function renderWorkspaces() {
   const host=currentHost(), workspaces=host?.directories || [];
   workspaceList.replaceChildren();
@@ -409,7 +411,7 @@ function handleNativeMessage(event) {
   if(msg.type==='admin-users'){renderAdminUsers(msg.users||[]);return;}
   if(msg.type==='browse-result'){renderBrowse(msg);return;}
   if(msg.type==='host-metrics'){metricsByHost.set(msg.host_id,{memory:Number(msg.memory),cpu:Number(msg.cpu)});renderHosts();return;}
-  if(msg.type==='agent-quota'){quotaByAgent.set(msg.command,msg.windows||[]);renderAgents();return;}
+  if(msg.type==='agent-quota'){quotaByAgent.set(quotaKey(msg.host_id||activeHost,msg.command),{windows:msg.windows||[],error:msg.error||''});renderAgents();return;}
   if(msg.type==='admin-result'){if(!msg.success)showError(msg.message);else post({action:'admin-users'});return;}
   if(msg.type==='mcp-info'){showError(msg.message);return;}
   if(msg.type==='mcp-tool'){void executeMcpRequest(msg);return;}
