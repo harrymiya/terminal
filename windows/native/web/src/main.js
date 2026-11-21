@@ -387,7 +387,7 @@ function openSession(workspaceIndex, sharedItem=null) {
   term.onData(data=>{session.autoState.signature='';session.autoState.since=0;session.autoState.sent=false;post({action:'input',id,data});});
   term.onResize(({cols,rows})=>post({action:'resize',id,cols,rows}));
   session.autoTimer=setInterval(()=>watchAutoEnter(session),250);
-  sessions.set(id,session);activeSession=id;renderSessions();term.writeln(`\x1b[90m连接 ${host.username}@${host.lan_address||host.external_address||host.address} …\x1b[0m`);
+  sessions.set(id,session);activeSession=id;renderSessions();term.writeln('\x1b[90m正在探测 SSH 地址…\x1b[0m');
   post({action:'session-sync',method:'PUT',host:session.host,item:{id,directory_path:workspace.path,directory_name:workspace.name,agent_name:agent.name,agent_command:agent.command,display_name:title}});
   connectSession(session);
   return id;
@@ -418,6 +418,7 @@ function handleNativeMessage(event) {
   if(msg.type==='mcp-image-result'||msg.type==='mcp-public-key'){const pending=pendingMcp.get(msg.request_id);if(pending){pendingMcp.delete(msg.request_id);msg.error?pending.reject(new Error(msg.error)):pending.resolve(msg.result);}return;}
   const session=sessions.get(msg.id);
   if(msg.type==='output'&&session){const raw=atob(msg.data);const bytes=Uint8Array.from(raw,c=>c.charCodeAt(0));session.term.write(bytes);}
+  else if(msg.type==='endpoint-selected'&&session){const address=String(msg.address||'').replace(/[\x00-\x1f\x7f]/g,'');session.term.writeln(`\r\n\x1b[90m连接目标 ${address}:${Number(msg.port)||22} …\x1b[0m`);}
   else if(msg.type==='connected'&&session){session.connected=true;setBusy(false);session.term.focus();}
   else if(msg.type==='closed'&&session){session.connected=false;setBusy([...sessions.values()].some(s=>s.connected));session.term.writeln(`\r\n\x1b[90m[SSH 已断开，点击右上角 ↻ 重新连接]\x1b[0m`);}
   else if(msg.type==='error'&&session){session.connected=false;setBusy(false);session.term.writeln(`\r\n\x1b[31m${msg.message}\x1b[0m`);}

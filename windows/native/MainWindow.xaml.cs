@@ -21,6 +21,7 @@ public partial class MainWindow : Window
     private readonly Dictionary<string, SshTerminalSession> _sessions = new(StringComparer.Ordinal);
     private readonly Dictionary<string, JsonObject> _sessionHosts = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, TaskCompletionSource<JsonElement>> _mcpCalls = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, (string Address, int Port)> _sshEndpointCache = new(StringComparer.Ordinal);
     private McpServer? _mcpServer;
     private bool _ready;
     private bool _syncInFlight;
@@ -137,6 +138,7 @@ public partial class MainWindow : Window
         var agent = message.GetProperty("agent");
         var username = Text(host, "username");
         var (address, port) = ResolveSshEndpoint(host);
+        Send(new { type = "endpoint-selected", id, address, port });
 
         var session = new SshTerminalSession(id);
         var hostNode = JsonNode.Parse(host.GetRawText()) as JsonObject ?? new JsonObject();
@@ -990,7 +992,7 @@ public partial class MainWindow : Window
     }
 
     private static string SshExecutable() => SshTerminalSession.ResolveSshExecutable();
-    private static (string Address, int Port) ResolveSshEndpoint(JsonElement host)
+    private (string Address, int Port) ResolveSshEndpoint(JsonElement host)
     {
         var lan = Text(host, "lan_address");
         var external = Text(host, "external_address");
@@ -999,10 +1001,26 @@ public partial class MainWindow : Window
         var externalPort = ParsePort(Text(host, "external_port"), ParsePort(Text(host, "port"), 22));
         var candidates = new List<(string Address, int Port)>();
         if (lan.Length > 0) candidates.Add((lan, lanPort));
-        if (external.Length > 0 && external != lan) candidates.Add((external, externalPort));
+        if (external.Length > 0 && (external != lan || externalPort != lanPort)) candidates.Add((external, externalPort));
         if (candidates.Count == 0) throw new ArgumentException("请填写主机 SSH 地址。");
-        foreach (var candidate in candidates) if (CanConnect(candidate.Address, candidate.Port)) return candidate;
-        return candidates[0];
+
+        var key = string.Join("\u001f", Text(host, "id"), Text(host, "username"), lan, lanPort.ToString(CultureInfo.InvariantCulture), external, externalPort.ToString(CultureInfo.InvariantCulture));
+        if (_sshEndpointCache.TryGetValue(key, out var remembered)) return remembered;
+
+        var selected = ProbeSshEndpoint(candidates);
+        if (selected.Verified)
+            return _sshEndpointCache.GetOrAdd(key, (selected.Address, selected.Port));
+
+        // If another SSH operation verified and cached an endpoint while this probe was running,
+        // keep all operations on that same endpoint for this application launch.
+        return _sshEndpointCache.TryGetValue(key, out remembered) ? remembered : (selected.Address, selected.Port);
+    }
+
+    private static (string Address, int Port, bool Verified) ProbeSshEndpoint(List<(string Address, int Port)> candidates)
+    {
+        foreach (var candidate in candidates)
+            if (CanConnect(candidate.Address, candidate.Port)) return (candidate.Address, candidate.Port, true);
+        return (candidates[0].Address, candidates[0].Port, false);
     }
     private static int ParsePort(string value, int fallback) => int.TryParse(value, out var port) && port is >= 1 and <= 65535 ? port : fallback;
     private static bool CanConnect(string address, int port)
