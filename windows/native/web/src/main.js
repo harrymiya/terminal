@@ -25,6 +25,7 @@ const metricsByHost = new Map();
 const quotaByAgent = new Map();
 const sshEndpoints = new Map();
 const encoder = new TextEncoder();
+const tileLayouts = {grid:'⊞ 网格', columns:'⬓ 左右', rows:'⬒ 上下'};
 
 function post(message) {
   if (window.chrome?.webview) window.chrome.webview.postMessage(message);
@@ -182,7 +183,7 @@ function normalizeConfig(raw) {
   }
   activeHost = config.hosts.some(host=>host.id===config.current_host_id) ? config.current_host_id : config.hosts[0]?.id || '';
   viewMode = config.tiled ? 'grid' : 'tabs';
-  tileLayout=['grid','columns','rows'].includes(config.tile_layout)?config.tile_layout:'grid';
+  tileLayout=Object.hasOwn(tileLayouts,config.tile_layout)?config.tile_layout:'grid';
   $('scale').value = Math.min(200, Math.max(50, Number(config.ui_scale)||100));
   config.sidebar_width=Math.min(2000,Math.max(sidebarMinimumWidth(Number($('scale').value)),Number(config.sidebar_width)||294));
   document.querySelector('.sidebar').style.width=`${config.sidebar_width}px`;
@@ -203,6 +204,24 @@ function normalizeConfig(raw) {
   lastConfigSnapshot=JSON.stringify(config);
   render();
 }
+function hostMetric(label, value, description, warning) {
+  const metric = document.createElement('span');
+  metric.className = 'host-metric';
+  const ring = document.createElement('span');
+  ring.className = 'host-metric-ring';
+  ring.setAttribute('aria-hidden', 'true');
+  const percent = Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : null;
+  if (percent !== null) {
+    ring.style.setProperty('--metric-value', percent + '%');
+    ring.classList.add(warning ? 'warning' : 'measured');
+  }
+  const text = document.createElement('span');
+  text.textContent = label + ' ' + (percent === null ? '—' : Math.round(percent) + '%');
+  metric.title = description + ' ' + (percent === null ? '暂不可用' : Math.round(percent) + '%');
+  metric.append(ring, text);
+  return metric;
+}
+
 function renderHosts() {
   hostList.replaceChildren();
   config.hosts.forEach((host,index)=>{
@@ -217,7 +236,13 @@ function renderHosts() {
     const detail=document.createElement('span');detail.className='flat-list-detail';detail.textContent=probing?`${host.username||''}@正在探测 SSH 地址…`:`${host.username||''}@${address}:${port}`;
     button.append(name,detail);
     const metrics=metricsByHost.get(host.id);
-    if(metrics){const chips=document.createElement('span');chips.className='metric-pair';for(const [label,value] of [['MEM',metrics.memory],['CPU',metrics.cpu]]){const chip=document.createElement('span');chip.className='metric-chip';chip.textContent=`${label} ${value.toFixed(0)}%`;chips.append(chip);}button.append(chips);}
+    const metricPair=document.createElement('span');
+    metricPair.className='host-metrics';
+    metricPair.append(
+      hostMetric('MEM',metrics?.memory,'内存余量',metrics?.memory<20),
+      hostMetric('CPU',metrics?.cpu,'CPU 占用率',metrics?.cpu>80),
+    );
+    button.append(metricPair);
     button.title=`${detail.textContent}\n点击切换主机`;
     button.addEventListener('click',()=>{activeHost=host.id;sendConfig();render();});row.append(button);
     if(editing){const actions=document.createElement('span');actions.className='flat-list-actions';const edit=document.createElement('button');edit.type='button';edit.textContent='✎';edit.title='编辑主机';edit.addEventListener('click',()=>editHost(host));const remove=document.createElement('button');remove.type='button';remove.textContent='×';remove.title='删除主机';remove.addEventListener('click',()=>{if(!confirm(`删除主机“${host.name}”及其工作区？`))return;if(host.credential_id)post({action:'clear-host-password',credential_id:host.credential_id});post({action:'delete-host-profile',host_id:host.id});config.hosts.splice(index,1);activeHost=config.hosts[0]?.id||'';sendConfig();render();});actions.append(edit,remove);row.append(actions);}
@@ -227,6 +252,47 @@ function renderHosts() {
   $('add-host').disabled=false;
   renderSyncStatus();
 }
+function quotaBattery(window, description, showPercent) {
+  const battery = document.createElement('span');
+  battery.className = 'quota-battery';
+  const percent = Number.isFinite(window?.remaining) ? Math.max(0, Math.min(100, window.remaining)) : null;
+  battery.title = description + ' ' + (percent === null ? '暂不可用' : Math.round(percent) + '%');
+  battery.setAttribute('role', 'img');
+  battery.setAttribute('aria-label', battery.title);
+  const icon = document.createElement('span');
+  icon.className = 'quota-battery-icon';
+  const fill = document.createElement('span');
+  fill.className = 'quota-battery-fill';
+  if (percent !== null) {
+    fill.style.width = percent + '%';
+    fill.classList.add(percent < 5 ? 'low' : percent < 20 ? 'warning' : 'ok');
+  }
+  icon.append(fill);
+  const number = document.createElement('span');
+  number.className = 'quota-number';
+  number.textContent = percent === null ? '--' : Math.round(percent) + (showPercent ? '%' : '');
+  battery.append(icon, number);
+  return battery;
+}
+
+function renderQuotaBatteries(root, quota, {showPercent = false, showReset = false} = {}) {
+  const windows = quota?.windows ?? [];
+  const hourly = windows.find(window => window.label !== '7d');
+  const weekly = windows.find(window => window.label === '7d');
+  const period = (hourly?.label ?? '5h').replace(/h$/, ' 小时').replace(/min$/, ' 分钟');
+  root.replaceChildren(
+    quotaBattery(hourly, period + '剩余额度', showPercent),
+    quotaBattery(weekly, '周剩余额度', showPercent),
+  );
+  if (showReset) {
+    const reset = document.createElement('span');
+    reset.className = 'quota-number quota-reset';
+    reset.textContent = weekly?.reset?.replace(/d$/, '') || '--';
+    reset.title = '周额度重置天数';
+    root.append(reset);
+  }
+}
+
 function renderAgents() {
   const host=currentHost(), list=agentsForHost(host);
   agentList.replaceChildren();
@@ -234,17 +300,24 @@ function renderAgents() {
     const row=document.createElement('div');row.className='flat-list-row';
     const button=document.createElement('button');button.type='button';button.className=`flat-list-button${index===(host?.selected_agent||0)?' selected':''}`;
     const name=document.createElement('span');name.className='flat-list-name';name.textContent=agent.name||agent.command;
-    const quota=quotaByAgent.get(quotaKey(host?.id,agent.command));const windows=quota?.windows||[];const detail=document.createElement('span');detail.className='flat-list-detail';detail.textContent=windows.length?windows.map(item=>`${item.label} ${item.remaining}%${item.reset?` · ${item.reset}`:''}`).join(' · '):quota?.error?'额度暂不可用':supportsQuota(agent.command)?'正在获取额度…':agent.command;
+    const quota=quotaByAgent.get(quotaKey(host?.id,agent.command));
+    const detail=document.createElement('span');
+    if (host && supportsQuota(agent.command)) {
+      detail.className='quota-batteries';
+      renderQuotaBatteries(detail,quota,{showReset:true});
+      if (!quota?.windows?.length) detail.title=quota?.error||'正在获取额度…';
+    } else {
+      detail.className='flat-list-detail';
+      detail.textContent=agent.command;
+    }
     button.append(name,detail);button.title=`${agent.command}${quota?.error?`\n${quota.error}`:''}\n点击选择开发者`;button.addEventListener('click',()=>{if(!host)return;host.selected_agent=index;sendConfig();render();});row.append(button);
     if(editing){const actions=document.createElement('span');actions.className='flat-list-actions';const up=document.createElement('button');up.type='button';up.textContent='↑';up.title='上移开发者';up.disabled=index===0;up.addEventListener('click',()=>moveAgentAt(index,-1));const down=document.createElement('button');down.type='button';down.textContent='↓';down.title='下移开发者';down.disabled=index===list.length-1;down.addEventListener('click',()=>moveAgentAt(index,1));const edit=document.createElement('button');edit.type='button';edit.textContent='✎';edit.title='编辑开发者';edit.addEventListener('click',()=>editAgent(index));const remove=document.createElement('button');remove.type='button';remove.textContent='×';remove.title='删除开发者';remove.addEventListener('click',()=>{const target=host&&host.agents?.length?host.agents:config.agents;if(!confirm(`删除开发者“${agent.name}”？`))return;target.splice(index,1);if(host)host.selected_agent=Math.max(0,index-1);sendConfig();render();});actions.append(up,down,edit,remove);row.append(actions);}
     agentList.append(row);
   });
   if(!list.length){const hint=document.createElement('div');hint.className='muted small empty-note';hint.textContent='请先选择主机，再点击顶部“编辑”添加开发者';agentList.append(hint);}
   $('add-agent').disabled=false;
-  renderAgentQuota();
 }
 function renderSyncStatus(){const root=$('sync-status');if(config.offline_mode)root.textContent='离线模式';else if(config.auto_sync_enabled&&config.sync_username)root.textContent=`跨设备同步 · ${config.sync_username}`;else if(config.sync_username)root.textContent=`已登录 · ${config.sync_username}`;else if(config.sync_url)root.textContent='同步账号未登录';else root.textContent='跨设备同步未配置';}
-function renderAgentQuota(){const host=currentHost(),agent=currentAgent(),q=agent?quotaByAgent.get(quotaKey(host?.id,agent.command)):null,windows=q?.windows||[];const root=$('agent-quota');root.textContent='';root.title=q?.error||'';if(windows.length){root.textContent=windows.map(item=>`${item.label} ${item.remaining}%${item.reset?` · ${item.reset}`:''}`).join('   ');return;}if(agent&&supportsQuota(agent.command))root.textContent=q?.error?'额度暂不可用':'正在获取开发者额度…';}
 function renderWorkspaces() {
   const host=currentHost(), workspaces=host?.directories || [];
   workspaceList.replaceChildren();
@@ -263,52 +336,101 @@ function renderWorkspaces() {
   });
   $('add-workspace').disabled=!host;
 }
+function tileRows(docked) {
+  if (docked.length === 0) return [];
+  if (viewMode === 'tabs') return [[docked.find(session => session.id === activeSession) ?? docked[0]]];
+  if (tileLayout === 'rows') return docked.map(session => [session]);
+  if (tileLayout === 'columns' || docked.length <= 2) return [docked];
+  const firstRowSize = Math.ceil(docked.length / 2);
+  return [docked.slice(0, firstRowSize), docked.slice(firstRowSize)];
+}
+
+function renderSessionQuota(session) {
+  if (!supportsQuota(session.agent.command)) return;
+  const root = session.card?.querySelector('.terminal-quota');
+  if (!root) return;
+  root.hidden = false;
+  const quota = quotaByAgent.get(quotaKey(session.host.id, session.agent.command));
+  renderQuotaBatteries(root, quota, {showPercent: viewMode === 'tabs' || session.floating});
+}
+
 function renderSessions() {
-  const has=sessions.size>0;
-  emptyState.classList.toggle('hidden',has);
-  terminalGrid.classList.toggle('visible',has);
-  $('view-mode').textContent=viewMode==='tabs'?'标签模式':'平铺模式';
-  $('layout-grid').hidden=viewMode!=='grid';
-  terminalGrid.className=`terminal-grid ${tileLayout}${has?' visible':''}`;
+  const all = [...sessions.values()];
+  const docked = all.filter(session => !session.minimized && !session.floating);
+  const rows = tileRows(docked);
+  const hasVisible = rows.length > 0 || all.some(session => session.floating);
+  emptyState.classList.toggle('hidden', hasVisible);
+  terminalGrid.classList.toggle('visible', hasVisible);
+  $('view-mode').textContent = viewMode === 'tabs' ? '标签模式' : '平铺模式';
+  const layoutButton = $('layout-grid');
+  layoutButton.textContent = tileLayouts[tileLayout];
+  layoutButton.hidden = viewMode !== 'grid';
+  layoutButton.disabled = docked.length < 2;
   terminalGrid.replaceChildren();
-  for (const s of sessions.values()) {
-    const card=document.createElement('section'); card.className=`terminal-card${viewMode==='tabs' && s.id!==activeSession?' inactive':''}`;
-    card.innerHTML=`<div class="terminal-head"><span class="terminal-card-title" title="双击重命名">${escapeHtml(s.title)}</span><span class="terminal-tools"><button class="terminal-close rename-session" title="重命名">✎</button><button class="terminal-close image-session" title="发送图片">▧</button><button class="terminal-close minimize-session" title="最小化">−</button><button class="terminal-close float-session" title="浮动窗口">□</button><button class="terminal-close reconnect" title="重新连接">↻</button><button class="terminal-close close-session" title="关闭终端">×</button></span></div><div class="terminal-body"></div>`;
+  const rowBySession = new Map();
+  for (const rowSessions of rows) {
+    const row = document.createElement('div');
+    row.className = 'terminal-row';
+    terminalGrid.append(row);
+    for (const session of rowSessions) rowBySession.set(session.id, row);
+  }
+  for (const s of all) {
+    const row = rowBySession.get(s.id);
+    const card=document.createElement('section');
+    card.className='terminal-card';
+    card.classList.toggle('active', s.id === activeSession);
+    card.classList.toggle('inactive', !row && !s.floating);
+    card.innerHTML=`<div class="terminal-head"><span class="terminal-card-title" title="双击重命名">${escapeHtml(s.title)}</span><span class="terminal-quota quota-batteries" hidden></span><span class="terminal-tools"><button class="terminal-close rename-session" title="重命名">✎</button><button class="terminal-close image-session" title="发送图片">▧</button><button class="terminal-close minimize-session" title="最小化">−</button><button class="terminal-close float-session" title="浮动窗口">□</button><button class="terminal-close reconnect" title="重新连接">↻</button><button class="terminal-close close-session" title="关闭终端">×</button></span></div><div class="terminal-body"></div>`;
     card.querySelector('.terminal-close.close-session').addEventListener('click',()=>closeSession(s.id));
     card.querySelector('.terminal-close.reconnect').addEventListener('click',()=>connectSession(s));
     card.querySelector('.terminal-close.rename-session').addEventListener('click',()=>renameSession(s));
     card.querySelector('.terminal-card-title').addEventListener('dblclick',()=>renameSession(s));
     card.querySelector('.terminal-close.image-session').addEventListener('click',()=>chooseImage(s));
     card.querySelector('.terminal-close.minimize-session').addEventListener('click',()=>minimizeSession(s));
-    card.querySelector('.terminal-close.float-session').addEventListener('click',()=>toggleFloat(s,card));
+    card.querySelector('.terminal-close.float-session').addEventListener('click',()=>toggleFloat(s));
     card.draggable=true;
     card.addEventListener('dragstart',event=>{event.dataTransfer.setData('text/plain',s.id);event.dataTransfer.effectAllowed='move';card.classList.add('dragging');});
     card.addEventListener('dragend',()=>card.classList.remove('dragging'));
     card.addEventListener('dragover',event=>{event.preventDefault();card.classList.add('drop-target');});
     card.addEventListener('dragleave',()=>card.classList.remove('drop-target'));
     card.addEventListener('drop',event=>{event.preventDefault();card.classList.remove('drop-target');moveSession(event.dataTransfer.getData('text/plain'),s.id);});
-    card.addEventListener('pointerdown',()=>{activeSession=s.id;});
+    card.addEventListener('pointerdown',()=>{
+      if (activeSession === s.id) return;
+      sessions.get(activeSession)?.card?.classList.remove('active');
+      activeSession = s.id;
+      card.classList.add('active');
+      renderInstances();
+    });
     if(s.minimized) card.classList.add('terminal-minimized');
     if(s.floating) card.classList.add('terminal-floating');
-    const body=card.querySelector('.terminal-body'); terminalGrid.append(card); s.card=card;
+    const body=card.querySelector('.terminal-body');
+    (row ?? terminalGrid).append(card);
+    s.card=card;
+    renderSessionQuota(s);
     if (!s.opened) { s.term.open(body); s.opened=true; }
     else if (s.term.element && s.term.element.parentElement!==body) body.append(s.term.element);
     s.term.element.style.height='100%';
-    if(!s.minimized) s.fit.fit();
-    if(s.id===activeSession)s.term.focus();
   }
+  // Populate every row before measuring so all terminals see their final widths.
+  for (const s of all) {
+    if (rowBySession.has(s.id) || s.floating) s.fit.fit();
+  }
+  sessions.get(activeSession)?.term.focus();
   $('session-count').textContent=`${sessions.size} / 8`;
-  $('layout-grid').disabled=viewMode!=='grid' || sessions.size<2;
   renderInstances();
   renderMinimized();
 }
 function render() { renderHosts(); renderAgents(); renderWorkspaces(); renderSessions(); updateEditing(); }
 
-function renderInstances(){const section=$('instances-section'),root=$('instances-list');root.replaceChildren();const items=[...sessions.values()].filter(session=>!session.minimized&&!session.floating);section.hidden=viewMode==='grid'||!items.length;if(section.hidden)return;for(const session of items){const row=document.createElement('div');row.className='flat-list-row';const button=document.createElement('button');button.type='button';button.className=`flat-list-button${session.id===activeSession?' selected':''}`;const name=document.createElement('span');name.className='flat-list-name';name.textContent=session.title;const detail=document.createElement('span');detail.className='flat-list-detail';detail.textContent=`${session.workspace.name||session.workspace.path} · ${session.agent.name||session.agent.command}`;button.append(name,detail);button.addEventListener('click',()=>{activeSession=session.id;renderSessions();session.term.focus();});row.append(button);const actions=document.createElement('span');actions.className='flat-list-actions instance-actions';const rename=document.createElement('button');rename.type='button';rename.textContent='✎';rename.title='编辑实例名称';rename.addEventListener('click',()=>renameSession(session));const image=document.createElement('button');image.type='button';image.textContent='▧';image.title='发送图片';image.addEventListener('click',()=>chooseImage(session));const close=document.createElement('button');close.type='button';close.textContent='×';close.title='关闭终端';close.addEventListener('click',()=>closeSession(session.id));actions.append(rename,image,close);row.append(actions);root.append(row);}}
+function renderInstances(){const section=$('instances-section'),root=$('instances-list');root.replaceChildren();const items=[...sessions.values()].filter(session=>!session.minimized&&!session.floating);section.hidden=!items.length;if(section.hidden)return;for(const session of items){const row=document.createElement('div');row.className='flat-list-row';const button=document.createElement('button');button.type='button';button.className=`flat-list-button${session.id===activeSession?' selected':''}`;const name=document.createElement('span');name.className='flat-list-name';name.textContent=session.title;button.append(name);button.addEventListener('click',()=>{activeSession=session.id;renderSessions();session.term.focus();});row.append(button);const actions=document.createElement('span');actions.className='flat-list-actions instance-actions';const rename=document.createElement('button');rename.type='button';rename.textContent='✎';rename.title='编辑实例名称';rename.addEventListener('click',()=>renameSession(session));const image=document.createElement('button');image.type='button';image.textContent='▧';image.title='发送图片';image.addEventListener('click',()=>chooseImage(session));const close=document.createElement('button');close.type='button';close.textContent='×';close.title='关闭终端';close.addEventListener('click',()=>closeSession(session.id));actions.append(rename,image,close);row.append(actions);root.append(row);}}
 
 function renameSession(session){const name=prompt('终端会话名称',session.title);if(name?.trim()){session.title=name.trim();post({action:'session-sync',method:'PUT',host:session.host,item:{id:session.id,directory_path:session.workspace.path,directory_name:session.workspace.name,agent_name:session.agent.name,agent_command:session.agent.command,display_name:session.title}});renderSessions();}}
 function moveSession(sourceId,targetId){if(!sourceId||sourceId===targetId)return;const items=[...sessions.entries()];const from=items.findIndex(([,s])=>s.id===sourceId),to=items.findIndex(([,s])=>s.id===targetId);if(from<0||to<0)return;const [item]=items.splice(from,1);items.splice(to,0,item);sessions.clear();for(const [id,s] of items)sessions.set(id,s);renderSessions();}
-function toggleFloat(session,card){session.floating=!session.floating;if(session.floating){session.minimized=false;card.style.left='12%';card.style.top='12%';card.style.width='70%';card.style.height='70%';card.style.resize='both';}card.classList.toggle('terminal-floating',session.floating);card.classList.toggle('terminal-minimized',session.minimized);session.fit.fit();}
+function toggleFloat(session){
+  session.floating = !session.floating;
+  activeSession = session.id;
+  renderSessions();
+}
 function minimizeSession(session){session.minimized=true;session.floating=false;renderSessions();}
 function restoreSession(id){const session=sessions.get(id);if(!session)return;session.minimized=false;activeSession=id;renderSessions();session.term.focus();}
 function renderMinimized(){const bar=$('minimized-sessions');if(!bar)return;bar.replaceChildren();for(const s of sessions.values()){if(!s.minimized)continue;const b=document.createElement('button');b.className='button quiet';b.textContent=`● ${s.title}`;b.title='恢复终端';b.addEventListener('click',()=>restoreSession(s.id));bar.append(b);}}
@@ -426,7 +548,15 @@ function handleNativeMessage(event) {
   if(msg.type==='browse-result'){renderBrowse(msg);return;}
   if(msg.type==='host-metrics'){metricsByHost.set(msg.host_id,{memory:Number(msg.memory),cpu:Number(msg.cpu)});renderHosts();return;}
   if(msg.type==='host-endpoint'){const host=config.hosts.find(item=>item.id===msg.host_id);if(host&&sshEndpointSignature(host)===msg.signature){sshEndpoints.set(msg.host_id,{signature:msg.signature,address:msg.address,port:Number(msg.port)||22});renderHosts();}return;}
-  if(msg.type==='agent-quota'){quotaByAgent.set(quotaKey(msg.host_id||activeHost,msg.command),{windows:msg.windows||[],error:msg.error||''});renderAgents();return;}
+  if(msg.type==='agent-quota'){
+    const hostId=msg.host_id||activeHost;
+    quotaByAgent.set(quotaKey(hostId,msg.command),{windows:msg.windows||[],error:msg.error||''});
+    if(hostId===activeHost)renderAgents();
+    for(const session of sessions.values()){
+      if(session.host.id===hostId && session.agent.command===msg.command)renderSessionQuota(session);
+    }
+    return;
+  }
   if(msg.type==='admin-result'){if(!msg.success)showError(msg.message);else post({action:'admin-users'});return;}
   if(msg.type==='mcp-info'){showError(msg.message);return;}
   if(msg.type==='mcp-tool'){void executeMcpRequest(msg);return;}
@@ -482,7 +612,7 @@ async function executeMcpTool(name,a){
   if(name==='read_terminal_screen'){const [index,s]=resolveMcpSession(a),buffer=s.term.buffer.active,max=Math.max(1,Math.min(5000,Number(a.max_lines)||200)),end=buffer.length,start=a.include_scrollback?Math.max(0,end-max):Math.max(0,buffer.viewportY??buffer.baseY??0),lines=[];for(let row=start;row<Math.min(end,start+max);row++)lines.push(buffer.getLine(row)?.translateToString(true)||'');return {text:lines.join('\n'),cursor:{x:buffer.cursorX,y:buffer.cursorY},session:sessionState(s,index)};}
   if(name==='send_image_to_terminal'){const [,s]=resolveMcpSession(a);return await new Promise((resolve,reject)=>{const request_id=makeId();pendingMcp.set(request_id,{resolve,reject});post({action:'upload-image-path',request_id,id:s.id,image_path:a.image_path,prompt_prefix:argText(a,'prompt_prefix','请查看这张图片：')});});}
   if(name==='set_view_mode'){viewMode=a.tiled?'grid':'tabs';config.tiled=Boolean(a.tiled);sendConfig();renderSessions();return {tiled:Boolean(a.tiled)};}
-  if(name==='set_tile_layout'){if(!['grid','columns','rows'].includes(a.layout))throw new Error('layout 必须为 grid、columns 或 rows');tileLayout=a.layout;sendConfig();renderSessions();return {tile_layout:tileLayout};}
+  if(name==='set_tile_layout'){if(!Object.hasOwn(tileLayouts,a.layout))throw new Error('layout 必须为 grid、columns 或 rows');tileLayout=a.layout;sendConfig();renderSessions();return {tile_layout:tileLayout};}
   if(name==='toggle_sidebar'){if(a.visible!==undefined){config.sidebar_hidden=!a.visible;document.body.classList.toggle('sidebar-hidden',!a.visible);fitSessions();sendConfig();}if(a.width!==undefined){config.sidebar_width=Math.max(sidebarMinimumWidth(),Math.min(2000,Number(a.width)));document.querySelector('.sidebar').style.width=`${config.sidebar_width}px`;fitSessions();sendConfig();}if(a.edit_mode!==undefined){editing=Boolean(a.edit_mode);updateEditing();}return {sidebar_visible:!document.body.classList.contains('sidebar-hidden'),sidebar_width:document.querySelector('.sidebar').getBoundingClientRect().width,edit_mode:editing};}
   if(name==='set_ui_scale'){const scale=Number(a.scale);if(!Number.isInteger(scale)||scale<50||scale>200)throw new Error('scale 必须在 50 到 200 之间');applyUiScale(scale);sendConfig();return {ui_scale:scale};}
   if(name==='update_settings'){for(const key of ['auto_enter','auto_sync_enabled'])if(a[key]!==undefined)config[key]=Boolean(a[key]);for(const key of ['auto_enter_delay','sync_interval_seconds'])if(a[key]!==undefined)config[key]=Number(a[key]);if(a.sync_url!==undefined&&config.sync_url!==a.sync_url){config.sync_url=String(a.sync_url).trim().replace(/\/$/,'');config.sync_token='';}sendConfig();return {auto_enter:Boolean(config.auto_enter),auto_enter_delay:Number(config.auto_enter_delay)||1000,auto_sync_enabled:Boolean(config.auto_sync_enabled),sync_interval_seconds:Number(config.sync_interval_seconds)||5,sync_url:config.sync_url||''};}
@@ -503,7 +633,12 @@ sidebarResizer.addEventListener('pointermove',event=>{if(!resizingSidebar)return
 sidebarResizer.addEventListener('pointerup',()=>{if(!resizingSidebar)return;resizingSidebar=false;document.body.classList.remove('resizing-sidebar');fitSessions();sendConfig();});
 sidebarResizer.addEventListener('lostpointercapture',()=>{resizingSidebar=false;document.body.classList.remove('resizing-sidebar');});
 $('view-mode').addEventListener('click',()=>{viewMode=viewMode==='grid'?'tabs':'grid';sendConfig();renderSessions();});
-$('layout-grid').addEventListener('click',()=>{tileLayout=tileLayout==='grid'?'columns':tileLayout==='columns'?'rows':'grid';sendConfig();renderSessions();});
+$('layout-grid').addEventListener('click',()=>{
+  const layouts=Object.keys(tileLayouts);
+  tileLayout=layouts[(layouts.indexOf(tileLayout)+1)%layouts.length];
+  sendConfig();
+  renderSessions();
+});
 $('scale').addEventListener('input',()=>applyUiScale());
 $('scale').addEventListener('change',()=>sendConfig());
 for(const [id,theme] of Object.entries(THEMES)) $('theme-select').add(new Option(theme.label,id));
