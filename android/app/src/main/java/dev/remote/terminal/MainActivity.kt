@@ -1520,6 +1520,8 @@ private fun RemoteTerminalApp(store: LocalStore) {
     }
 }
 
+private val homeCardGridGap = 8.dp
+
 @Composable
 private fun HomeScreen(
     hosts: List<HostProfile>, agents: List<AgentPreset>, selectedHost: HostProfile?, selectedAgent: AgentPreset?,
@@ -1609,12 +1611,12 @@ private fun HomeScreen(
             } else {
                 Column(
                     Modifier.fillMaxWidth().padding(bottom = 18.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(homeCardGridGap),
                 ) {
                     displayedSessions.chunked(2).forEach { rowSessions ->
                         Row(
                             Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(homeCardGridGap),
                         ) {
                             rowSessions.forEach { session ->
                                 val originalIndex = sessions.indexOf(session).coerceAtLeast(0)
@@ -1706,35 +1708,71 @@ private fun HomeScreen(
                 }
             }
         } else {
-            LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.padding(bottom = 17.dp)) {
-                items(hosts, key = { it.id }) { host ->
-                    val selected = selectedHost?.id == host.id
-                    Surface(onClick = { onSelectHost(host) }, color = if (selected) Color(0xFF20342F) else Panel,
-                        shape = RoundedCornerShape(15.dp), border = androidx.compose.foundation.BorderStroke(1.dp, if (selected) Mint.copy(alpha = .7f) else Edge)) {
-                        Row(Modifier.widthIn(min = 165.dp).padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Text(if (selected) "◉" else "○", color = if (selected) Mint else Muted, fontSize = 17.sp)
-                            Spacer(Modifier.width(6.dp))
-                            Text(host.icon, fontSize = 21.sp)
-                            Spacer(Modifier.width(9.dp))
-                            Column(Modifier.weight(1f, fill = false)) {
-                                Text(host.name, color = White, fontWeight = FontWeight.SemiBold, fontSize = 13.sp, maxLines = 1)
-                                val route = HostRouteResolver.getRoute(host.id)
-                                val hasLan = host.lanAddress.isNotBlank()
-                                val hasExt = host.externalAddress.isNotBlank()
-                                val isSingle = !hasLan || !hasExt || host.lanAddress.trim() == host.externalAddress.trim()
-                                val routeText = when {
-                                    route != null && route.reachable -> if (isSingle) "${route.address}:${route.port}" else "${if (route.isLan) "内网" else "外网"} ${route.address}:${route.port}"
-                                    route != null && !route.reachable -> "离线 ${route.address}:${route.port}"
-                                    isSingle -> "${host.address.ifBlank { host.lanAddress.ifBlank { host.externalAddress } }}:${host.port}"
-                                    else -> "优先内网 ${host.lanAddress}:${host.lanPort}"
+            Column(
+                modifier = Modifier.fillMaxWidth().padding(bottom = 17.dp),
+                verticalArrangement = Arrangement.spacedBy(homeCardGridGap),
+            ) {
+                hosts.chunked(2).forEach { rowHosts ->
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(homeCardGridGap),
+                    ) {
+                        rowHosts.forEach { host ->
+                            val selected = selectedHost?.id == host.id
+                            val route = HostRouteResolver.getRoute(host.id)
+                            val hasLan = host.lanAddress.isNotBlank()
+                            val hasExt = host.externalAddress.isNotBlank()
+                            val isSingle = !hasLan || !hasExt || host.lanAddress.trim() == host.externalAddress.trim()
+                            val routeText = when {
+                                route != null && route.reachable -> if (isSingle) "${route.address}:${route.port}" else "${if (route.isLan) "内网" else "外网"} ${route.address}:${route.port}"
+                                route != null && !route.reachable -> "离线 ${route.address}:${route.port}"
+                                isSingle -> "${host.address.ifBlank { host.lanAddress.ifBlank { host.externalAddress } }}:${host.port}"
+                                else -> "优先内网 ${host.lanAddress}:${host.lanPort}"
+                            }
+                            val routeColor = when {
+                                route?.reachable == true -> if (route.isLan) Mint else Blue
+                                else -> Muted
+                            }
+                            Surface(
+                                onClick = { onSelectHost(host) },
+                                color = if (selected) Color(0xFF20342F) else Panel,
+                                shape = RoundedCornerShape(12.dp),
+                                border = BorderStroke(1.dp, if (selected) Mint.copy(alpha = .7f) else Edge),
+                                modifier = Modifier.weight(1f),
+                            ) {
+                                Column(
+                                    Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 9.dp),
+                                    verticalArrangement = Arrangement.spacedBy(5.dp),
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(host.icon.ifBlank { "⌘" }, fontSize = 19.sp)
+                                        Spacer(Modifier.width(6.dp))
+                                        Text(
+                                            host.name,
+                                            color = White,
+                                            fontWeight = FontWeight.SemiBold,
+                                            fontSize = 12.sp,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f),
+                                        )
+                                        Spacer(Modifier.width(5.dp))
+                                        Box(
+                                            Modifier.size(7.dp).clip(CircleShape)
+                                                .background(if (selected) Mint else Edge),
+                                        )
+                                    }
+                                    Text(
+                                        routeText,
+                                        color = routeColor,
+                                        fontSize = 10.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
                                 }
-                                val routeColor = when {
-                                    route?.reachable == true -> if (route.isLan) Mint else Blue
-                                    else -> Muted
-                                }
-                                Text(routeText, color = routeColor, fontSize = 10.sp, maxLines = 1)
                             }
                         }
+                        if (rowHosts.size == 1) Spacer(Modifier.weight(1f))
                     }
                 }
             }
@@ -2177,12 +2215,12 @@ private fun AgentSelectorGrid(
 ) {
     Column(
         modifier = Modifier.fillMaxWidth().selectableGroup(),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(homeCardGridGap),
     ) {
         agents.chunked(2).forEach { rowAgents ->
             Row(
                 modifier = Modifier.fillMaxWidth().height(IntrinsicSize.Min),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(homeCardGridGap),
             ) {
                 rowAgents.forEach { agent ->
                     val selected = selectedAgent?.id == agent.id
