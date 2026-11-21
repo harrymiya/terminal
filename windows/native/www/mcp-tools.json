@@ -1,0 +1,720 @@
+[
+  {
+    "name": "get_app_state",
+    "description": "获取桌面端当前完整状态：窗口布局、缩放、侧边栏、自动回车、同步配置、主机列表、当前选中的主机/Agent/工作区，以及所有已打开终端会话。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "select_host",
+    "description": "在左侧栏切换选中的主机（界面会同步高亮并刷新对应的 Agent 和工作区列表）。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "host_id": {
+          "type": "string",
+          "description": "主机 ID"
+        },
+        "host_index": {
+          "type": "integer",
+          "description": "主机索引（从 0 开始）"
+        },
+        "host_name": {
+          "type": "string",
+          "description": "主机名称"
+        }
+      }
+    }
+  },
+  {
+    "name": "add_host",
+    "description": "添加新的 SSH 主机（支持内网/外网地址与端口、可选保存密码到系统密钥环），界面立即刷新。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "主机名称"
+        },
+        "username": {
+          "type": "string",
+          "description": "SSH 用户名"
+        },
+        "lan_address": {
+          "type": "string",
+          "description": "内网地址（与 external_address 至少填一个）"
+        },
+        "lan_port": {
+          "type": "integer",
+          "description": "内网端口（填写 lan_address 时必填，1-65535）"
+        },
+        "external_address": {
+          "type": "string",
+          "description": "外网地址"
+        },
+        "external_port": {
+          "type": "integer",
+          "description": "外网端口（填写 external_address 时必填，1-65535）"
+        },
+        "password": {
+          "type": "string",
+          "description": "可选 SSH 密码（存入系统密钥环）"
+        },
+        "sync_id": {
+          "type": "string",
+          "description": "可选多端同步标识"
+        }
+      },
+      "required": [
+        "name",
+        "username"
+      ]
+    }
+  },
+  {
+    "name": "edit_host",
+    "description": "编辑已有主机的配置或密码，界面立即刷新。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "host_id": {
+          "type": "string"
+        },
+        "host_index": {
+          "type": "integer"
+        },
+        "host_name": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "username": {
+          "type": "string"
+        },
+        "lan_address": {
+          "type": "string"
+        },
+        "lan_port": {
+          "type": "integer"
+        },
+        "external_address": {
+          "type": "string"
+        },
+        "external_port": {
+          "type": "integer"
+        },
+        "password": {
+          "type": "string"
+        },
+        "clear_password": {
+          "type": "boolean"
+        },
+        "sync_id": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  {
+    "name": "delete_host",
+    "description": "删除指定主机及其保存的密码，界面立即刷新。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "host_id": {
+          "type": "string"
+        },
+        "host_index": {
+          "type": "integer"
+        },
+        "host_name": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  {
+    "name": "select_agent",
+    "description": "切换当前主机的 Agent（如 Codex、OpenCode、Antigravity、Shell 等），界面高亮同步更新。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "host_id": {
+          "type": "string"
+        },
+        "host_index": {
+          "type": "integer"
+        },
+        "host_name": {
+          "type": "string"
+        },
+        "agent_index": {
+          "type": "integer",
+          "description": "Agent 索引（从 0 开始）"
+        },
+        "agent_name": {
+          "type": "string",
+          "description": "Agent 名称"
+        }
+      }
+    }
+  },
+  {
+    "name": "add_agent",
+    "description": "为指定主机（默认当前主机）添加新 Agent 命令预设。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Agent 名称"
+        },
+        "command": {
+          "type": "string",
+          "description": "启动命令"
+        },
+        "host_id": {
+          "type": "string"
+        },
+        "host_index": {
+          "type": "integer"
+        },
+        "host_name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "command"
+      ]
+    }
+  },
+  {
+    "name": "edit_agent",
+    "description": "编辑指定主机的 Agent 名称或启动命令。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "agent_index": {
+          "type": "integer"
+        },
+        "agent_name": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "command": {
+          "type": "string"
+        },
+        "host_id": {
+          "type": "string"
+        },
+        "host_index": {
+          "type": "integer"
+        },
+        "host_name": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  {
+    "name": "delete_agent",
+    "description": "删除指定主机的 Agent。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "agent_index": {
+          "type": "integer"
+        },
+        "agent_name": {
+          "type": "string"
+        },
+        "host_id": {
+          "type": "string"
+        },
+        "host_index": {
+          "type": "integer"
+        },
+        "host_name": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  {
+    "name": "add_workspace",
+    "description": "为指定主机（默认当前主机）添加工作区目录（必须为远端绝对路径）。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "工作区显示名称"
+        },
+        "path": {
+          "type": "string",
+          "description": "远端绝对路径，例如 /home/dev/project"
+        },
+        "host_id": {
+          "type": "string"
+        },
+        "host_index": {
+          "type": "integer"
+        },
+        "host_name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "path"
+      ]
+    }
+  },
+  {
+    "name": "edit_workspace",
+    "description": "编辑指定主机的工作区名称或路径。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "workspace_index": {
+          "type": "integer"
+        },
+        "workspace_name": {
+          "type": "string"
+        },
+        "workspace_path": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "host_id": {
+          "type": "string"
+        },
+        "host_index": {
+          "type": "integer"
+        },
+        "host_name": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  {
+    "name": "delete_workspace",
+    "description": "删除指定主机的工作区。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "workspace_index": {
+          "type": "integer"
+        },
+        "workspace_name": {
+          "type": "string"
+        },
+        "workspace_path": {
+          "type": "string"
+        },
+        "host_id": {
+          "type": "string"
+        },
+        "host_index": {
+          "type": "integer"
+        },
+        "host_name": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  {
+    "name": "move_workspace",
+    "description": "调整工作区排序（上移 offset=-1，下移 offset=1），界面同步更新。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "workspace_index": {
+          "type": "integer"
+        },
+        "workspace_name": {
+          "type": "string"
+        },
+        "workspace_path": {
+          "type": "string"
+        },
+        "offset": {
+          "type": "integer",
+          "description": "-1 上移，1 下移"
+        },
+        "host_id": {
+          "type": "string"
+        },
+        "host_index": {
+          "type": "integer"
+        },
+        "host_name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "offset"
+      ]
+    }
+  },
+  {
+    "name": "browse_remote_directory",
+    "description": "通过 SSH 浏览远端主机的子目录列表（等同于界面中的「浏览远端目录」）。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "要浏览的远端路径，默认 ~ 或 /"
+        },
+        "host_id": {
+          "type": "string"
+        },
+        "host_index": {
+          "type": "integer"
+        },
+        "host_name": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  {
+    "name": "open_terminal",
+    "description": "在界面中打开（或切换到已打开的）终端标签/平铺卡片，发起真实 SSH + tmux 会话。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "host_id": {
+          "type": "string"
+        },
+        "host_index": {
+          "type": "integer"
+        },
+        "host_name": {
+          "type": "string"
+        },
+        "workspace_index": {
+          "type": "integer"
+        },
+        "workspace_name": {
+          "type": "string"
+        },
+        "workspace_path": {
+          "type": "string"
+        },
+        "agent_index": {
+          "type": "integer"
+        },
+        "agent_name": {
+          "type": "string"
+        },
+        "activate": {
+          "type": "boolean",
+          "description": "是否立即聚焦/切换到该终端，默认 true"
+        }
+      }
+    }
+  },
+  {
+    "name": "focus_terminal",
+    "description": "聚焦指定终端（标签模式下切到对应标签，平铺模式下聚焦对应卡片）。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "type": "string"
+        },
+        "session_index": {
+          "type": "integer"
+        }
+      }
+    }
+  },
+  {
+    "name": "close_terminal",
+    "description": "关闭指定终端标签/卡片并断开对应本地 SSH 控制连接（等同于点击终端关闭按钮）。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "type": "string"
+        },
+        "session_index": {
+          "type": "integer"
+        }
+      }
+    }
+  },
+  {
+    "name": "reconnect_terminal",
+    "description": "重新连接已断开的终端（等同于点击终端上的「重连」按钮）。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "type": "string"
+        },
+        "session_index": {
+          "type": "integer"
+        }
+      }
+    }
+  },
+  {
+    "name": "send_terminal_text",
+    "description": "向指定终端输入文本并可选按回车提交，界面终端会实时显示输入和输出。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "type": "string"
+        },
+        "session_index": {
+          "type": "integer"
+        },
+        "text": {
+          "type": "string",
+          "description": "要发送的文本"
+        },
+        "submit": {
+          "type": "boolean",
+          "description": "是否在末尾发送回车，默认 true"
+        },
+        "use_paste": {
+          "type": "boolean",
+          "description": "是否使用终端粘贴方式输入（多行文本自动使用粘贴）"
+        },
+        "focus": {
+          "type": "boolean",
+          "description": "是否聚焦该终端，默认 true"
+        }
+      },
+      "required": [
+        "text"
+      ]
+    }
+  },
+  {
+    "name": "send_terminal_keys",
+    "description": "向指定终端发送按键或组合键，如 Enter, Tab, Escape, Ctrl+C, Ctrl+D, Up, Down, PageUp, PageDown 等。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "type": "string"
+        },
+        "session_index": {
+          "type": "integer"
+        },
+        "keys": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ],
+          "description": "单个按键名或按键序列"
+        },
+        "focus": {
+          "type": "boolean",
+          "description": "是否聚焦该终端，默认 true"
+        }
+      },
+      "required": [
+        "keys"
+      ]
+    }
+  },
+  {
+    "name": "read_terminal_screen",
+    "description": "读取指定终端当前可见屏幕内容（或包含回滚历史），以及连接状态和光标位置。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "type": "string"
+        },
+        "session_index": {
+          "type": "integer"
+        },
+        "include_scrollback": {
+          "type": "boolean",
+          "description": "是否包含回滚缓冲区，默认 false（仅当前可见屏幕）"
+        },
+        "max_lines": {
+          "type": "integer",
+          "description": "最多返回末尾多少行，默认 200"
+        }
+      }
+    }
+  },
+  {
+    "name": "send_image_to_terminal",
+    "description": "读取本地图片，转换为 PNG（<=20MB）并上传到远端 ~/.remote-dev-terminal/images/，再将路径发送到指定终端并回车提交。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "type": "string"
+        },
+        "session_index": {
+          "type": "integer"
+        },
+        "image_path": {
+          "type": "string",
+          "description": "本地图片绝对路径"
+        },
+        "prompt_prefix": {
+          "type": "string",
+          "description": "路径前缀提示文本，默认「请查看这张图片：」"
+        }
+      },
+      "required": [
+        "image_path"
+      ]
+    }
+  },
+  {
+    "name": "set_view_mode",
+    "description": "切换主工作区视图模式：平铺模式（tiled=true）或标签模式（tiled=false）。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "tiled": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "tiled"
+      ]
+    }
+  },
+  {
+    "name": "set_tile_layout",
+    "description": "切换平铺模式的分栏布局：grid（网格）、columns（左右分栏）、rows（上下分栏）。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "layout": {
+          "type": "string",
+          "enum": [
+            "grid",
+            "columns",
+            "rows"
+          ]
+        }
+      },
+      "required": [
+        "layout"
+      ]
+    }
+  },
+  {
+    "name": "toggle_sidebar",
+    "description": "展开或收起左侧边栏，并可调整侧边栏宽度或切换编辑模式。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "visible": {
+          "type": "boolean",
+          "description": "是否显示侧边栏"
+        },
+        "width": {
+          "type": "integer",
+          "description": "可选侧边栏宽度（像素）"
+        },
+        "edit_mode": {
+          "type": "boolean",
+          "description": "是否开启左侧编辑模式"
+        }
+      }
+    }
+  },
+  {
+    "name": "set_ui_scale",
+    "description": "调整界面缩放比例（50–200%），界面实时缩放并保存。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "scale": {
+          "type": "integer",
+          "minimum": 50,
+          "maximum": 200
+        }
+      },
+      "required": [
+        "scale"
+      ]
+    }
+  },
+  {
+    "name": "update_settings",
+    "description": "更新系统设置（自动回车开关与延迟、自动同步开关与周期、同步服务地址）并保存。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "auto_enter": {
+          "type": "boolean"
+        },
+        "auto_enter_delay": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 60000
+        },
+        "auto_sync_enabled": {
+          "type": "boolean"
+        },
+        "sync_interval_seconds": {
+          "type": "integer",
+          "minimum": 5,
+          "maximum": 300
+        },
+        "sync_url": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  {
+    "name": "trigger_sync",
+    "description": "立即触发一次主机、Agent、工作区和共享会话同步。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "get_ssh_public_key",
+    "description": "读取本机 ~/.ssh/id_ed25519.pub 公钥（可选在不存在时自动生成）。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "generate_if_missing": {
+          "type": "boolean",
+          "description": "不存在时是否自动生成 ed25519 密钥，默认 false"
+        }
+      }
+    }
+  }
+]

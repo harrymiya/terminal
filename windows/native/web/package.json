@@ -1,0 +1,13 @@
+{
+  "name": "remote-dev-terminal-windows-ui",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src/main.js --bundle --minify --format=iife --outfile=../www/app.js && node copy-assets.mjs"
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/xterm": "^5.5.0",
+    "esbuild": "^0.25.0"
+  }
+}

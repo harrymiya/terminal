@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Remote Dev Terminal</title>
+  <link rel="stylesheet" href="app.css">
+  <link rel="stylesheet" href="layout.css">
+  <link rel="stylesheet" href="xterm.css">
+  <script defer src="app.js"></script>
+</head>
+<body>
+  <div class="app-shell">
+    <div class="workspace-shell">
+      <aside class="sidebar">
+        <div class="sidebar-brand"><div class="brand"><span class="brand-mark">R</span><span>REMOTE DEV</span></div><div class="sidebar-brand-actions"><span id="connection-status" class="status-dot" title="就绪"></span><button id="edit-mode" class="button quiet" title="管理主机、开发者和工作区">编辑</button><button id="sync-now" class="icon-button" title="立即同步主机、开发者、工作区和会话">↻</button><button id="settings" class="icon-button" title="系统设置">⚙</button></div></div>
+        <section class="sidebar-section">
+          <div class="section-heading"><span>主机</span></div>
+          <div id="host-list" class="flat-list"></div>
+          <div id="sync-status" class="muted small"></div>
+          <div class="management-actions"><button id="add-host" class="button" type="button">＋ 主机</button></div>
+        </section>
+        <section class="sidebar-section">
+          <div class="section-heading"><span>开发者</span></div>
+          <div id="agent-list" class="flat-list"></div>
+          <div id="agent-quota" class="muted small"></div>
+          <div class="management-actions"><button id="add-agent" class="button" type="button">＋ 开发者</button></div>
+        </section>
+        <section class="sidebar-section workspace-section">
+          <div class="section-heading"><span>工作区</span></div>
+          <div id="workspace-list" class="workspace-list"></div>
+          <div id="empty-workspaces" class="muted empty-note">选择主机后添加远端工作区</div>
+          <div class="management-actions"><button id="add-workspace" class="button" type="button">＋ 工作区</button></div>
+        </section>
+        <section id="instances-section" class="sidebar-section" hidden>
+          <div class="section-heading"><span>工作实例</span></div>
+          <div id="instances-list" class="flat-list"></div>
+        </section>
+        <footer class="sidebar-footer"><span class="muted">Windows 原生 · OpenSSH</span><span id="version-label">v1.0.0</span></footer>
+      </aside>
+      <div id="sidebar-resizer" class="sidebar-resizer" role="separator" aria-orientation="vertical" title="拖动调整侧边栏宽度"></div>
+      <main class="main-pane">
+        <div class="toolbar">
+          <div class="toolbar-left"><button id="sidebar-toggle" class="button" title="显示或隐藏侧边栏">☰ 菜单</button><span class="workspace-title">工作区</span></div>
+          <div id="minimized-sessions" class="minimized-sessions"></div><div class="toolbar-right"><span id="session-count" class="muted small">0 / 8</span><button id="view-mode" class="button" title="切换标签视图和平铺视图">标签模式</button><button id="layout-grid" class="button layout-button" title="切换平铺布局">⊞</button><button id="shared-sessions" class="button" title="查看其他设备的会话">共享会话</button><label class="scale-control" title="界面缩放">缩放 <input id="scale" type="range" min="50" max="200" step="1" value="100"></label></div>
+        </div>
+        <div id="session-stage" class="session-stage">
+          <div id="empty-state" class="empty-state"><div class="empty-icon">⌁</div><h2>连接到开发主机</h2><p>从侧边栏选择工作区开始，或先添加主机和工作区。</p><button id="empty-add-host" class="button primary">添加主机</button></div>
+          <div id="terminal-grid" class="terminal-grid grid-2"></div>
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <dialog id="form-dialog" class="dialog"><form method="dialog"><div class="dialog-heading"><h2 id="form-title"></h2><button class="icon-button" value="cancel" aria-label="关闭">×</button></div><div id="form-fields" class="form-fields"></div><div id="form-error" class="form-error"></div><div class="dialog-actions"><button class="button" value="cancel">取消</button><button id="form-browse" class="button" type="button" hidden>浏览远端目录…</button><button id="form-save" class="button primary" value="save">保存</button></div></form></dialog>
+  <dialog id="settings-dialog" class="dialog settings-dialog"><form method="dialog"><div class="dialog-heading"><h2>系统设置</h2><button class="icon-button" value="cancel" aria-label="关闭">×</button></div><div class="form-fields">
+    <label>界面主题<select id="theme-select" class="select"></select></label>
+    <label class="check-row"><input id="auto-enter" type="checkbox">自动确认 Agent 明确显示的 Enter 确认提示</label>
+    <label>自动回车延迟（50–30000 ms）<input id="auto-enter-delay" class="input" type="number" min="50" max="30000" step="50"></label>
+    <label>开发者额度刷新周期（15–300 秒）<input id="quota-interval" class="input" type="number" min="15" max="300" step="5"></label>
+    <label>主机资源刷新周期（5–300 秒）<input id="metrics-interval" class="input" type="number" min="5" max="300" step="1"></label>
+    <label>跨设备同步周期（5–300 秒）<input id="sync-interval" class="input" type="number" min="5" max="300" step="5"></label>
+    <label>同步服务地址<input id="sync-url" class="input" type="url" placeholder="https://example.com"></label>
+    <div class="settings-row"><span>同步账号：<strong id="sync-account">未登录</strong></span><span><button id="sync-login" class="button" type="button">登录</button><button id="sync-logout" class="button" type="button">退出</button></span></div>
+    <label class="check-row"><input id="auto-sync" type="checkbox">启用跨设备自动同步</label>
+    <label class="check-row"><input id="offline-mode" type="checkbox">离线模式（本机独立使用）</label>
+    <div class="settings-row"><button id="mcp-guide" class="button" type="button">MCP 接入说明</button></div>
+    <button id="sync-admin-users" class="button" type="button" hidden>同步用户维护</button>
+    <p class="muted small">终端使用 Windows OpenSSH；SSH 密钥位于 <code>~/.ssh/</code>。配置文件位于 <code>~/.config/remote-dev-terminal/config.json</code>。</p>
+  </div><div class="dialog-actions"><button class="button" value="cancel">取消</button><button id="settings-save" class="button primary" value="save">保存</button></div></form></dialog>
+  <input id="image-file" type="file" accept="image/*" hidden>
+  <dialog id="admin-users-dialog" class="dialog"><form method="dialog"><div class="dialog-heading"><h2>同步用户维护</h2><button class="icon-button" value="cancel" aria-label="关闭">×</button></div><div id="admin-users-list" class="form-fields"></div><div class="dialog-actions"><button id="admin-user-add" class="button" type="button">添加用户</button><button class="button" value="cancel">关闭</button></div></form></dialog>
+  <dialog id="shared-dialog" class="dialog"><form method="dialog"><div class="dialog-heading"><h2>共享会话</h2><button class="icon-button" value="cancel" aria-label="关闭">×</button></div><div id="shared-list" class="form-fields"></div><div class="dialog-actions"><button class="button" value="cancel">关闭</button></div></form></dialog>
+  <dialog id="browse-dialog" class="dialog"><form method="dialog"><div class="dialog-heading"><h2>浏览远端目录</h2><button class="icon-button" value="cancel" aria-label="关闭">×</button></div><div class="settings-row"><input id="browse-path" class="input" value="~"><button id="browse-go" class="button" type="button">打开</button></div><div id="browse-list" class="form-fields browse-list"></div><div class="dialog-actions"><button class="button" value="cancel">取消</button><button id="browse-select" class="button primary" type="button">选择当前目录</button></div></form></dialog>
+</body>
+</html>

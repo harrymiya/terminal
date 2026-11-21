@@ -1,0 +1,4 @@
+bin/
+obj/
+publish/
+web/node_modules/

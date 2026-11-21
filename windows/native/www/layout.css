@@ -1,0 +1,171 @@
+.sidebar [hidden],
+[hidden] {
+  display: none !important;
+}
+
+.sidebar {
+  flex: 0 0 auto;
+  max-width: none;
+  overflow-y: auto;
+}
+
+.sidebar-brand {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 32px;
+}
+
+.sidebar-brand .brand {
+  min-width: 0;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.sidebar-brand-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+}
+
+.sidebar-brand-actions .icon-button {
+  height: 26px;
+  width: 26px;
+}
+
+.toolbar-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.workspace-title {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.flat-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 30vh;
+  overflow-y: auto;
+}
+
+.flat-list-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.flat-list-button {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 1px;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg);
+  text-align: left;
+}
+
+.flat-list-button:hover {
+  border-color: var(--line);
+  background: var(--hover-overlay);
+}
+
+.flat-list-button.selected {
+  border-color: var(--line);
+  background: var(--accent-dark);
+}
+
+.flat-list-name,
+.flat-list-detail {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.flat-list-name {
+  font-weight: 600;
+}
+
+.flat-list-detail {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.flat-list-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 1px;
+}
+
+.flat-list-actions button {
+  min-width: 23px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--manage-fg);
+}
+
+.flat-list-actions button:hover {
+  background: var(--panel3);
+  color: var(--accent);
+}
+
+.flat-list-actions button:disabled {
+  opacity: .35;
+  cursor: default;
+}
+
+.management-actions {
+  display: none;
+}
+
+.editing .management-actions {
+  display: flex;
+}
+
+.management-actions .button {
+  flex: 1;
+}
+
+.host-detail,
+#host-metrics,
+#sync-status,
+#agent-quota {
+  padding-left: 4px;
+}
+
+.sidebar-resizer {
+  flex: 0 0 4px;
+  cursor: col-resize;
+  background: transparent;
+  touch-action: none;
+}
+
+.sidebar-resizer:hover,
+body.resizing-sidebar .sidebar-resizer {
+  background: var(--accent);
+  opacity: .55;
+}
+
+body.sidebar-hidden .sidebar,
+body.sidebar-hidden .sidebar-resizer {
+  display: none;
+}
+
+body.resizing-sidebar,
+body.resizing-sidebar * {
+  user-select: none !important;
+  cursor: col-resize !important;
+}

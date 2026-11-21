@@ -1,0 +1,288 @@
+using Microsoft.Win32.SafeHandles;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Text.RegularExpressions;
+
+namespace RemoteDevTerminal;
+
+internal sealed class SshTerminalSession : IDisposable
+{
+    private const uint HandleFlagInherit = 1;
+    private const uint ExtendedStartupInfoPresent = 0x00080000;
+    private const uint CreateUnicodeEnvironment = 0x00000400;
+    private const uint StartfUseStdHandles = 0x00000100;
+    private const int ProcThreadAttributePseudoConsole = 0x00020016;
+    private const uint WaitObject0 = 0;
+    private const uint WaitInfinite = 0xffffffff;
+
+    private readonly object _writeLock = new();
+    private SafeFileHandle? _input;
+    private SafeFileHandle? _output;
+    private IntPtr _pseudoConsole;
+    private IntPtr _process;
+    private Task? _reader;
+    private volatile bool _disposed;
+    private volatile bool _closed;
+    private string _savedPassword = "";
+    private DateTime _startedAt;
+    private string _promptTail = "";
+
+    public string Id { get; }
+    public event Action<byte[]>? DataReceived;
+    public event Action<int>? Exited;
+
+    public SshTerminalSession(string id) => Id = id;
+
+    public void Start(string username, string address, int port, string directory, string agent, int columns, int rows, string savedPassword = "")
+    {
+        if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(address))
+            throw new ArgumentException("请填写 SSH 用户名和地址。");
+        if (string.IsNullOrWhiteSpace(directory) || !directory.StartsWith("/", StringComparison.Ordinal))
+            throw new ArgumentException("远端工作区必须使用绝对路径。");
+        if (port is < 1 or > 65535) throw new ArgumentOutOfRangeException(nameof(port));
+
+        var ssh = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "OpenSSH", "ssh.exe");
+        if (!File.Exists(ssh)) throw new FileNotFoundException("未找到 Windows OpenSSH Client。请在“设置 → 系统 → 可选功能”中安装 OpenSSH 客户端。", ssh);
+
+        SafeFileHandle? childInput = null;
+        SafeFileHandle? childOutput = null;
+        IntPtr attributeList = IntPtr.Zero;
+        IntPtr pseudoConsoleValue = IntPtr.Zero;
+        try
+        {
+            _savedPassword = savedPassword;
+            _startedAt = DateTime.UtcNow;
+            var security = new SecurityAttributes { Length = Marshal.SizeOf<SecurityAttributes>(), InheritHandle = true };
+            if (!CreatePipe(out childInput, out _input, ref security, 0)) ThrowLastError("创建终端输入通道失败");
+            if (!CreatePipe(out _output, out childOutput, ref security, 0)) ThrowLastError("创建终端输出通道失败");
+            SetHandleInformation(_input, HandleFlagInherit, 0);
+            SetHandleInformation(_output, HandleFlagInherit, 0);
+
+            var size = new Coord { X = ClampShort(columns, 20), Y = ClampShort(rows, 5) };
+            var hr = CreatePseudoConsole(size, childInput, childOutput, 0, out _pseudoConsole);
+            if (hr < 0) Marshal.ThrowExceptionForHR(hr);
+
+            nuint attributeBytes = 0;
+            InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref attributeBytes);
+            if (attributeBytes == 0) ThrowLastError("初始化终端进程属性失败");
+            attributeList = Marshal.AllocHGlobal((nint)attributeBytes);
+            if (!InitializeProcThreadAttributeList(attributeList, 1, 0, ref attributeBytes)) ThrowLastError("初始化终端进程属性失败");
+            pseudoConsoleValue = Marshal.AllocHGlobal(IntPtr.Size);
+            Marshal.WriteIntPtr(pseudoConsoleValue, _pseudoConsole);
+            if (!UpdateProcThreadAttribute(attributeList, 0, (IntPtr)ProcThreadAttributePseudoConsole,
+                    pseudoConsoleValue, (nuint)IntPtr.Size, IntPtr.Zero, IntPtr.Zero))
+                ThrowLastError("附加 Windows 伪终端失败");
+
+            var remote = BuildRemoteCommand(Id, directory, agent);
+            var commandLine = string.Join(" ", new[] {
+                QuoteArgument(ssh), "-tt", "-o", "ServerAliveInterval=20", "-o", "ServerAliveCountMax=6",
+                "-p", port.ToString(), "-l", QuoteArgument(username), QuoteArgument(address), QuoteArgument(remote)
+            });
+            var startup = new StartupInfoEx
+            {
+                StartupInfo = new StartupInfo
+                {
+                    Cb = Marshal.SizeOf<StartupInfoEx>(),
+                    Flags = StartfUseStdHandles,
+                    StdInput = childInput.DangerousGetHandle(),
+                    StdOutput = childOutput.DangerousGetHandle(),
+                    StdError = childOutput.DangerousGetHandle()
+                },
+                AttributeList = attributeList
+            };
+            if (!CreateProcess(ssh, new StringBuilder(commandLine), IntPtr.Zero, IntPtr.Zero, true,
+                    ExtendedStartupInfoPresent | CreateUnicodeEnvironment, IntPtr.Zero, null,
+                    ref startup, out var processInfo))
+                ThrowLastError("启动 Windows OpenSSH 失败");
+
+            _process = processInfo.Process;
+            CloseHandle(processInfo.Thread);
+            childInput.Dispose(); childInput = null;
+            childOutput.Dispose(); childOutput = null;
+            _reader = Task.Run(ReadLoop);
+            _ = Task.Run(MonitorProcess);
+        }
+        catch
+        {
+            childInput?.Dispose(); childOutput?.Dispose();
+            _input?.Dispose(); _output?.Dispose(); _input = null; _output = null;
+            ClosePseudoConsoleHandle();
+            throw;
+        }
+        finally
+        {
+            if (attributeList != IntPtr.Zero)
+            {
+                DeleteProcThreadAttributeList(attributeList);
+                Marshal.FreeHGlobal(attributeList);
+            }
+            if (pseudoConsoleValue != IntPtr.Zero) Marshal.FreeHGlobal(pseudoConsoleValue);
+        }
+    }
+
+    public void Write(string text)
+    {
+        if (_disposed || _closed || _input is null || _input.IsInvalid) return;
+        Write(Encoding.UTF8.GetBytes(text));
+    }
+
+    private void Write(byte[] bytes)
+    {
+        lock (_writeLock)
+        {
+            if (_disposed || _closed || _input is null || _input.IsInvalid) return;
+            var offset = 0;
+            while (offset < bytes.Length)
+            {
+                var chunk = new byte[bytes.Length - offset];
+                Buffer.BlockCopy(bytes, offset, chunk, 0, chunk.Length);
+                if (!WriteFile(_input, chunk, (uint)chunk.Length, out var written, IntPtr.Zero))
+                {
+                    var error = Marshal.GetLastWin32Error();
+                    if (error is not 6 and not 109) throw new Win32Exception(error, "写入终端失败");
+                    return;
+                }
+                if (written == 0) return;
+                offset += (int)written;
+            }
+        }
+    }
+
+    public void Resize(int columns, int rows)
+    {
+        var handle = _pseudoConsole;
+        if (_disposed || handle == IntPtr.Zero) return;
+        var size = new Coord { X = ClampShort(columns, 20), Y = ClampShort(rows, 5) };
+        ResizePseudoConsole(handle, size);
+    }
+
+    private void ReadLoop()
+    {
+        var buffer = new byte[8192];
+        while (!_disposed && _output is { IsInvalid: false, IsClosed: false } output)
+        {
+            try
+            {
+                if (!ReadFile(output, buffer, (uint)buffer.Length, out var read, IntPtr.Zero) || read == 0) break;
+                var chunk = new byte[(int)read]; Buffer.BlockCopy(buffer, 0, chunk, 0, (int)read);
+                TryAnswerPasswordPrompt(chunk);
+                DataReceived?.Invoke(chunk);
+            }
+            catch (ObjectDisposedException) { break; }
+            catch (Exception) when (_disposed) { break; }
+        }
+    }
+
+    private void TryAnswerPasswordPrompt(byte[] bytes)
+    {
+        if (_savedPassword.Length == 0 || DateTime.UtcNow - _startedAt > TimeSpan.FromSeconds(20)) return;
+        var text = Regex.Replace(_promptTail + Encoding.UTF8.GetString(bytes), "\\x1b\\[[0-?]*[ -/]*[@-~]", "");
+        _promptTail = text.Length > 512 ? text.Substring(text.Length - 512) : text;
+        var line = text.Split(new[] { '\r', '\n' }).LastOrDefault()?.TrimEnd() ?? "";
+        if (!Regex.IsMatch(line, "(?i)(?:password|passphrase):\\s*$")) return;
+        var password = _savedPassword;
+        _savedPassword = "";
+        Write(Encoding.UTF8.GetBytes(password + "\r"));
+        password = "";
+    }
+
+    private void MonitorProcess()
+    {
+        var process = _process;
+        if (process == IntPtr.Zero) return;
+        WaitForSingleObject(process, WaitInfinite);
+        GetExitCodeProcess(process, out var exitCode);
+        _closed = true;
+        ClosePseudoConsoleHandle();
+        try { _reader?.Wait(TimeSpan.FromSeconds(2)); } catch { }
+        CloseHandle(process);
+        _process = IntPtr.Zero;
+        if (!_disposed) Exited?.Invoke(unchecked((int)exitCode));
+    }
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        var process = _process;
+        if (process != IntPtr.Zero && WaitForSingleObject(process, 0) != WaitObject0)
+            TerminateProcess(process, 1);
+        ClosePseudoConsoleHandle();
+        _input?.Dispose(); _input = null;
+        _output?.Dispose(); _output = null;
+    }
+
+    private void ClosePseudoConsoleHandle()
+    {
+        var handle = Interlocked.Exchange(ref _pseudoConsole, IntPtr.Zero);
+        if (handle != IntPtr.Zero) ClosePseudoConsole(handle);
+    }
+
+    private static string BuildRemoteCommand(string id, string directory, string agent)
+    {
+        var safeId = new string(id.Where(Uri.IsHexDigit).Take(18).ToArray()).ToLowerInvariant();
+        if (safeId.Length < 8) safeId = Guid.NewGuid().ToString("N").Substring(0, 18);
+        var session = "rdt_" + safeId;
+        var qDirectory = ShellQuote(directory);
+        var qAgent = ShellQuote(agent);
+        var inner = $"\"${{SHELL:-/bin/bash}}\" -l -i -c {qAgent}; code=$?; printf \\\"\\n[命令已退出，状态 %s；Shell 仍然可用]\\n\\\" \\\"$code\\\"; exec \\\"${{SHELL:-/bin/bash}}\\\" -l -i";
+        return $"cd -- {qDirectory} && if command -v tmux >/dev/null 2>&1; then " +
+               $"(tmux has-session -t {session} 2>/dev/null || tmux new-session -d -s {session} -c {qDirectory} {ShellQuote(inner)}) && " +
+               $"tmux set-option -t {session} mouse on && tmux attach-session -t {session}; " +
+               $"else printf '\\n[提示] 未安装 tmux，断线后无法恢复会话\\n'; exec \"${{SHELL:-/bin/bash}}\" -l -i -c {qAgent}; fi";
+    }
+
+    private static string ShellQuote(string value) => "'" + value.Replace("'", "'\"'\"'") + "'";
+
+    private static string QuoteArgument(string value)
+    {
+        if (value.Length > 0 && !value.Any(char.IsWhiteSpace) && value.IndexOf('"') < 0) return value;
+        var result = new StringBuilder("\"");
+        var slashes = 0;
+        foreach (var c in value)
+        {
+            if (c == '\\') { slashes++; continue; }
+            if (c == '"') result.Append('\\', slashes * 2 + 1).Append('"');
+            else { result.Append('\\', slashes).Append(c); }
+            slashes = 0;
+        }
+        result.Append('\\', slashes * 2).Append('"');
+        return result.ToString();
+    }
+
+    private static void ThrowLastError(string message) => throw new Win32Exception(Marshal.GetLastWin32Error(), message);
+    private static short ClampShort(int value, int minimum) => (short)Math.Min(short.MaxValue, Math.Max(minimum, value));
+
+    [StructLayout(LayoutKind.Sequential)] private struct Coord { public short X; public short Y; }
+    [StructLayout(LayoutKind.Sequential)] private struct SecurityAttributes { public int Length; public IntPtr SecurityDescriptor; [MarshalAs(UnmanagedType.Bool)] public bool InheritHandle; }
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct StartupInfo
+    {
+        public int Cb; public string? Reserved; public string? Desktop; public string? Title;
+        public int X; public int Y; public int XSize; public int YSize; public int XCountChars; public int YCountChars;
+        public int FillAttribute; public uint Flags; public short ShowWindow; public short Reserved2; public IntPtr Reserved2Pointer;
+        public IntPtr StdInput; public IntPtr StdOutput; public IntPtr StdError;
+    }
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] private struct StartupInfoEx { public StartupInfo StartupInfo; public IntPtr AttributeList; }
+    [StructLayout(LayoutKind.Sequential)] private struct ProcessInformation { public IntPtr Process; public IntPtr Thread; public uint ProcessId; public uint ThreadId; }
+
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool CreatePipe(out SafeFileHandle readPipe, out SafeFileHandle writePipe, ref SecurityAttributes attributes, int size);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool SetHandleInformation(SafeFileHandle handle, uint mask, uint flags);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern int CreatePseudoConsole(Coord size, SafeFileHandle input, SafeFileHandle output, uint flags, out IntPtr pseudoConsole);
+    [DllImport("kernel32.dll")] private static extern void ClosePseudoConsole(IntPtr pseudoConsole);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern int ResizePseudoConsole(IntPtr pseudoConsole, Coord size);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool InitializeProcThreadAttributeList(IntPtr attributeList, int attributeCount, uint flags, ref nuint size);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool UpdateProcThreadAttribute(IntPtr attributeList, uint flags, IntPtr attribute, IntPtr value, nuint size, IntPtr previousValue, IntPtr returnSize);
+    [DllImport("kernel32.dll")] private static extern void DeleteProcThreadAttributeList(IntPtr attributeList);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "CreateProcessW")]
+    private static extern bool CreateProcess(string applicationName, StringBuilder commandLine, IntPtr processAttributes, IntPtr threadAttributes, bool inheritHandles, uint creationFlags, IntPtr environment, string? currentDirectory, ref StartupInfoEx startupInfo, out ProcessInformation processInformation);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool ReadFile(SafeFileHandle file, byte[] buffer, uint bytesToRead, out uint bytesRead, IntPtr overlapped);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool WriteFile(SafeFileHandle file, byte[] buffer, uint bytesToWrite, out uint bytesWritten, IntPtr overlapped);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool GetExitCodeProcess(IntPtr process, out uint exitCode);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool TerminateProcess(IntPtr process, uint exitCode);
+    [DllImport("kernel32.dll")] private static extern bool CloseHandle(IntPtr handle);
+}
