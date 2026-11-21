@@ -70,7 +70,7 @@ internal sealed class SshTerminalSession : IDisposable
             var remote = BuildRemoteCommand(Id, directory, agent);
             var commandLine = string.Join(" ", new[] {
                 QuoteArgument(ssh), "-tt", "-o", "ServerAliveInterval=20", "-o", "ServerAliveCountMax=6",
-                "-p", port.ToString(), "-l", QuoteArgument(username), QuoteArgument(address), QuoteArgument(remote)
+                "-p", port.ToString(), "-l", QuoteArgument(username), "--", QuoteArgument(address), QuoteArgument(remote)
             });
             var startup = new StartupInfoEx
             {
@@ -243,6 +243,8 @@ internal sealed class SshTerminalSession : IDisposable
         foreach (DictionaryEntry entry in Environment.GetEnvironmentVariables())
             variables[Convert.ToString(entry.Key) ?? ""] = Convert.ToString(entry.Value) ?? "";
 
+        // The embedded xterm.js terminal supports this terminfo entry on the remote host.
+        variables["TERM"] = "xterm-256color";
         if (!string.IsNullOrEmpty(savedPassword))
         {
             variables["SSH_ASKPASS"] = Process.GetCurrentProcess().MainModule?.FileName ??
@@ -250,13 +252,14 @@ internal sealed class SshTerminalSession : IDisposable
             variables["SSH_ASKPASS_REQUIRE"] = "force";
             variables["DISPLAY"] = "rdt";
             variables["RDT_ASKPASS_PASSWORD"] = savedPassword;
+            variables["RDT_ASKPASS_ALLOW_CONFIRM"] = "1";
         }
 
         var block = string.Join("\0", variables.Select(pair => pair.Key + "=" + pair.Value)) + "\0\0";
         return Marshal.StringToHGlobalUni(block);
     }
 
-    private static string QuoteArgument(string value)
+    internal static string QuoteArgument(string value)
     {
         if (value.Length > 0 && !value.Any(char.IsWhiteSpace) && value.IndexOf('"') < 0) return value;
         var result = new StringBuilder("\"");

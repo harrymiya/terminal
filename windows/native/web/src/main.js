@@ -82,7 +82,7 @@ function applyUiScale(scale=Number($('scale').value)) {
   }
 }
 function fitSessions(){for(const session of sessions.values())try{session.fit.fit();}catch{}}
-function sendConfig() {
+function sendConfig(sshPasswordChange) {
   const previous=lastConfigSnapshot?JSON.parse(lastConfigSnapshot):{hosts:[],agents:[]};
   const oldHosts=new Map((previous.hosts||[]).map(h=>[h.id,h]));
   config.dirty_host_profiles ||= [];
@@ -101,7 +101,7 @@ function sendConfig() {
   config.ui_scale = Number($('scale').value);
   config.tile_layout = tileLayout;
   lastConfigSnapshot=JSON.stringify(config);
-  post({ action: 'save-config', config });
+  post({ action: 'save-config', config, ...(sshPasswordChange ? {ssh_password_change:sshPasswordChange} : {}) });
 }
 function setBusy(value) { $('connection-status').classList.toggle('busy', value); }
 function showError(message) { window.alert(message); }
@@ -180,7 +180,7 @@ function normalizeConfig(raw) {
     host.lan_port=Number(host.lan_port || host.port || 22);
     host.external_port=Number(host.external_port || host.port || 22);
   }
-  activeHost = config.current_host_id || config.hosts[0]?.id || '';
+  activeHost = config.hosts.some(host=>host.id===config.current_host_id) ? config.current_host_id : config.hosts[0]?.id || '';
   viewMode = config.tiled ? 'grid' : 'tabs';
   tileLayout=['grid','columns','rows'].includes(config.tile_layout)?config.tile_layout:'grid';
   $('scale').value = Math.min(200, Math.max(50, Number(config.ui_scale)||100));
@@ -330,7 +330,7 @@ function showForm(title, fields, initial, onSave, onDelete=null) {
   if (onDelete) { const del=document.createElement('button'); del.type='button'; del.className='button danger-button delete-form'; del.textContent='删除'; del.addEventListener('click',()=>{formDialog.close('delete');onDelete();}); actions.prepend(del); }
   form.onsubmit=(event)=>{
     event.preventDefault();
-    const values=Object.fromEntries(Object.entries(inputs).map(([k,v])=>[k,v.type==='checkbox'?v.checked:v.value.trim()]));
+    const values=Object.fromEntries(Object.entries(inputs).map(([k,v])=>[k,v.type==='checkbox'?v.checked:v.type==='password'?v.value:v.value.trim()]));
     const error=onSave(values);
     if (error) { $('form-error').textContent=error; return; }
     formDialog.close('save');
@@ -355,12 +355,13 @@ function editHost(host=null) {
     for(const key of ['lan_port','external_port']) if((key==='lan_port'?v.lan_address:v.external_address) && (!/^\d+$/.test(v[key]) || +v[key]<1 || +v[key]>65535)) return '端口必须是 1 到 65535 之间的数字。';
     const item=host||{id:makeId(),directories:[],selected_agent:0};
     const password=v.password;delete v.password;const clearPassword=v.clear_password;delete v.clear_password;
-    Object.assign(item,v,{lan_port:Number(v.lan_port||22),external_port:Number(v.external_port||22),port:Number(v.lan_port||v.external_port||22),address:v.lan_address||v.external_address});
     if(password&&clearPassword)return '请输入新密码或选择删除密码，不能同时操作。';
-    if(password){item.credential_id ||= makeId();post({action:'store-host-password',credential_id:item.credential_id,username:item.username,password});}
-    else if(clearPassword&&item.credential_id){post({action:'clear-host-password',credential_id:item.credential_id});delete item.credential_id;}
+    Object.assign(item,v,{lan_port:Number(v.lan_port||22),external_port:Number(v.external_port||22),port:Number(v.lan_port||v.external_port||22),address:v.lan_address||v.external_address});
     if(!host) config.hosts.push(item);
-    activeHost=item.id; sendConfig(); render(); return '';
+    activeHost=item.id;
+    sendConfig(password||clearPassword?{host_id:item.id,password}:null);
+    render();
+    return '';
   },host?()=>{if(confirm(`删除主机“${host.name}”及其工作区？`)){if(host.credential_id)post({action:'clear-host-password',credential_id:host.credential_id});post({action:'delete-host-profile',host_id:host.id});config.hosts=config.hosts.filter(x=>x.id!==host.id);activeHost=config.hosts[0]?.id||'';sendConfig();render();}}:null);
 }
 function editAgent(index=-1) {
@@ -458,7 +459,15 @@ async function executeMcpTool(name,a){
   if(name==='select_host'){const [index,host]=resolveMcpHost(a);activeHost=host.id;sendConfig();render();return {selected_host_index:index,host:{id:host.id,name:host.name,username:host.username}};}
   if(['add_host','edit_host','delete_host'].includes(name)){
     if(name==='delete_host'){const [index,host]=resolveMcpHost(a);if(host.credential_id)post({action:'clear-host-password',credential_id:host.credential_id});post({action:'delete-host-profile',host_id:host.id});config.hosts.splice(index,1);activeHost=config.hosts[0]?.id||'';sendConfig();render();return {deleted_host_id:host.id,deleted_host_name:host.name};}
-    const old=name==='edit_host'?resolveMcpHost(a)[1]:null;const v={name:argText(a,'name',old?.name||'').trim(),username:argText(a,'username',old?.username||'').trim(),lan_address:argText(a,'lan_address',old?.lan_address||''),lan_port:Number(a.lan_port??old?.lan_port??22),external_address:argText(a,'external_address',old?.external_address||''),external_port:Number(a.external_port??old?.external_port??22),sync_id:argText(a,'sync_id',old?.sync_id||'')};if(!v.name||!v.username||(!v.lan_address&&!v.external_address))throw new Error('请填写名称、SSH 用户名和至少一个地址');if([v.lan_address,v.external_address].some((address,i)=>address&&!Number.isInteger(i?v.external_port:v.lan_port)))throw new Error('主机端口必须是有效整数');const host=old||{id:makeId(),directories:[],selected_agent:0};Object.assign(host,v,{port:v.lan_address?v.lan_port:v.external_port,address:v.lan_address||v.external_address});if(a.password){host.credential_id ||= makeId();post({action:'store-host-password',credential_id:host.credential_id,username:host.username,password:String(a.password)});}if(a.clear_password&&host.credential_id){post({action:'clear-host-password',credential_id:host.credential_id});delete host.credential_id;}if(!old)config.hosts.push(host);activeHost=host.id;sendConfig();render();return {host:{id:host.id,name:host.name,username:host.username}};
+    const old=name==='edit_host'?resolveMcpHost(a)[1]:null;const v={name:argText(a,'name',old?.name||'').trim(),username:argText(a,'username',old?.username||'').trim(),lan_address:argText(a,'lan_address',old?.lan_address||''),lan_port:Number(a.lan_port??old?.lan_port??22),external_address:argText(a,'external_address',old?.external_address||''),external_port:Number(a.external_port??old?.external_port??22),sync_id:argText(a,'sync_id',old?.sync_id||'')};if(!v.name||!v.username||(!v.lan_address&&!v.external_address))throw new Error('请填写名称、SSH 用户名和至少一个地址');if([v.lan_address,v.external_address].some((address,i)=>address&&!Number.isInteger(i?v.external_port:v.lan_port)))throw new Error('主机端口必须是有效整数');
+    if(a.password&&a.clear_password)throw new Error('请输入新密码或选择删除密码，不能同时操作。');
+    const host=old||{id:makeId(),directories:[],selected_agent:0};
+    Object.assign(host,v,{port:v.lan_address?v.lan_port:v.external_port,address:v.lan_address||v.external_address});
+    if(!old)config.hosts.push(host);
+    activeHost=host.id;
+    sendConfig(a.password||a.clear_password?{host_id:host.id,password:String(a.password||'')}:null);
+    render();
+    return {host:{id:host.id,name:host.name,username:host.username}};
   }
   if(name==='select_agent'){const [hostIndex,host]=resolveMcpHost(a);activeHost=host.id;const [index,agent]=resolveMcpAgent(host,a);host.selected_agent=index;sendConfig();render();return {host_index:hostIndex,agent_index:index,agent};}
   if(['add_agent','edit_agent','delete_agent'].includes(name)){const [hostIndex,host]=resolveMcpHost(a),list=agentsForHost(host);let index=a.agent_index!==undefined?Number(a.agent_index):a.agent_name?list.findIndex(x=>x.name===a.agent_name):-1;if(name==='add_agent'){const agent={name:argText(a,'name').trim(),command:argText(a,'command').trim()};if(!agent.name||!agent.command)throw new Error('Agent 名称和命令不能为空');list.push(agent);host.selected_agent=list.length-1;sendConfig();render();return {host_index:hostIndex,agent_index:list.length-1,agent};}if(index<0||index>=list.length)throw new Error('未找到指定 Agent');if(name==='delete_agent'){const [deleted]=list.splice(index,1);host.selected_agent=Math.min(index,Math.max(0,list.length-1));sendConfig();render();return {host_index:hostIndex,deleted_agent:deleted};}const updated={...list[index],name:argText(a,'name',list[index].name).trim(),command:argText(a,'command',list[index].command).trim()};if(!updated.name||!updated.command)throw new Error('Agent 名称和命令不能为空');list[index]=updated;sendConfig();render();return {host_index:hostIndex,agent_index:index,agent:updated};}
@@ -496,7 +505,7 @@ sidebarResizer.addEventListener('lostpointercapture',()=>{resizingSidebar=false;
 $('view-mode').addEventListener('click',()=>{viewMode=viewMode==='grid'?'tabs':'grid';sendConfig();renderSessions();});
 $('layout-grid').addEventListener('click',()=>{tileLayout=tileLayout==='grid'?'columns':tileLayout==='columns'?'rows':'grid';sendConfig();renderSessions();});
 $('scale').addEventListener('input',()=>applyUiScale());
-$('scale').addEventListener('change',sendConfig);
+$('scale').addEventListener('change',()=>sendConfig());
 for(const [id,theme] of Object.entries(THEMES)) $('theme-select').add(new Option(theme.label,id));
 $('settings').addEventListener('click',()=>{$('auto-enter').checked=Boolean(config.auto_enter);$('settings-dialog').showModal();});
 $('theme-select').addEventListener('change',()=>{config.theme=$('theme-select').value;applyTheme();sendConfig();});

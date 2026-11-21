@@ -3,6 +3,7 @@ using System.IO;
 using System.Diagnostics;
 using System.Net;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Net.Sockets;
@@ -85,7 +86,6 @@ public partial class MainWindow : Window
                 case "input": Input(message); break;
                 case "resize": Resize(message); break;
                 case "close": CloseSession(Text(message, "id")); break;
-                case "store-host-password": StoreHostPassword(message); break;
                 case "clear-host-password": ClearHostPassword(message); break;
                 case "upload-image": _ = UploadImageAsync(message); break;
                 case "upload-image-path": _ = UploadImagePathAsync(message); break;
@@ -116,10 +116,7 @@ public partial class MainWindow : Window
             {
                 foreach (var node in hosts.OfType<JsonObject>())
                 {
-                    var credentialId = Text(node, "credential_id");
-                    var saved = credentialId.Length > 0 &&
-                        !string.IsNullOrEmpty(CredentialStore.Read("RemoteDevTerminal:host:" + credentialId)?.Secret);
-                    node["credential_saved"] = saved;
+                    node["credential_saved"] = ReadHostPassword(Text(node, "credential_id"), Text(node, "username")).Length > 0;
                 }
             }
             Send(new { type = "config", config });
@@ -136,9 +133,38 @@ public partial class MainWindow : Window
         var node = JsonNode.Parse(message.GetProperty("config").GetRawText()) as JsonObject
             ?? throw new InvalidDataException("收到的配置格式无效。");
         if (node["hosts"] is JsonArray hosts)
-            foreach (var host in hosts.OfType<JsonObject>()) host.Remove("credential_saved");
+        {
+            var previousHosts = (ConfigStore.Load()["hosts"] as JsonArray ?? new JsonArray()).OfType<JsonObject>().ToList();
+            foreach (var host in hosts.OfType<JsonObject>())
+            {
+                var previous = previousHosts.FirstOrDefault(item => Text(item, "id") == Text(host, "id"));
+                host.Remove("credential_saved");
+                host.Remove("credential_id");
+                if (previous?["credential_id"] is { } reference) host["credential_id"] = reference.DeepClone();
+            }
+            if (message.TryGetProperty("ssh_password_change", out var change))
+            {
+                var host = hosts.OfType<JsonObject>().FirstOrDefault(item => Text(item, "id") == Text(change, "host_id"))
+                    ?? throw new InvalidDataException("找不到要保存 SSH 密码的主机。");
+                var credentialId = Text(host, "credential_id");
+                if (credentialId.Length == 0) credentialId = Text(host, "id");
+                if (credentialId.Length == 0) throw new InvalidDataException("主机凭据 ID 为空。");
+                var password = Text(change, "password");
+                if (password.Length == 0)
+                {
+                    CredentialStore.Delete("RemoteDevTerminal:host:" + credentialId);
+                    host.Remove("credential_id");
+                }
+                else
+                {
+                    CredentialStore.Write("RemoteDevTerminal:host:" + credentialId, Text(host, "username"), password);
+                    host["credential_id"] = credentialId;
+                }
+            }
+        }
         ConfigStore.Save(node);
         Send(new { type = "saved" });
+        if (message.TryGetProperty("ssh_password_change", out _)) SendConfig();
         ConfigureSyncTimer();
         ConfigureRefreshTimers();
     }
@@ -150,7 +176,11 @@ public partial class MainWindow : Window
             throw new ArgumentException("终端 ID 无效。");
         CloseSession(id);
 
-        var host = message.GetProperty("host");
+        var requestedHost = message.GetProperty("host");
+        var currentHost = (ConfigStore.Load()["hosts"] as JsonArray)?.OfType<JsonObject>()
+            .FirstOrDefault(item => Text(item, "id") == Text(requestedHost, "id"));
+        using var currentHostDocument = currentHost is null ? null : JsonDocument.Parse(currentHost.ToJsonString());
+        var host = currentHostDocument?.RootElement ?? requestedHost;
         var workspace = message.GetProperty("workspace");
         var agent = message.GetProperty("agent");
         var username = Text(host, "username");
@@ -160,8 +190,7 @@ public partial class MainWindow : Window
         var session = new SshTerminalSession(id);
         var hostNode = JsonNode.Parse(host.GetRawText()) as JsonObject ?? new JsonObject();
         _sessionHosts[id] = hostNode;
-        var credentialId = Text(host, "credential_id");
-        var savedPassword = credentialId.Length == 0 ? "" : CredentialStore.Read("RemoteDevTerminal:host:" + credentialId)?.Secret ?? "";
+        var savedPassword = currentHost is not null ? ReadHostPassword(Text(currentHost, "credential_id"), username) : "";
         session.DataReceived += bytes => Dispatcher.BeginInvoke(() =>
         {
             if (_sessions.TryGetValue(id, out var current) && ReferenceEquals(current, session))
@@ -215,12 +244,11 @@ public partial class MainWindow : Window
         session.Dispose();
     }
 
-    private void StoreHostPassword(JsonElement message)
+    private static string ReadHostPassword(string credentialId, string username)
     {
-        var id = Text(message, "credential_id");
-        if (id.Length == 0) throw new ArgumentException("主机凭据 ID 为空。");
-        CredentialStore.Write("RemoteDevTerminal:host:" + id, Text(message, "username"), Text(message, "password"));
-        Send(new { type = "notice", message = "SSH 密码已加密保存在本机用户目录中。" });
+        if (credentialId.Length == 0) return "";
+        var credential = CredentialStore.Read("RemoteDevTerminal:host:" + credentialId);
+        return credential is { } saved && saved.UserName == username ? saved.Secret : "";
     }
 
     private void ClearHostPassword(JsonElement message)
@@ -393,8 +421,7 @@ public partial class MainWindow : Window
     private async Task RefreshInitialDataAsync(Task endpointProbes)
     {
         await endpointProbes.ConfigureAwait(false);
-        await RefreshHostMetricsAsync().ConfigureAwait(false);
-        await RefreshAgentQuotasAsync().ConfigureAwait(false);
+        await Task.WhenAll(RefreshHostMetricsAsync(), RefreshAgentQuotasAsync()).ConfigureAwait(false);
     }
 
     private async void MetricsTimer_Tick(object? sender, EventArgs e) => await RefreshHostMetricsAsync();
@@ -446,8 +473,10 @@ public partial class MainWindow : Window
             var jobs = agents.OfType<JsonObject>().Select(async agent =>
             {
                 var command = Text(agent, "command");
-                var executable = command.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? "";
-                var name = executable.Trim('"', '\'').Replace('\\', '/').Split('/').LastOrDefault()?.ToLowerInvariant() ?? "";
+                var firstWord = Regex.Match(command.TrimStart(), "^\"([^\"]+)\"|^'([^']+)'|^([^\\s\"']+)");
+                if (!firstWord.Success) return;
+                var executable = firstWord.Value.Trim('"', '\'');
+                var name = executable.Replace('\\', '/').Split('/').Last().ToLowerInvariant();
                 if (name is not ("codex" or "codex2" or "codx" or "agy" or "agy2")) return;
                 string? error = null;
                 JsonArray? quota = null;
@@ -470,8 +499,7 @@ public partial class MainWindow : Window
 
     private async Task<JsonArray?> ReadAgyQuotaAsync(JsonObject host, string executable)
     {
-        var command = QuoteShell(executable) + " -p \"/usage\" --output-format json";
-        var remote = "\"${SHELL:-/bin/bash}\" -l -i -c " + QuoteShell(command);
+        var remote = BuildQuotaCommand(executable, "-p \"/usage\" --output-format json");
         var result = await RunSshCommandAsync(host, remote, null, 30_000).ConfigureAwait(false);
         if (result.ExitCode != 0) return null;
         using var doc = ParseFirstJsonObject(result.Output);
@@ -498,16 +526,17 @@ public partial class MainWindow : Window
 
     private async Task<JsonArray?> ReadCodexQuotaAsync(JsonObject host, string executable)
     {
-        var remote = "\"${SHELL:-/bin/bash}\" -l -i -c " + QuoteShell(QuoteShell(executable) + " app-server --listen stdio://");
+        var remote = BuildQuotaCommand(executable, "app-server --listen stdio://");
         var start = CreateSshStartInfo(host, remote);
         using var process = new Process { StartInfo = start };
         if (!process.Start()) return null;
+        _ = process.StandardError.ReadToEndAsync();
         try
         {
             process.StandardInput.WriteLine("{\"id\":1,\"method\":\"initialize\",\"params\":{\"clientInfo\":{\"name\":\"remote_dev_terminal\",\"version\":\"1.0\"}}}");
             process.StandardInput.Flush();
-            var initialized = await ReadJsonLineAsync(process, 1, 15_000).ConfigureAwait(false);
-            if (initialized is null || !initialized.RootElement.TryGetProperty("id", out var firstId) || firstId.GetInt32() != 1) return null;
+            using var initialized = await ReadJsonLineAsync(process, 1, 15_000).ConfigureAwait(false);
+            if (initialized is null || initialized.RootElement.TryGetProperty("error", out _)) return null;
             process.StandardInput.WriteLine("{\"method\":\"initialized\",\"params\":{}}");
             process.StandardInput.WriteLine("{\"id\":2,\"method\":\"account/rateLimits/read\",\"params\":{}}");
             process.StandardInput.Flush();
@@ -516,19 +545,31 @@ public partial class MainWindow : Window
             var windows = new List<(int Minutes, int Remaining, string Reset)>();
             foreach (var name in new[] { "primary", "secondary" })
             {
-                if (!limits.TryGetProperty(name, out var window) || !window.TryGetProperty("windowDurationMins", out var mins) || !mins.TryGetInt32(out var minutes) || !window.TryGetProperty("usedPercent", out var used) || !used.TryGetDouble(out var percent)) continue;
+                if (limits.ValueKind != JsonValueKind.Object || !limits.TryGetProperty(name, out var window) ||
+                    window.ValueKind != JsonValueKind.Object ||
+                    !window.TryGetProperty("windowDurationMins", out var mins) || mins.ValueKind != JsonValueKind.Number || !mins.TryGetInt32(out var minutes) ||
+                    !window.TryGetProperty("usedPercent", out var used) || used.ValueKind != JsonValueKind.Number || !used.TryGetDouble(out var percent)) continue;
                 var remaining = Math.Max(0, Math.Min(100, 100 - (int)percent));
-                var reset = window.TryGetProperty("resetsAt", out var resets) && resets.TryGetDouble(out var timestamp) ? FormatReset(DateTimeOffset.FromUnixTimeSeconds((long)timestamp).UtcDateTime.ToString("O", CultureInfo.InvariantCulture)) : "";
+                var reset = window.TryGetProperty("resetsAt", out var resets) && resets.ValueKind == JsonValueKind.Number &&
+                    resets.TryGetInt64(out var timestamp) && timestamp is > 0 and <= 253402300799L
+                    ? FormatReset(DateTimeOffset.FromUnixTimeSeconds(timestamp).ToString("O", CultureInfo.InvariantCulture)) : "";
                 windows.Add((minutes, remaining, reset));
             }
             var chosen = new List<JsonObject>();
             var hourly = windows.Where(window => window.Minutes > 0 && window.Minutes < 1440).OrderBy(window => window.Minutes).FirstOrDefault();
-            if (hourly.Minutes > 0) chosen.Add(new JsonObject { ["label"] = "5h", ["remaining"] = hourly.Remaining, ["reset"] = hourly.Reset });
+            if (hourly.Minutes > 0) chosen.Add(new JsonObject { ["label"] = hourly.Minutes % 60 == 0 ? $"{hourly.Minutes / 60}h" : $"{hourly.Minutes}min", ["remaining"] = hourly.Remaining, ["reset"] = hourly.Reset });
             var weekly = windows.FirstOrDefault(window => window.Minutes == 10080);
             if (weekly.Minutes > 0) chosen.Add(new JsonObject { ["label"] = "7d", ["remaining"] = weekly.Remaining, ["reset"] = weekly.Reset });
             var array = new JsonArray(); foreach (var item in chosen) array.Add(item); return array.Count > 0 ? array : null;
         }
         finally { try { process.Kill(); } catch { } }
+    }
+
+    private static string BuildQuotaCommand(string executable, string arguments)
+    {
+        // Keep simple command names unquoted so the interactive login shell can expand aliases.
+        var invocation = Regex.IsMatch(executable, "^[a-zA-Z0-9_]+$") ? executable : QuoteShell(executable);
+        return "\"${SHELL:-/bin/bash}\" -l -i -c " + QuoteShell($"{invocation} {arguments}");
     }
 
     private static async Task<JsonDocument?> ReadJsonLineAsync(Process process, int expectedId, int timeoutMs)
@@ -543,7 +584,9 @@ public partial class MainWindow : Window
             try
             {
                 var document = JsonDocument.Parse(line);
-                if (document.RootElement.TryGetProperty("id", out var id) && id.TryGetInt32(out var value) && value == expectedId) return document;
+                if (document.RootElement.ValueKind == JsonValueKind.Object &&
+                    document.RootElement.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.Number &&
+                    id.TryGetInt32(out var value) && value == expectedId) return document;
                 document.Dispose();
             }
             catch (JsonException) { }
@@ -620,6 +663,7 @@ public partial class MainWindow : Window
         var hosts = config["hosts"] as JsonArray ?? new JsonArray();
         var mergedHosts = new JsonArray();
         var matchedProfiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var originalHostIds = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var hostNode in hosts.OfType<JsonObject>())
         {
@@ -634,7 +678,11 @@ public partial class MainWindow : Window
                 if (saved.RootElement.TryGetProperty("host", out var canonical) && canonical.TryGetProperty("id", out var canonicalId))
                 {
                     var newId = canonicalId.GetString() ?? id;
-                    if (newId != id) host["id"] = newId;
+                    if (newId != id)
+                    {
+                        host["id"] = newId;
+                        originalHostIds[newId] = id;
+                    }
                     if (profileById.TryGetValue(newId, out var canonicalProfile)) remote = canonicalProfile;
                     dirtyHosts.Remove(id);
                 }
@@ -668,22 +716,36 @@ public partial class MainWindow : Window
             mergedHosts.Add(host);
         }
 
-        config["hosts"] = mergedHosts;
-        config["dirty_host_profiles"] = JsonArrayFrom(dirtyHosts);
-        config["deleted_host_profiles"] = new JsonArray();
-        var latest = ConfigStore.Load();
-        latest["hosts"] = mergedHosts.DeepClone();
-        latest["agents"] = config["agents"]?.DeepClone();
-        latest["sync_username"] = username;
-        latest["sync_is_admin"] = config["sync_is_admin"]?.DeepClone();
-        latest["dirty_host_profiles"] = config["dirty_host_profiles"]?.DeepClone();
-        latest["deleted_host_profiles"] = new JsonArray();
-        latest["dirty_workspaces"] = config["dirty_workspaces"]?.DeepClone() ?? new JsonArray();
-        latest["agents_dirty"] = config["agents_dirty"]?.DeepClone() ?? JsonValue.Create(false);
-        latest["workspace_sync_revisions"] = config["workspace_sync_revisions"]?.DeepClone() ?? new JsonObject();
-        latest["agent_sync_revisions"] = config["agent_sync_revisions"]?.DeepClone() ?? new JsonObject();
-        latest["shared_sessions"] = config["shared_sessions"]?.DeepClone() ?? new JsonObject();
-        ConfigStore.Save(latest);
+        await Dispatcher.InvokeAsync(() =>
+        {
+            var latest = ConfigStore.Load();
+            var localHosts = (latest["hosts"] as JsonArray ?? new JsonArray()).OfType<JsonObject>().ToList();
+            foreach (var host in mergedHosts.OfType<JsonObject>())
+            {
+                var id = Text(host, "id");
+                var local = localHosts.FirstOrDefault(item => Text(item, "id") == id);
+                if (local is null && originalHostIds.TryGetValue(id, out var originalId))
+                {
+                    local = localHosts.FirstOrDefault(item => Text(item, "id") == originalId);
+                    if (Text(latest, "current_host_id") == originalId) latest["current_host_id"] = id;
+                }
+                // A password can be saved or cleared while the sync requests are running.
+                host.Remove("credential_id");
+                if (local?["credential_id"] is { } reference) host["credential_id"] = reference.DeepClone();
+            }
+            latest["hosts"] = mergedHosts;
+            latest["agents"] = config["agents"]?.DeepClone();
+            latest["sync_username"] = username;
+            latest["sync_is_admin"] = config["sync_is_admin"]?.DeepClone();
+            latest["dirty_host_profiles"] = JsonArrayFrom(dirtyHosts);
+            latest["deleted_host_profiles"] = new JsonArray();
+            latest["dirty_workspaces"] = config["dirty_workspaces"]?.DeepClone() ?? new JsonArray();
+            latest["agents_dirty"] = config["agents_dirty"]?.DeepClone() ?? JsonValue.Create(false);
+            latest["workspace_sync_revisions"] = config["workspace_sync_revisions"]?.DeepClone() ?? new JsonObject();
+            latest["agent_sync_revisions"] = config["agent_sync_revisions"]?.DeepClone() ?? new JsonObject();
+            latest["shared_sessions"] = config["shared_sessions"]?.DeepClone() ?? new JsonObject();
+            ConfigStore.Save(latest);
+        }).Task.ConfigureAwait(false);
     }
 
     private async Task<JsonArray> SyncWorkspacesAsync(JsonObject host, JsonObject config, string url, string token, string username)
@@ -1008,8 +1070,7 @@ public partial class MainWindow : Window
         using var document = JsonDocument.Parse(host.ToJsonString());
         var (address, port) = ResolveSshEndpoint(document.RootElement);
         var username = Text(host, "username");
-        var credentialId = Text(host, "credential_id");
-        var password = credentialId.Length == 0 ? "" : CredentialStore.Read("RemoteDevTerminal:host:" + credentialId)?.Secret ?? "";
+        var password = ReadHostPassword(Text(host, "credential_id"), username);
         var start = new ProcessStartInfo(SshExecutable())
         {
             Arguments = "-T -o " + (password.Length > 0 ? "BatchMode=no" : "BatchMode=yes") + " -o StrictHostKeyChecking=yes -o NumberOfPasswordPrompts=1 -o ConnectTimeout=8 -p " + port + " -l " + QuoteArgument(username) + " -- " + QuoteArgument(address) + " " + QuoteArgument(remote),
@@ -1109,9 +1170,42 @@ public partial class MainWindow : Window
 
     private static (string Address, int Port) ProbeSshEndpoint(List<(string Address, int Port)> candidates)
     {
-        foreach (var candidate in candidates)
+        // Prefer an endpoint already in known_hosts when both routes are available.
+        // OpenSSH still verifies the server's actual key on every connection.
+        var ordered = candidates.Count > 1
+            ? candidates.OrderByDescending(candidate => HasKnownHostEntry(candidate.Address, candidate.Port))
+            : (IEnumerable<(string Address, int Port)>)candidates;
+        foreach (var candidate in ordered)
             if (CanConnect(candidate.Address, candidate.Port)) return candidate;
         return candidates[candidates.Count - 1];
+    }
+
+    private static bool HasKnownHostEntry(string address, int port)
+    {
+        try
+        {
+            var sshDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".ssh");
+            var keygen = Path.Combine(Path.GetDirectoryName(SshExecutable())!, "ssh-keygen.exe");
+            var lookup = port == 22 ? address : $"[{address}]:{port}";
+            foreach (var name in new[] { "known_hosts", "known_hosts2" })
+            {
+                var file = Path.Combine(sshDirectory, name);
+                if (!File.Exists(file)) continue;
+                using var process = Process.Start(new ProcessStartInfo(keygen)
+                {
+                    Arguments = $"-F {QuoteArgument(lookup)} -f {QuoteArgument(file)}",
+                    UseShellExecute = false, CreateNoWindow = true,
+                    RedirectStandardOutput = true, RedirectStandardError = true
+                });
+                if (process is null) continue;
+                _ = process.StandardOutput.ReadToEndAsync();
+                _ = process.StandardError.ReadToEndAsync();
+                if (!process.WaitForExit(1000)) { process.Kill(); continue; }
+                if (process.ExitCode == 0) return true;
+            }
+        }
+        catch (Exception) { }
+        return false;
     }
     private static int ParsePort(string value, int fallback) => int.TryParse(value, out var port) && port is >= 1 and <= 65535 ? port : fallback;
     private static bool CanConnect(string address, int port)
@@ -1139,11 +1233,7 @@ public partial class MainWindow : Window
         catch { return false; }
     }
     private static string QuoteShell(string value) => "'" + value.Replace("'", "'\"'\"'") + "'";
-    private static string QuoteArgument(string value)
-    {
-        if (value.Length > 0 && !value.Any(char.IsWhiteSpace) && value.IndexOf('"') < 0) return value;
-        return "\"" + value.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
-    }
+    private static string QuoteArgument(string value) => SshTerminalSession.QuoteArgument(value);
 
     private void Send(object message)
     {
