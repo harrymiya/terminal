@@ -49,7 +49,6 @@ internal sealed class SshTerminalSession : IDisposable
         SafeFileHandle? childInput = null;
         SafeFileHandle? childOutput = null;
         IntPtr attributeList = IntPtr.Zero;
-        IntPtr pseudoConsoleValue = IntPtr.Zero;
         try
         {
             _savedPassword = savedPassword;
@@ -69,10 +68,8 @@ internal sealed class SshTerminalSession : IDisposable
             if (attributeBytes == 0) ThrowLastError("初始化终端进程属性失败");
             attributeList = Marshal.AllocHGlobal((nint)attributeBytes);
             if (!InitializeProcThreadAttributeList(attributeList, 1, 0, ref attributeBytes)) ThrowLastError("初始化终端进程属性失败");
-            pseudoConsoleValue = Marshal.AllocHGlobal(IntPtr.Size);
-            Marshal.WriteIntPtr(pseudoConsoleValue, _pseudoConsole);
             if (!UpdateProcThreadAttribute(attributeList, 0, (IntPtr)ProcThreadAttributePseudoConsole,
-                    pseudoConsoleValue, (nuint)IntPtr.Size, IntPtr.Zero, IntPtr.Zero))
+                    _pseudoConsole, (nuint)IntPtr.Size, IntPtr.Zero, IntPtr.Zero))
                 ThrowLastError("附加 Windows 伪终端失败");
 
             var remote = BuildRemoteCommand(Id, directory, agent);
@@ -114,7 +111,6 @@ internal sealed class SshTerminalSession : IDisposable
                 DeleteProcThreadAttributeList(attributeList);
                 Marshal.FreeHGlobal(attributeList);
             }
-            if (pseudoConsoleValue != IntPtr.Zero) Marshal.FreeHGlobal(pseudoConsoleValue);
         }
     }
 
