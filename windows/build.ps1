@@ -64,7 +64,6 @@ $packagePublish = Join-Path $packageRoot 'native\publish'
 New-Item -ItemType Directory -Force -Path $packagePublish | Out-Null
 Copy-Item (Join-Path $PSScriptRoot 'install.bat') $packageRoot -Force
 Copy-Item (Join-Path $PSScriptRoot 'install.ps1') $packageRoot -Force
-Copy-Item (Join-Path $PSScriptRoot 'launch.ps1') $packageRoot -Force
 Copy-Item (Join-Path $PSScriptRoot 'README.md') $packageRoot -Force
 Get-ChildItem -LiteralPath $publishDir -Force | ForEach-Object {
     if ($_.PSIsContainer) {
