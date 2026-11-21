@@ -434,7 +434,7 @@ function handleNativeMessage(event) {
   if(msg.type==='output'&&session){const raw=atob(msg.data);const bytes=Uint8Array.from(raw,c=>c.charCodeAt(0));session.term.write(bytes);}
   else if(msg.type==='endpoint-selected'&&session){const address=String(msg.address||'').replace(/[\x00-\x1f\x7f]/g,'');session.term.writeln(`\r\n\x1b[90m连接目标 ${address}:${Number(msg.port)||22} …\x1b[0m`);}
   else if(msg.type==='connected'&&session){session.connected=true;setBusy(false);session.term.focus();}
-  else if(msg.type==='closed'&&session){session.connected=false;setBusy([...sessions.values()].some(s=>s.connected));session.term.writeln(`\r\n\x1b[90m[SSH 已断开，退出码 ${Number(msg.code)}；点击右上角 ↻ 重新连接]\x1b[0m`);}
+  else if(msg.type==='closed'&&session){session.connected=false;setBusy([...sessions.values()].some(s=>s.connected));const exitCode=(Number(msg.code)>>>0).toString(16).toUpperCase().padStart(8,'0');session.term.writeln(`\r\n\x1b[90m[SSH 已断开，退出码 0x${exitCode}；点击右上角 ↻ 重新连接]\x1b[0m`);}
   else if(msg.type==='error'&&session){session.connected=false;setBusy(false);session.term.writeln(`\r\n\x1b[31m${msg.message}\x1b[0m`);}
   else if(msg.type==='saved'){ $('connection-status').title='配置已保存'; }
   else if(msg.type==='notice')showError(msg.message);

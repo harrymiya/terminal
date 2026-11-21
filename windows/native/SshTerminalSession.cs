@@ -84,16 +84,12 @@ internal sealed class SshTerminalSession : IDisposable
             {
                 StartupInfo = new StartupInfo
                 {
-                    Cb = Marshal.SizeOf<StartupInfoEx>(),
-                    Flags = StartfUseStdHandles,
-                    StdInput = childInput.DangerousGetHandle(),
-                    StdOutput = childOutput.DangerousGetHandle(),
-                    StdError = childOutput.DangerousGetHandle()
+                    Cb = Marshal.SizeOf<StartupInfoEx>()
                 },
                 AttributeList = attributeList
             };
-            if (!CreateProcess(ssh, new StringBuilder(commandLine), IntPtr.Zero, IntPtr.Zero, true,
-                    ExtendedStartupInfoPresent | CreateUnicodeEnvironment, IntPtr.Zero, null,
+            if (!CreateProcess(ssh, new StringBuilder(commandLine), IntPtr.Zero, IntPtr.Zero, false,
+                    ExtendedStartupInfoPresent, IntPtr.Zero, null,
                     ref startup, out var processInfo))
                 ThrowLastError("启动 Windows OpenSSH 失败");
 
