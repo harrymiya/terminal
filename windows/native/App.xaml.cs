@@ -7,9 +7,11 @@ public partial class App : System.Windows.Application
 {
     protected override void OnStartup(System.Windows.StartupEventArgs e)
     {
-        if (e.Args.Any(arg => string.Equals(arg, "--ssh-askpass", StringComparison.OrdinalIgnoreCase)))
+        var askpassPassword = Environment.GetEnvironmentVariable("RDT_ASKPASS_PASSWORD");
+        if (e.Args.Any(arg => string.Equals(arg, "--ssh-askpass", StringComparison.OrdinalIgnoreCase)) ||
+            askpassPassword is not null)
         {
-            var secret = Environment.GetEnvironmentVariable("RDT_ASKPASS_PASSWORD") ?? "";
+            var secret = askpassPassword ?? "";
             var bytes = Encoding.UTF8.GetBytes(secret + Environment.NewLine);
             var handle = GetStdHandle(-11);
             if (handle != IntPtr.Zero && handle != new IntPtr(-1)) WriteFile(handle, bytes, (uint)bytes.Length, out _, IntPtr.Zero);

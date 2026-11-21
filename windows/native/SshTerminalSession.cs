@@ -1,10 +1,10 @@
+using System.Collections;
 using Microsoft.Win32.SafeHandles;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
-using System.Text.RegularExpressions;
 
 namespace RemoteDevTerminal;
 
@@ -26,9 +26,6 @@ internal sealed class SshTerminalSession : IDisposable
     private Task? _reader;
     private volatile bool _disposed;
     private volatile bool _closed;
-    private string _savedPassword = "";
-    private DateTime _startedAt;
-    private string _promptTail = "";
 
     public string Id { get; }
     public event Action<byte[]>? DataReceived;
@@ -51,8 +48,6 @@ internal sealed class SshTerminalSession : IDisposable
         IntPtr attributeList = IntPtr.Zero;
         try
         {
-            _savedPassword = savedPassword;
-            _startedAt = DateTime.UtcNow;
             var security = new SecurityAttributes { Length = Marshal.SizeOf<SecurityAttributes>(), InheritHandle = true };
             if (!CreatePipe(out childInput, out _input, ref security, 0)) ThrowLastError("创建终端输入通道失败");
             if (!CreatePipe(out _output, out childOutput, ref security, 0)) ThrowLastError("创建终端输出通道失败");
@@ -85,10 +80,16 @@ internal sealed class SshTerminalSession : IDisposable
                 },
                 AttributeList = attributeList
             };
-            if (!CreateProcess(ssh, new StringBuilder(commandLine), IntPtr.Zero, IntPtr.Zero, false,
-                    ExtendedStartupInfoPresent, IntPtr.Zero, null,
-                    ref startup, out var processInfo))
-                ThrowLastError("启动 Windows OpenSSH 失败");
+            var environment = BuildEnvironmentBlock(savedPassword);
+            ProcessInformation processInfo;
+            try
+            {
+                if (!CreateProcess(ssh, new StringBuilder(commandLine), IntPtr.Zero, IntPtr.Zero, false,
+                        ExtendedStartupInfoPresent | CreateUnicodeEnvironment, environment, null,
+                        ref startup, out processInfo))
+                    ThrowLastError("启动 Windows OpenSSH 失败");
+            }
+            finally { Marshal.FreeHGlobal(environment); }
 
             _process = processInfo.Process;
             CloseHandle(processInfo.Thread);
@@ -181,25 +182,11 @@ internal sealed class SshTerminalSession : IDisposable
             {
                 if (!ReadFile(output, buffer, (uint)buffer.Length, out var read, IntPtr.Zero) || read == 0) break;
                 var chunk = new byte[(int)read]; Buffer.BlockCopy(buffer, 0, chunk, 0, (int)read);
-                TryAnswerPasswordPrompt(chunk);
                 DataReceived?.Invoke(chunk);
             }
             catch (ObjectDisposedException) { break; }
             catch (Exception) when (_disposed) { break; }
         }
-    }
-
-    private void TryAnswerPasswordPrompt(byte[] bytes)
-    {
-        if (_savedPassword.Length == 0 || DateTime.UtcNow - _startedAt > TimeSpan.FromSeconds(20)) return;
-        var text = Regex.Replace(_promptTail + Encoding.UTF8.GetString(bytes), "\\x1b\\[[0-?]*[ -/]*[@-~]", "");
-        _promptTail = text.Length > 512 ? text.Substring(text.Length - 512) : text;
-        var line = text.Split(new[] { '\r', '\n' }).LastOrDefault()?.TrimEnd() ?? "";
-        if (!Regex.IsMatch(line, "(?i)(?:password|passphrase):\\s*$")) return;
-        var password = _savedPassword;
-        _savedPassword = "";
-        Write(Encoding.UTF8.GetBytes(password + "\r"));
-        password = "";
     }
 
     private void MonitorProcess()
@@ -249,6 +236,25 @@ internal sealed class SshTerminalSession : IDisposable
     }
 
     private static string ShellQuote(string value) => "'" + value.Replace("'", "'\"'\"'") + "'";
+
+    private static IntPtr BuildEnvironmentBlock(string savedPassword)
+    {
+        var variables = new SortedDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (DictionaryEntry entry in Environment.GetEnvironmentVariables())
+            variables[Convert.ToString(entry.Key) ?? ""] = Convert.ToString(entry.Value) ?? "";
+
+        if (!string.IsNullOrEmpty(savedPassword))
+        {
+            variables["SSH_ASKPASS"] = Process.GetCurrentProcess().MainModule?.FileName ??
+                throw new InvalidOperationException("无法定位 Remote Dev Terminal 程序以自动填写 SSH 密码。");
+            variables["SSH_ASKPASS_REQUIRE"] = "force";
+            variables["DISPLAY"] = "rdt";
+            variables["RDT_ASKPASS_PASSWORD"] = savedPassword;
+        }
+
+        var block = string.Join("\0", variables.Select(pair => pair.Key + "=" + pair.Value)) + "\0\0";
+        return Marshal.StringToHGlobalUni(block);
+    }
 
     private static string QuoteArgument(string value)
     {

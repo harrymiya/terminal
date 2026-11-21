@@ -348,7 +348,7 @@ function editHost(host=null) {
     {key:'external_address',label:'外网地址（可选）',placeholder:'dev.example.com'},
     {key:'external_port',label:'外网端口',value:'22'},
     {key:'sync_id',label:'多端同步标识（可选）',placeholder:'同一主机在各设备使用相同标识'},
-    {key:'password',label:'SSH 密码（存入 Windows 凭据管理器）',type:'password',placeholder:host?.credential_saved?'••••••••（已保存，留空保持）':'输入 SSH 密码'},
+    {key:'password',label:'SSH 密码（加密保存在本机文件）',type:'password',placeholder:host?.credential_saved?'••••••••（已保存，留空保持）':'输入 SSH 密码'},
     {key:'clear_password',label:'删除已保存的 SSH 密码',type:'checkbox'}
   ],{...host,password:'',clear_password:false,lan_port:String(host?.lan_port||host?.port||22),external_port:String(host?.external_port||host?.port||22)},(v)=>{
     if(!v.name || !v.username || (!v.lan_address && !v.external_address)) return '请填写名称、SSH 用户名和至少一个 SSH 地址。';

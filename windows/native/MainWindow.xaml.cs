@@ -220,7 +220,7 @@ public partial class MainWindow : Window
         var id = Text(message, "credential_id");
         if (id.Length == 0) throw new ArgumentException("主机凭据 ID 为空。");
         CredentialStore.Write("RemoteDevTerminal:host:" + id, Text(message, "username"), Text(message, "password"));
-        Send(new { type = "notice", message = "SSH 密码已保存到当前 Windows 用户的凭据管理器。" });
+        Send(new { type = "notice", message = "SSH 密码已加密保存在本机用户目录中。" });
     }
 
     private void ClearHostPassword(JsonElement message)
@@ -474,8 +474,8 @@ public partial class MainWindow : Window
         var remote = "\"${SHELL:-/bin/bash}\" -l -i -c " + QuoteShell(command);
         var result = await RunSshCommandAsync(host, remote, null, 30_000).ConfigureAwait(false);
         if (result.ExitCode != 0) return null;
-        var start = result.Output.IndexOf('{'); if (start < 0) return null;
-        using var doc = JsonDocument.Parse(result.Output.Substring(start));
+        using var doc = ParseFirstJsonObject(result.Output);
+        if (doc is null) return null;
         if (!doc.RootElement.TryGetProperty("command", out var commandResult) || !commandResult.TryGetProperty("data", out var data) || !data.TryGetProperty("groups", out var groups)) return null;
         var windows = new Dictionary<int, JsonObject>();
         foreach (var group in groups.EnumerateArray())
@@ -493,7 +493,7 @@ public partial class MainWindow : Window
             }
         }
         var resultArray = new JsonArray(); foreach (var pair in windows.OrderBy(pair => pair.Key)) resultArray.Add(pair.Value);
-        return resultArray;
+        return resultArray.Count > 0 ? resultArray : null;
     }
 
     private async Task<JsonArray?> ReadCodexQuotaAsync(JsonObject host, string executable)
@@ -526,7 +526,7 @@ public partial class MainWindow : Window
             if (hourly.Minutes > 0) chosen.Add(new JsonObject { ["label"] = "5h", ["remaining"] = hourly.Remaining, ["reset"] = hourly.Reset });
             var weekly = windows.FirstOrDefault(window => window.Minutes == 10080);
             if (weekly.Minutes > 0) chosen.Add(new JsonObject { ["label"] = "7d", ["remaining"] = weekly.Remaining, ["reset"] = weekly.Reset });
-            var array = new JsonArray(); foreach (var item in chosen) array.Add(item); return array;
+            var array = new JsonArray(); foreach (var item in chosen) array.Add(item); return array.Count > 0 ? array : null;
         }
         finally { try { process.Kill(); } catch { } }
     }
@@ -547,6 +547,36 @@ public partial class MainWindow : Window
                 document.Dispose();
             }
             catch (JsonException) { }
+        }
+        return null;
+    }
+
+    private static JsonDocument? ParseFirstJsonObject(string text)
+    {
+        for (var start = 0; start < text.Length; start++)
+        {
+            if (text[start] != '{') continue;
+            var depth = 0;
+            var inString = false;
+            var escaped = false;
+            for (var index = start; index < text.Length; index++)
+            {
+                var character = text[index];
+                if (inString)
+                {
+                    if (escaped) escaped = false;
+                    else if (character == '\\') escaped = true;
+                    else if (character == '"') inString = false;
+                    continue;
+                }
+                if (character == '"') inString = true;
+                else if (character == '{') depth++;
+                else if (character == '}' && --depth == 0)
+                {
+                    try { return JsonDocument.Parse(text.Substring(start, index - start + 1)); }
+                    catch (JsonException) { break; }
+                }
+            }
         }
         return null;
     }
