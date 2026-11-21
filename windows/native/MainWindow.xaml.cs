@@ -21,7 +21,7 @@ public partial class MainWindow : Window
     private readonly Dictionary<string, SshTerminalSession> _sessions = new(StringComparer.Ordinal);
     private readonly Dictionary<string, JsonObject> _sessionHosts = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, TaskCompletionSource<JsonElement>> _mcpCalls = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, (string Address, int Port)> _sshEndpointCache = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, Lazy<(string Address, int Port)>> _sshEndpointCache = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, string> _announcedSshEndpoints = new(StringComparer.Ordinal);
     private McpServer? _mcpServer;
     private bool _ready;
@@ -348,12 +348,37 @@ public partial class MainWindow : Window
     private void ConfigureRefreshTimers()
     {
         var config = ConfigStore.Load();
+        var endpointProbes = ProbeConfiguredSshEndpointsAsync(config["hosts"] as JsonArray);
         _metricsTimer.Interval = TimeSpan.FromSeconds(Math.Max(5, Math.Min(300, Int(config["host_metrics_interval_seconds"], 5))));
         _quotaTimer.Interval = TimeSpan.FromSeconds(Math.Max(15, Math.Min(300, Int(config["agent_quota_interval_seconds"], 60))));
         if (!_metricsTimer.IsEnabled) { _metricsTimer.Tick += MetricsTimer_Tick; _metricsTimer.Start(); }
         if (!_quotaTimer.IsEnabled) { _quotaTimer.Tick += QuotaTimer_Tick; _quotaTimer.Start(); }
-        _ = RefreshHostMetricsAsync();
-        _ = RefreshAgentQuotasAsync();
+        _ = RefreshInitialDataAsync(endpointProbes);
+    }
+
+    private Task ProbeConfiguredSshEndpointsAsync(JsonArray? hosts)
+    {
+        var jobs = (hosts?.OfType<JsonObject>() ?? Enumerable.Empty<JsonObject>()).Select(host =>
+        {
+            var serializedHost = host.ToJsonString();
+            return Task.Run(() =>
+            {
+                try
+                {
+                    using var document = JsonDocument.Parse(serializedHost);
+                    ResolveSshEndpoint(document.RootElement);
+                }
+                catch { }
+            });
+        }).ToArray();
+        return Task.WhenAll(jobs);
+    }
+
+    private async Task RefreshInitialDataAsync(Task endpointProbes)
+    {
+        await endpointProbes.ConfigureAwait(false);
+        await RefreshHostMetricsAsync().ConfigureAwait(false);
+        await RefreshAgentQuotasAsync().ConfigureAwait(false);
     }
 
     private async void MetricsTimer_Tick(object? sender, EventArgs e) => await RefreshHostMetricsAsync();
@@ -1006,23 +1031,11 @@ public partial class MainWindow : Window
         if (candidates.Count == 0) throw new ArgumentException("请填写主机 SSH 地址。");
 
         var key = string.Join("\u001f", Text(host, "id"), Text(host, "username"), lan, lanPort.ToString(CultureInfo.InvariantCulture), external, externalPort.ToString(CultureInfo.InvariantCulture));
-        if (_sshEndpointCache.TryGetValue(key, out var remembered))
-        {
-            AnnounceSshEndpoint(host, key, remembered);
-            return remembered;
-        }
-
-        var selected = ProbeSshEndpoint(candidates);
-        if (selected.Verified)
-        {
-            remembered = _sshEndpointCache.GetOrAdd(key, (selected.Address, selected.Port));
-            AnnounceSshEndpoint(host, key, remembered);
-            return remembered;
-        }
-
-        // If another SSH operation verified and cached an endpoint while this probe was running,
-        // keep all operations on that same endpoint for this application launch.
-        remembered = _sshEndpointCache.TryGetValue(key, out var cached) ? cached : (selected.Address, selected.Port);
+        var resolution = _sshEndpointCache.GetOrAdd(key, _ => new Lazy<(string Address, int Port)>(
+            () => ProbeSshEndpoint(candidates), LazyThreadSafetyMode.ExecutionAndPublication)).Value;
+        // The lazy entry is shared by startup probing, terminal connects, and other SSH operations,
+        // so a host's address is probed only once for this application launch.
+        var remembered = resolution;
         AnnounceSshEndpoint(host, key, remembered);
         return remembered;
     }
@@ -1031,7 +1044,7 @@ public partial class MainWindow : Window
     {
         var hostId = Text(host, "id");
         if (hostId.Length == 0) return;
-        var value = endpoint.Address + ":" + endpoint.Port.ToString(CultureInfo.InvariantCulture);
+        var value = signature + "\u001f" + endpoint.Address + ":" + endpoint.Port.ToString(CultureInfo.InvariantCulture);
         while (true)
         {
             if (_announcedSshEndpoints.TryGetValue(hostId, out var previous))
@@ -1048,11 +1061,11 @@ public partial class MainWindow : Window
         });
     }
 
-    private static (string Address, int Port, bool Verified) ProbeSshEndpoint(List<(string Address, int Port)> candidates)
+    private static (string Address, int Port) ProbeSshEndpoint(List<(string Address, int Port)> candidates)
     {
         foreach (var candidate in candidates)
-            if (CanConnect(candidate.Address, candidate.Port)) return (candidate.Address, candidate.Port, true);
-        return (candidates[candidates.Count - 1].Address, candidates[candidates.Count - 1].Port, false);
+            if (CanConnect(candidate.Address, candidate.Port)) return candidate;
+        return candidates[candidates.Count - 1];
     }
     private static int ParsePort(string value, int fallback) => int.TryParse(value, out var port) && port is >= 1 and <= 65535 ? port : fallback;
     private static bool CanConnect(string address, int port)
