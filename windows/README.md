@@ -4,15 +4,15 @@
 
 标签或平铺卡片上的图片按钮支持选择本地图片或粘贴图片；Windows 文件通常可从 `/mnt/c` 等路径选择。上传后会将远端路径发送给对应 Agent，发送前请确认 Agent 正在等待输入且输入框为空。图片保存在远端 `~/.remote-dev-terminal/images/`，需自行清理；转换后的图片最大 20 MB。
 
-## 安装
+## 一键安装
 
-如尚未安装 WSL，在管理员 PowerShell 中运行 `wsl --install -d Ubuntu`，按提示重启并完成 Ubuntu 用户初始化。更新 WSL 后确认 Linux 图形应用可运行。将整个 `windows` 文件夹复制到本机，然后在普通 PowerShell 中进入该文件夹：
+1. 将整个 `windows` 文件夹解压到本机磁盘。
+2. 双击 `install.bat`。安装器会检查 Windows 版本和 WSL，必要时请求管理员权限、安装 Ubuntu，并在需要重启时设置登录后续装。
+3. 首次启动 Ubuntu 时，按提示创建 Linux 用户名和密码；进入 Linux 命令行后输入 `exit`，安装器会继续安装依赖、创建开始菜单快捷方式并启动应用。若 Ubuntu 没有自动打开，按安装器提示从开始菜单打开 Ubuntu，完成初始化后回到安装窗口继续。
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\install.ps1
-```
+安装过程需要网络。安装器不会自动重启电脑；若 WSL 要求重启，会询问是否现在重启，并在下次登录后自动继续。若取消重启，也可以稍后再次双击 `install.bat`。
 
-脚本会在 Ubuntu 内请求 sudo 密码、安装 GTK/VTE 和 OpenSSH，然后为当前用户创建 **Remote Dev Terminal** 开始菜单快捷方式。若发行版名称不是 `Ubuntu`，先通过 `wsl -l -v` 查看名称，再使用 `-Distro "发行版名称"` 参数。整个安装目录必须可从 WSL 访问（例如 Windows 本地磁盘）。
+也可以从 PowerShell 运行 `install.ps1`。默认安装 Ubuntu；如要使用已经安装的 Ubuntu 发行版，可运行 `powershell -ExecutionPolicy Bypass -File .\install.ps1 -Distro "发行版名称"`。安装目录会复制到 `%LOCALAPPDATA%\RemoteDevTerminal\installer`，因此安装完成后可以移动或删除解压目录。
 
 更新时替换整个 `windows` 文件夹并重新运行安装命令。配置保存在所选 WSL 发行版的 `~/.config/remote-dev-terminal/config.json`，更新不会删除配置。主机配置可选保存 SSH 密码，密码存入 WSL 中当前用户的系统密钥环，需要可用且已解锁的 Secret Service。远端需安装 tmux 才能在断线后恢复会话；目录浏览需要 GNU find。关闭标签或程序后，目前不能从界面恢复旧标签。
 
