@@ -227,6 +227,9 @@ function renderHosts() {
   config.hosts.forEach((host,index)=>{
     const row=document.createElement('div');row.className='flat-list-row';
     const button=document.createElement('button');button.type='button';button.className=`flat-list-button${host.id===activeHost?' selected':''}`;
+    button.classList.add('with-indicators');
+    const label=document.createElement('span');
+    label.className='host-label';
     const name=document.createElement('span');name.className='flat-list-name';name.textContent=host.name||host.username||'主机';
     const remembered=sshEndpoints.get(host.id);
     const endpoint=remembered?.signature===sshEndpointSignature(host)?remembered:null;
@@ -234,7 +237,7 @@ function renderHosts() {
     const address=endpoint?.address||host.lan_address||host.external_address||host.address||'';
     const port=endpoint?.port||(host.lan_address?host.lan_port||host.port||22:host.external_port||host.port||22);
     const detail=document.createElement('span');detail.className='flat-list-detail';detail.textContent=probing?`${host.username||''}@正在探测 SSH 地址…`:`${host.username||''}@${address}:${port}`;
-    button.append(name,detail);
+    label.append(name,detail);
     const metrics=metricsByHost.get(host.id);
     const metricPair=document.createElement('span');
     metricPair.className='host-metrics';
@@ -242,7 +245,7 @@ function renderHosts() {
       hostMetric('MEM',metrics?.memory,'内存余量',metrics?.memory<20),
       hostMetric('CPU',metrics?.cpu,'CPU 占用率',metrics?.cpu>80),
     );
-    button.append(metricPair);
+    button.append(label,metricPair);
     button.title=`${detail.textContent}\n点击切换主机`;
     button.addEventListener('click',()=>{activeHost=host.id;sendConfig();render();});row.append(button);
     if(editing){const actions=document.createElement('span');actions.className='flat-list-actions';const edit=document.createElement('button');edit.type='button';edit.textContent='✎';edit.title='编辑主机';edit.addEventListener('click',()=>editHost(host));const remove=document.createElement('button');remove.type='button';remove.textContent='×';remove.title='删除主机';remove.addEventListener('click',()=>{if(!confirm(`删除主机“${host.name}”及其工作区？`))return;if(host.credential_id)post({action:'clear-host-password',credential_id:host.credential_id});post({action:'delete-host-profile',host_id:host.id});config.hosts.splice(index,1);activeHost=config.hosts[0]?.id||'';sendConfig();render();});actions.append(edit,remove);row.append(actions);}
@@ -303,6 +306,7 @@ function renderAgents() {
     const quota=quotaByAgent.get(quotaKey(host?.id,agent.command));
     const detail=document.createElement('span');
     if (host && supportsQuota(agent.command)) {
+      button.classList.add('with-indicators');
       detail.className='quota-batteries';
       renderQuotaBatteries(detail,quota,{showReset:true});
       if (!quota?.windows?.length) detail.title=quota?.error||'正在获取额度…';

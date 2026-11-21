@@ -113,6 +113,20 @@
   background: var(--accent-dark);
 }
 
+.flat-list-button.with-indicators {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  container-type: inline-size;
+}
+
+.host-label {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
 .flat-list-name,
 .flat-list-detail {
   overflow: hidden;
@@ -137,15 +151,14 @@
 }
 
 .host-metrics {
-  flex-wrap: wrap;
-  gap: 4px 12px;
-  margin-top: 3px;
+  gap: 8px;
 }
 
 .host-metric {
   color: var(--muted);
   font-size: 10px;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .host-metric-ring {
@@ -223,6 +236,43 @@
   color: var(--muted);
 }
 
+@container (max-width: 180px) {
+  .host-metrics,
+  .with-indicators .quota-batteries,
+  .with-indicators .quota-battery {
+    gap: 4px;
+  }
+
+  .host-metric {
+    flex-direction: column;
+    gap: 1px;
+  }
+
+  .host-metric-ring {
+    width: 16px;
+    height: 16px;
+  }
+
+  .with-indicators .quota-battery-icon {
+    width: 18px;
+  }
+}
+
+@container (max-width: 125px) {
+  .with-indicators .quota-batteries,
+  .with-indicators .quota-battery {
+    gap: 2px;
+  }
+
+  .with-indicators .quota-battery-icon {
+    width: 12px;
+  }
+
+  .with-indicators .quota-number {
+    font-size: 10px;
+  }
+}
+
 .terminal-grid {
   display: none;
   height: 100%;
@@ -293,6 +343,11 @@
   border-radius: 4px;
   background: transparent;
   color: var(--manage-fg);
+}
+
+#agent-list .flat-list-actions button {
+  min-width: 20px;
+  padding-inline: 3px;
 }
 
 .flat-list-actions button:hover {
