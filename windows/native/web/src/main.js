@@ -334,7 +334,7 @@ function renderWorkspaces() {
   workspaces.forEach((workspace,index)=>{
     const row=document.createElement('div'); row.className='workspace-row';
     const open=document.createElement('button'); open.className='workspace-button';
-    open.innerHTML=`<span class="workspace-icon">▣</span><span class="workspace-name">${escapeHtml(workspace.name || workspace.path)}</span>`;
+    open.innerHTML=`<span class="workspace-icon" aria-hidden="true">📁</span><span class="workspace-name">${escapeHtml(workspace.name || workspace.path)}</span>`;
     open.title=workspace.path || ''; open.addEventListener('click',()=>openSession(index)); row.append(open);
     const actions=document.createElement('span'); actions.className='workspace-edit';
     const up=document.createElement('button'); up.textContent='↑';up.title='上移工作区';up.disabled=index===0;up.addEventListener('click',()=>moveWorkspace(index,-1));
