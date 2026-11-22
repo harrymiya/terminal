@@ -17,10 +17,45 @@
   min-height: 32px;
 }
 
-.sidebar-brand .brand {
+.brand-slot {
+  flex: 1;
   min-width: 0;
-  font-size: 12px;
+  container-type: inline-size;
+}
+
+.sidebar-brand .brand {
+  display: inline-block;
+  color: var(--brand, var(--accent));
+  font-size: clamp(15px, 14cqi, max(21px, calc(24px * var(--ui-scale))));
+  font-weight: 800;
+  letter-spacing: .045em;
+  line-height: 1.15;
   white-space: nowrap;
+}
+
+:root:is([data-theme="neon"], [data-theme="neon_glow"]) .sidebar-brand .brand {
+  color: transparent;
+  background-image: linear-gradient(105deg, var(--accent), #f4eaff, var(--brand), var(--accent));
+  background-size: 220% 100%;
+  background-clip: text;
+  animation: wordmark-breathe 4.4s ease-in-out infinite;
+}
+
+@keyframes wordmark-breathe {
+  0%, 100% {
+    background-position: left center;
+    filter: drop-shadow(0 0 2px color-mix(in srgb, var(--accent) 50%, transparent));
+  }
+  50% {
+    background-position: right center;
+    filter: drop-shadow(0 0 7px color-mix(in srgb, var(--brand) 80%, transparent));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root:is([data-theme="neon"], [data-theme="neon_glow"]) .sidebar-brand .brand {
+    animation: none;
+  }
 }
 
 .sidebar-brand-actions {

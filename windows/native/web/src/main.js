@@ -53,10 +53,12 @@ function makeId() { return crypto.randomUUID().replaceAll('-', ''); }
 function currentTheme() { return THEMES[config.theme] || THEMES.cyberpunk; }
 function applyTheme() {
   const t=currentTheme(), root=document.documentElement;
+  const themeName=Object.hasOwn(THEMES,config.theme)?config.theme:'cyberpunk';
   const vars={bg:t.win_bg,panel:t.surface,panel2:t.control_bg,panel3:t.control_hover,line:t.border,text:t.fg,muted:t.subtitle,accent:t.accent,'accent-dark':t.accent_bg,danger:t.quota_low,'sidebar-bg':t.sidebar_bg,'toolbar-bg':t.toolbar_bg,'popup-bg':t.popup_bg,'control-fg':t.control_fg,brand:t.brand,section:t.section,'manage-fg':t.manage_fg,'tab-fg':t.tab_fg,'tile-grid-bg':t.tile_grid_bg,'tile-header-bg':t.tile_header_bg,'tile-focused-bg':t.tile_focused_bg,'drop-border':t.drop_border,'drop-bg':t.drop_bg,'drop-header':t.drop_header,'hover-overlay':t.hover_overlay,'quota-ok':t.quota_ok,'quota-warn':t.quota_warn,'dot-idle':t.dot_idle,'dot-run':t.dot_run,'dot-wait':t.dot_wait,'term-bg':t.term_bg,'term-fg':t.term_fg,'accent-text':t.accent_text,'accent-fg':t.accent_fg};
   for(const [key,value] of Object.entries(vars)) root.style.setProperty(`--${key}`,value);
-  root.style.colorScheme=config.theme==='light'?'light':'dark';
-  $('theme-select').value=Object.keys(THEMES).includes(config.theme)?config.theme:'cyberpunk';
+  root.dataset.theme=themeName;
+  root.style.colorScheme=themeName==='light'?'light':'dark';
+  $('theme-select').value=themeName;
   for(const s of sessions.values()) s.term.options.theme=terminalTheme(t);
 }
 function terminalTheme(t=currentTheme()) {
