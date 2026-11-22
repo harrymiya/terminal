@@ -545,7 +545,6 @@ function updateRunningHeaders() {
   for (const session of sessions.values()) {
     const running = session.lastOutputAt > 0 && now - session.lastOutputAt < 2500;
     session.card?.querySelector('.terminal-head')?.classList.toggle('running', running);
-    session.instanceButton?.classList.toggle('running', running);
   }
 }
 
@@ -688,7 +687,7 @@ function renderSessions({ focus = true } = {}) {
     card.className='terminal-card';
     card.classList.toggle('active', s.id === activeSession);
     card.classList.toggle('inactive', !row && !s.floating);
-    card.innerHTML=`<div class="terminal-head"><svg class="terminal-running-outline" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><rect x=".5" y=".5" width="99" height="99" rx="2"></rect></svg><span class="terminal-card-title agent-label" title="双击重命名"><span class="terminal-card-name">${escapeHtml(s.title)}</span></span><span class="terminal-quota quota-batteries" hidden></span><span class="terminal-tools"><button class="terminal-close rename-session" title="重命名">✎</button><button class="terminal-close image-session" title="发送图片">▧</button><button class="terminal-close minimize-session" title="最小化">−</button><button class="terminal-close float-session" title="${s.floating ? '还原到工作区' : '浮动窗口'}">□</button><button class="terminal-close reconnect" title="重新连接">↻</button><button class="terminal-close close-session" title="关闭终端">×</button></span></div><div class="terminal-body"></div>`;
+    card.innerHTML=`<div class="terminal-head"><svg class="terminal-running-outline" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><rect x=".5" y=".5" width="99" height="99" rx="0"></rect></svg><span class="terminal-card-title agent-label" title="双击重命名"><span class="terminal-card-name">${escapeHtml(s.title)}</span></span><span class="terminal-quota quota-batteries" hidden></span><span class="terminal-tools"><button class="terminal-close rename-session" title="重命名">✎</button><button class="terminal-close image-session" title="发送图片">▧</button><button class="terminal-close minimize-session" title="最小化">−</button><button class="terminal-close float-session" title="${s.floating ? '还原到工作区' : '浮动窗口'}">□</button><button class="terminal-close reconnect" title="重新连接">↻</button><button class="terminal-close close-session" title="关闭终端">×</button></span></div><div class="terminal-body"></div>`;
     const head = card.querySelector('.terminal-head');
     const title = card.querySelector('.terminal-card-title');
     const icon = sessionAgentIcon(s);
@@ -775,7 +774,6 @@ function render() { renderSessions(); updateEditing(); }
 function renderInstances() {
   const section = $('instances-section'), root = $('instances-list');
   root.replaceChildren();
-  for (const session of sessions.values()) session.instanceButton = null;
   const items = [...sessions.values()].filter(session => viewMode === 'grid'
     ? session.minimized
     : !session.floating);
@@ -786,18 +784,8 @@ function renderInstances() {
     row.className = 'flat-list-row';
     const button = document.createElement('button');
     button.type = 'button';
-    button.className = `flat-list-button instance-session-button${session.id === activeSession ? ' selected' : ''}`;
+    button.className = `flat-list-button${session.id === activeSession ? ' selected' : ''}`;
     button.title = session.minimized ? '点击恢复已最小化终端' : '切换到终端';
-    const outline = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-    outline.classList.add('terminal-running-outline');
-    outline.setAttribute('aria-hidden', 'true');
-    const outlineRect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-    outlineRect.setAttribute('x', '.5');
-    outlineRect.setAttribute('y', '.5');
-    outlineRect.setAttribute('width', '99%');
-    outlineRect.setAttribute('height', '99%');
-    outlineRect.setAttribute('rx', '5');
-    outline.append(outlineRect);
     const label = document.createElement('span');
     label.className = 'agent-label';
     const icon = sessionAgentIcon(session);
@@ -806,9 +794,7 @@ function renderInstances() {
     name.className = 'flat-list-name';
     name.textContent = session.title;
     label.append(name);
-    button.append(outline, label);
-    session.instanceButton = button;
-    button.classList.toggle('running', session.lastOutputAt > 0 && performance.now() - session.lastOutputAt < 2500);
+    button.append(label);
     button.addEventListener('click', () => {
       if (session.minimized) {
         restoreSession(session.id);
