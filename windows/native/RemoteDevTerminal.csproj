@@ -18,6 +18,7 @@
     <PackageReference Include="System.Text.Json" Version="10.0.0" />
     <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="All" />
     <Content Include="www\**\*" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\assets\agent-icons\*.png" Link="www\agent-icons\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Resource Include="RemoteDevTerminal.ico" />
   </ItemGroup>
 </Project>

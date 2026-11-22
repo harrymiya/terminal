@@ -1,6 +1,7 @@
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import THEMES from './themes.json';
+import AGENT_ICONS from '../../../../assets/agent-icons/catalog.json';
 
 const $ = (id) => document.getElementById(id);
 const hostList = $('host-list');
@@ -302,6 +303,23 @@ function renderQuotaBatteries(root, quota, {showPercent = false, showReset = fal
   }
 }
 
+function agentIcon(value) {
+  if (!value || value === '✳') return null;
+  const key = value.startsWith('brand:') ? value.slice(6) : '';
+  if (Object.hasOwn(AGENT_ICONS, key)) {
+    const img = document.createElement('img');
+    img.className = 'agent-icon';
+    img.src = `agent-icons/${key}.png`;
+    img.alt = '';
+    return img;
+  }
+  if (key || [...value].length > 8) return null;
+  const symbol = document.createElement('span');
+  symbol.className = 'agent-icon';
+  symbol.textContent = value;
+  symbol.setAttribute('aria-hidden', 'true');
+  return symbol;
+}
 function renderAgents() {
   const host=currentHost(), list=agentsForHost(host);
   agentList.replaceChildren();
@@ -309,6 +327,11 @@ function renderAgents() {
     const row=document.createElement('div');row.className='flat-list-row';
     const button=document.createElement('button');button.type='button';button.className=`flat-list-button${index===(host?.selected_agent||0)?' selected':''}`;
     const name=document.createElement('span');name.className='flat-list-name';name.textContent=agent.name||agent.command;
+    const label = document.createElement('span');
+    label.className = 'agent-label';
+    const icon = agentIcon(agent.icon);
+    if (icon) label.append(icon);
+    label.append(name);
     const quota=quotaByAgent.get(quotaKey(host?.id,agent.command));
     const detail=document.createElement('span');
     if (host && supportsQuota(agent.command)) {
@@ -321,7 +344,7 @@ function renderAgents() {
       detail.className='flat-list-detail';
       detail.textContent=agent.command;
     }
-    button.append(name,detail);button.title=`${agent.command}${quota?.error?`\n${quota.error}`:''}\n点击选择开发者`;button.addEventListener('click',()=>{if(!host)return;host.selected_agent=index;sendConfig();render();});row.append(button);
+    button.append(label,detail);button.title=`${agent.command}${quota?.error?`\n${quota.error}`:''}\n点击选择开发者`;button.addEventListener('click',()=>{if(!host)return;host.selected_agent=index;sendConfig();render();});row.append(button);
     if(editing){const actions=document.createElement('span');actions.className='flat-list-actions';const up=document.createElement('button');up.type='button';up.textContent='↑';up.title='上移开发者';up.disabled=index===0;up.addEventListener('click',()=>moveAgentAt(index,-1));const down=document.createElement('button');down.type='button';down.textContent='↓';down.title='下移开发者';down.disabled=index===list.length-1;down.addEventListener('click',()=>moveAgentAt(index,1));const edit=document.createElement('button');edit.type='button';edit.textContent='✎';edit.title='编辑开发者';edit.addEventListener('click',()=>editAgent(index));const remove=document.createElement('button');remove.type='button';remove.textContent='×';remove.title='删除开发者';remove.addEventListener('click',()=>{const target=host&&host.agents?.length?host.agents:config.agents;if(!confirm(`删除开发者“${agent.name}”？`))return;target.splice(index,1);if(host)host.selected_agent=Math.max(0,index-1);sendConfig();render();});actions.append(up,down,edit,remove);row.append(actions);}
     agentList.append(row);
   });
@@ -518,13 +541,38 @@ function editHost(host=null) {
 }
 function editAgent(index=-1) {
   const host=currentHost(); const list=agentsForHost(host); const old=index>=0?list[index]:null;
+  let selectedIcon = old?.icon || '✳';
   showForm(old?'编辑开发者':'添加开发者',[{key:'name',label:'名称',placeholder:'Codex'},{key:'command',label:'启动命令',placeholder:'codex'}],old,(v)=>{
     if(!v.name||!v.command) return '请填写名称和启动命令。';
-    if(host && host.agents?.length){ if(old)host.agents[index]=v; else host.agents.push(v); }
-    else { if(old)config.agents[index]=v; else config.agents.push(v); }
-    if(host) host.selected_agent=old?index:list.length;
+    const updated = {...old, ...v, icon: selectedIcon};
+    if (old) list[index] = updated;
+    else list.push(updated);
+    if (host) host.selected_agent = old ? index : list.length - 1;
     sendConfig();render();return '';
   },old?()=>{if(confirm(`删除开发者“${old.name}”？`)){const target=host&&host.agents?.length?host.agents:config.agents;target.splice(index,1);if(host)host.selected_agent=Math.max(0,index-1);sendConfig();render();}}:null);
+  const options = [['✳', '默认'], ...Object.entries(AGENT_ICONS).map(([key, name]) => [`brand:${key}`, name])];
+  if (!options.some(([value]) => value === selectedIcon)) options.unshift([selectedIcon, '当前图标']);
+  const picker = document.createElement('fieldset');
+  picker.className = 'agent-icon-picker';
+  const legend = document.createElement('legend');
+  legend.textContent = '图标';
+  picker.append(legend);
+  for (const [value, name] of options) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'button agent-icon-option';
+    button.setAttribute('aria-pressed', String(selectedIcon === value));
+    const icon = agentIcon(value);
+    if (icon) button.append(icon);
+    button.append(name);
+    button.addEventListener('click', () => {
+      picker.querySelector('[aria-pressed="true"]')?.setAttribute('aria-pressed', 'false');
+      selectedIcon = value;
+      button.setAttribute('aria-pressed', 'true');
+    });
+    picker.append(button);
+  }
+  $('form-fields').append(picker);
 }
 function editWorkspace(index=-1) {
   const host=currentHost(); if(!host)return;

@@ -14,6 +14,7 @@ import re
 import math
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from functools import lru_cache
 import gi
 gi.require_version("Gtk", "3.0")
 gi.require_version("Vte", "2.91")
@@ -23,6 +24,52 @@ from core import load_config, save_config, ssh_argv, close_remote_session_comman
 from version import VERSION
 from host_metrics import metrics_key, read_host_metrics
 from mcp_server import EmbeddedMCPServer
+
+
+@lru_cache(maxsize=1)
+def agent_icon_catalog():
+    app_dir = Path(__file__).resolve().parent
+    for icon_dir in (app_dir / "agent-icons", app_dir.parent / "assets" / "agent-icons"):
+        try:
+            catalog = json.loads((icon_dir / "catalog.json").read_text(encoding="utf-8"))
+            return icon_dir, catalog
+        except (OSError, ValueError):
+            continue
+    return app_dir, {}
+
+
+@lru_cache(maxsize=32)
+def agent_icon_pixbuf(value, size):
+    icon_dir, catalog = agent_icon_catalog()
+    key = value.removeprefix("brand:") if value.startswith("brand:") else ""
+    if key not in catalog:
+        return None
+    try:
+        return GdkPixbuf.Pixbuf.new_from_file_at_scale(str(icon_dir / f"{key}.png"), size, size, True)
+    except GLib.Error:
+        return None
+
+
+def agent_icon_picker(selected):
+    _, catalog = agent_icon_catalog()
+    model = Gtk.ListStore(str, str, GdkPixbuf.Pixbuf)
+    model.append(("✳", "默认", None))
+    for key, name in catalog.items():
+        value = f"brand:{key}"
+        model.append((value, name, agent_icon_pixbuf(value, 20)))
+    if selected != "✳" and all(row[0] != selected for row in model):
+        symbol = selected if not selected.startswith("brand:") and len(selected) <= 8 else ""
+        model.prepend((selected, f"当前图标 {symbol}".rstrip(), None))
+    combo = Gtk.ComboBox.new_with_model(model)
+    combo.set_id_column(0)
+    image = Gtk.CellRendererPixbuf(xpad=4)
+    combo.pack_start(image, False)
+    combo.add_attribute(image, "pixbuf", 2)
+    label = Gtk.CellRendererText()
+    combo.pack_start(label, True)
+    combo.add_attribute(label, "text", 1)
+    combo.set_active_id(selected)
+    return combo
 
 
 def render_host_metric_pixbuf(pct, is_cpu=False, size=20):
@@ -2624,7 +2671,7 @@ class App(Gtk.Window):
         agents = self.host_agents(host) if host else []
         active_index = self.agents.get_active()
         children = self.agents_list.get_children()
-        items = [(item["name"], item["command"]) for item in agents]
+        items = [(item["name"], item["command"], item.get("icon")) for item in agents]
         if items and self.agent_rows == (items, self.edit_mode) and len(children) == len(items):
             for index, row in enumerate(children):
                 ctx = row.get_children()[0].get_style_context()
@@ -2643,6 +2690,12 @@ class App(Gtk.Window):
             button.set_tooltip_text(item["command"] + "\n点击选择开发者")
             button.get_style_context().add_class("host-button")
             content = Gtk.Box(spacing=6)
+            icon = item.get("icon") or "✳"
+            pixbuf = agent_icon_pixbuf(icon, 17)
+            if pixbuf is not None:
+                content.pack_start(Gtk.Image.new_from_pixbuf(pixbuf), False, False, 0)
+            elif icon != "✳" and not icon.startswith("brand:") and len(icon) <= 8:
+                content.pack_start(Gtk.Label(label=icon), False, False, 0)
             name = Gtk.Label(label=item["name"], valign=Gtk.Align.CENTER)
             self.fit_sidebar_label(name)
             content.pack_start(name, True, True, 0)
@@ -3013,6 +3066,13 @@ class App(Gtk.Window):
             entry.set_hexpand(True)
             grid.attach(entry, 1, row, 1, 1)
             entries[key] = entry
+        icon_picker = None
+        if kind == "agents":
+            label = Gtk.Label(label="图标", xalign=0)
+            icon_picker = agent_icon_picker(old.get("icon") or "✳")
+            label.set_mnemonic_widget(icon_picker)
+            grid.attach(label, 0, len(fields), 1, 1)
+            grid.attach(icon_picker, 1, len(fields), 1, 1)
         password_entry = None
         save_password = None
         if kind == "hosts":
@@ -3038,6 +3098,8 @@ class App(Gtk.Window):
         dialog.show_all()
         while dialog.run() == Gtk.ResponseType.OK:
             values = {key: entry.get_text().strip() for key, entry in entries.items()}
+            if icon_picker is not None:
+                values = {**old, **values, "icon": icon_picker.get_active_id() or "✳"}
             try:
                 required_fields = {"hosts": ("name", "username"), "directories": ("name", "path"), "agents": ("name", "command")}[kind]
                 if any(not values.get(key) for key in required_fields) or (kind == "hosts" and not (values.get("lan_address") or values.get("external_address"))):

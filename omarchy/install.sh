@@ -7,6 +7,11 @@ bin_dir="$HOME/.local/bin"
 icon_dir="$data_dir/icons/hicolor/scalable/apps"
 mkdir -p "$install_dir" "$data_dir/applications" "$bin_dir" "$icon_dir"
 install -m 644 "$source_dir/remote-dev-terminal.svg" "$install_dir/remote-dev-terminal.svg"
+agent_icons="$source_dir/../assets/agent-icons"
+if [ -d "$agent_icons" ]; then
+    mkdir -p "$install_dir/agent-icons"
+    install -m 644 "$agent_icons/catalog.json" "$agent_icons/"*.png "$install_dir/agent-icons/"
+fi
 install -m 644 "$source_dir/remote-dev-terminal.svg" "$icon_dir/remote-dev-terminal.svg"
 install -m 644 "$source_dir/core.py" "$install_dir/core.py"
 install -m 644 "$source_dir/host_metrics.py" "$install_dir/host_metrics.py"

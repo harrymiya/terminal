@@ -3,6 +3,7 @@ package dev.remote.terminal
 import android.content.Context
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.graphics.BitmapFactory
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -29,6 +30,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -149,6 +151,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.platform.LocalDensity
@@ -160,6 +163,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.DialogProperties
@@ -1635,7 +1639,7 @@ private fun HomeScreen(
                                             Modifier.fillMaxWidth(),
                                             verticalAlignment = Alignment.CenterVertically,
                                         ) {
-                                            Text(session.task.agent.icon, fontSize = 14.sp)
+                                            AgentMark(session.task.agent.icon, 16.dp)
                                             Spacer(Modifier.width(6.dp))
                                             Text(
                                                 sessionDisplayLabel(session.task),
@@ -1968,7 +1972,16 @@ private fun ProjectRow(directory: ProjectDirectory, selectedAgent: AgentPreset?,
             Column(Modifier.weight(1f)) {
                 Text(directory.name, color = White, fontWeight = FontWeight.Medium, fontSize = 13.sp, maxLines = 1)
                 Text(directory.path, color = Muted, fontFamily = FontFamily.Monospace, fontSize = 10.sp, maxLines = 1)
-                if (selectedAgent != null) Text("${selectedAgent.icon}  ${selectedAgent.name} · 新建任务", color = Mint.copy(alpha = .88f), fontSize = 10.sp, modifier = Modifier.padding(top = 4.dp))
+                if (selectedAgent != null) {
+                    Row(
+                        modifier = Modifier.padding(top = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        AgentMark(selectedAgent.icon, 12.dp)
+                        Text("${selectedAgent.name} · 新建任务", color = Mint.copy(alpha = .88f), fontSize = 10.sp)
+                    }
+                }
             }
             Icon(Icons.Default.ArrowForward, null, tint = if (enabled) Mint else Muted, modifier = Modifier.padding(start = 8.dp).size(18.dp))
         }
@@ -2001,7 +2014,9 @@ private fun AgentsScreen(
             agents.forEachIndexed { index, agent ->
                 Surface(color = Panel, shape = RoundedCornerShape(15.dp), border = androidx.compose.foundation.BorderStroke(1.dp, Edge)) {
                     Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 13.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Box(Modifier.size(39.dp).clip(RoundedCornerShape(12.dp)).background(PanelRaised), contentAlignment = Alignment.Center) { Text(agent.icon, fontSize = 19.sp) }
+                        Box(Modifier.size(39.dp).clip(RoundedCornerShape(12.dp)).background(PanelRaised), contentAlignment = Alignment.Center) {
+                            AgentMark(agent.icon, 24.dp)
+                        }
                         Spacer(Modifier.width(11.dp))
                         Column(Modifier.weight(1f)) { Text(agent.name, color = White, fontWeight = FontWeight.Medium, fontSize = 14.sp); Text(agent.command, color = Mint, fontFamily = FontFamily.Monospace, fontSize = 11.sp, maxLines = 2, overflow = TextOverflow.Ellipsis) }
                         IconButton(enabled = index > 0, onClick = { onMove(index, -1) }, modifier = Modifier.size(32.dp)) {
@@ -2246,14 +2261,17 @@ private fun AgentSelectorGrid(
                             modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 9.dp),
                             verticalArrangement = Arrangement.spacedBy(5.dp),
                         ) {
-                            Text(
-                                "${agent.icon}  ${agent.name}",
-                                color = if (selected) White else Muted,
-                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
-                                fontSize = 12.sp,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                                AgentMark(agent.icon, 14.dp)
+                                Text(
+                                    agent.name,
+                                    color = if (selected) White else Muted,
+                                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                                    fontSize = 12.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
                             if (supportsQuota) {
                                 AgentQuotaDetails(quotaFor(host, agent))
                             }
@@ -4112,11 +4130,70 @@ private fun AgentEditorDialog(initial: AgentPreset?, onDismiss: () -> Unit, onSa
         onSave(AgentPreset(initial?.id ?: UUID.randomUUID().toString(), name.trim(), command.trim(), icon.ifBlank { "✳" }))
     }) {
         OutlinedTextField(name, { name = it }, label = { Text("显示名称") }, placeholder = { Text("例如：Codex") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-        IconPicker(icon, { icon = it }, listOf("✳", "◈", "⌘", "\$_", "⚙️", "🧠", "🤖", "✨", "🛠️"))
         OutlinedTextField(command, { command = it }, label = { Text("启动命令") }, placeholder = { Text("codex --full-auto") }, singleLine = true,
             textStyle = TextStyle(fontFamily = FontFamily.Monospace), modifier = Modifier.fillMaxWidth())
         Text("支持带参数的命令（codex resume）和登录 Shell 别名（auto codex）；别名需在 SSH 用户的 Shell 配置中定义。", color = Muted, fontSize = 11.sp)
+        AgentIconPicker(icon) { icon = it }
     }
+}
+
+private val agentBrandKey = Regex("[a-z0-9-]+")
+
+@Composable
+private fun AgentMark(value: String, size: Dp) {
+    val assets = LocalContext.current.assets
+    val bitmap = remember(assets, value) {
+        val key = value.removePrefix("brand:")
+        if (key != value && agentBrandKey.matches(key)) {
+            runCatching {
+                assets.open("agent-icons/$key.png").use { BitmapFactory.decodeStream(it)?.asImageBitmap() }
+            }.getOrNull()
+        } else null
+    }
+    if (bitmap != null) {
+        Image(bitmap, contentDescription = null, modifier = Modifier.size(size))
+    } else {
+        val symbol = if (value.isBlank() || value.startsWith("brand:")) "✳" else value
+        Text(symbol, fontSize = (size.value * 0.85f).sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+@Composable
+private fun AgentIconPicker(value: String, onChange: (String) -> Unit) {
+    val assets = LocalContext.current.assets
+    val options = remember(assets) {
+        runCatching {
+            val catalog = assets.open("agent-icons/catalog.json").bufferedReader().use { JSONObject(it.readText()) }
+            catalog.keys().asSequence().map { "brand:$it" to catalog.getString(it) }.toList()
+        }.getOrDefault(emptyList())
+    }
+    Text("图标", color = Muted, fontSize = 12.sp)
+    for (row in options.chunked(2)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            for ((key, label) in row) {
+                val selected = value == key
+                Surface(
+                    color = if (selected) Color(0xFF20342F) else PanelRaised,
+                    shape = RoundedCornerShape(10.dp),
+                    border = BorderStroke(1.dp, if (selected) Mint else Edge),
+                    modifier = Modifier.weight(1f).clip(RoundedCornerShape(10.dp))
+                        .selectable(selected = selected, role = Role.RadioButton, onClick = { onChange(key) }),
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 7.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        AgentMark(key, 21.dp)
+                        Text(label, color = White, fontSize = 12.sp)
+                    }
+                }
+            }
+            if (row.size == 1) Spacer(Modifier.weight(1f))
+        }
+    }
+    val customIcon = value.takeUnless { it.startsWith("brand:") }.orEmpty()
+    IconPicker(customIcon, onChange, listOf("✳", "◈", "⌘", "\$_", "⚙️", "🧠", "🤖", "✨", "🛠️"))
 }
 
 @Composable
