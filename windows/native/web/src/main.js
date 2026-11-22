@@ -693,13 +693,12 @@ function renderSessions({ focus = true } = {}) {
     card.className='terminal-card';
     card.classList.toggle('active', s.id === activeSession);
     card.classList.toggle('inactive', !row && !s.floating);
-    card.innerHTML=`<div class="terminal-head"><svg class="terminal-running-outline" aria-hidden="true"><rect x="2.5" y="2.5" width="calc(100% - 5px)" height="calc(100% - 5px)" rx="2"></rect></svg><span class="terminal-card-title agent-label" title="双击重命名"><span class="terminal-card-name">${escapeHtml(s.title)}</span></span><span class="terminal-quota quota-batteries" hidden></span><span class="terminal-tools"><button class="terminal-close rename-session" title="重命名">✎</button><button class="terminal-close image-session" title="发送图片">▧</button><button class="terminal-close minimize-session" title="最小化">−</button><button class="terminal-close float-session" title="${s.floating ? '还原到工作区' : '浮动窗口'}">□</button><button class="terminal-close reconnect" title="重新连接">↻</button><button class="terminal-close close-session" title="关闭终端">×</button></span></div><div class="terminal-body"></div>`;
+    card.innerHTML=`<div class="terminal-head"><svg class="terminal-running-outline" aria-hidden="true"><rect x="2.5" y="2.5" width="calc(100% - 5px)" height="calc(100% - 5px)" rx="2"></rect></svg><span class="terminal-card-title agent-label" title="双击重命名"><span class="terminal-card-name">${escapeHtml(s.title)}</span></span><span class="terminal-quota quota-batteries" hidden></span><span class="terminal-tools"><button class="terminal-close rename-session" title="重命名">✎</button><button class="terminal-close image-session" title="发送图片">▧</button><button class="terminal-close minimize-session" title="最小化">−</button><button class="terminal-close float-session" title="${s.floating ? '还原到工作区' : '浮动窗口'}">□</button><button class="terminal-close close-session" title="关闭终端">×</button></span></div><div class="terminal-body"></div>`;
     const head = card.querySelector('.terminal-head');
     const title = card.querySelector('.terminal-card-title');
     const icon = sessionAgentIcon(s);
     if (icon) title.prepend(icon);
     card.querySelector('.terminal-close.close-session').addEventListener('click',()=>closeSession(s.id));
-    card.querySelector('.terminal-close.reconnect').addEventListener('click',()=>connectSession(s));
     card.querySelector('.terminal-close.rename-session').addEventListener('click',()=>renameSession(s));
     title.addEventListener('dblclick',()=>renameSession(s));
     card.querySelector('.terminal-close.image-session').addEventListener('click',()=>chooseImage(s));
@@ -788,7 +787,7 @@ function renderInstances() {
   if (section.hidden) return;
   for (const session of items) {
     const row = document.createElement('div');
-    row.className = 'flat-list-row';
+    row.className = 'flat-list-row instance-row';
     const button = document.createElement('button');
     button.type = 'button';
     button.className = `flat-list-button instance-session-button${session.id === activeSession ? ' selected' : ''}`;
