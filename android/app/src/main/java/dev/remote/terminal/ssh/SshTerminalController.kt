@@ -62,7 +62,6 @@ class SshTerminalController(
     }
     // Accessed only on pageScrollExecutor, so paging and subsequent input stay ordered.
     private var copyModeConnection: ActiveConnection? = null
-    private var checkedCopyModeConnection: ActiveConnection? = null
     @Volatile private var columns = 80
     @Volatile private var rows = 30
 
@@ -84,13 +83,11 @@ class SshTerminalController(
         pageScrollExecutor.execute {
             val connection = activeConnection.get()
             if (running.get() && (expectedConnection == null || activeConnection.get() === expectedConnection)) {
-                val exitCopyMode = !scroll && connection != null &&
-                    (connection === copyModeConnection || connection !== checkedCopyModeConnection)
+                val exitCopyMode = !scroll && connection != null && connection === copyModeConnection
                 outgoing.offerLast(PendingInput(text.toByteArray(Charsets.UTF_8), expectedConnection, exitCopyMode))
                 if (scroll) copyModeConnection = connection
                 else if (exitCopyMode) {
                     copyModeConnection = null
-                    checkedCopyModeConnection = connection
                 }
             }
         }
@@ -108,8 +105,10 @@ class SshTerminalController(
         try {
             val enter = if (enterCopyMode) "if [ \"$(tmux display-message -p -t $sessionName '#{pane_in_mode}')\" = 0 ]; then tmux copy-mode -t $sessionName; fi; " else ""
             channel.setCommand(enter + "tmux send-keys -t $sessionName -X $action")
-            channel.connect(10_000)
-            while (running.get() && !channel.isClosed && activeConnection.get() === connection) Thread.sleep(20)
+            val deadline = SystemClock.elapsedRealtime() + 2_000L
+            channel.connect((deadline - SystemClock.elapsedRealtime()).coerceAtLeast(1L).toInt())
+            while (running.get() && !channel.isClosed && activeConnection.get() === connection &&
+                SystemClock.elapsedRealtime() < deadline) Thread.sleep(20)
         } catch (_: Exception) {
             // Connection recovery is handled by the main SSH loop.
         } finally {

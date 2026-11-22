@@ -352,9 +352,8 @@ private class TerminalSessionState(
     }
 
     fun onConnectionUnavailable() {
-        AutoConfirmEngine.cancel(task.id)
-        autoEnterDeadline = null
-        autoEnterAwaitingResponse = false
+        pauseAutoEnter()
+        handledPromptSignature = null
     }
 
     fun clearAttention() {

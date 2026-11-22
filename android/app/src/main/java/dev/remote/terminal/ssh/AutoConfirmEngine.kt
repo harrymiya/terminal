@@ -69,18 +69,6 @@ object AutoConfirmEngine {
         }
     }
 
-    private fun acquireWakeLock(timeoutMs: Long = 10_000L) {
-        runCatching {
-            wakeLock?.acquire(timeoutMs)
-        }
-    }
-
-    private fun releaseWakeLock() {
-        runCatching {
-            if (wakeLock?.isHeld == true) wakeLock?.release()
-        }
-    }
-
     /** 去除时钟、耗时、动效旋转字符等动态噪点，避免 spinner 导致 signature 抖动重置倒计时 */
     fun normalizeSignature(sig: String?): String {
         if (sig.isNullOrBlank()) return ""
@@ -186,6 +174,8 @@ object AutoConfirmEngine {
 
     private val sessions = ConcurrentHashMap<String, SessionCallback>()
     private val sessionStates = ConcurrentHashMap<String, SessionState>()
+    private val queuedScans = ConcurrentHashMap.newKeySet<String>()
+    private val wakeLockSessions = ConcurrentHashMap.newKeySet<String>()
 
     @Volatile var globalEnabled: Boolean = true
     @Volatile var globalDelaySeconds: Int = 3
@@ -211,22 +201,33 @@ object AutoConfirmEngine {
     fun unregisterSession(sessionId: String) {
         sessions.remove(sessionId)
         sessionStates.remove(sessionId)
-        releaseWakeLock()
+        queuedScans.remove(sessionId)
+        releaseWakeLock(sessionId)
     }
 
     fun onOutputReceived(sessionId: String) {
         val callback = sessions[sessionId] ?: return
+        // Terminal output can arrive hundreds of times per second. A scan always
+        // reads the latest screen, so queue at most one scan per session instead
+        // of letting output chunks starve the periodic deadline watchdog.
+        if (!queuedScans.add(sessionId)) return
         scheduler.execute {
-            processSession(sessionId, callback)
+            try {
+                if (sessions[sessionId] === callback) processSession(sessionId, callback)
+            } finally {
+                queuedScans.remove(sessionId)
+            }
         }
     }
 
     fun markHandled(sessionId: String, signature: String?) {
         val state = sessionStates[sessionId] ?: return
-        state.handledSignature = signature ?: state.signature
-        state.deadlineUptime = null
-        state.awaitingResponse = false
-        releaseWakeLock()
+        synchronized(state) {
+            state.handledSignature = signature ?: state.signature
+            state.deadlineUptime = null
+            state.awaitingResponse = false
+        }
+        releaseWakeLock(sessionId)
         sessions[sessionId]?.let { callback ->
             mainHandler.post { callback.onAutoEnterCancelled() }
         }
@@ -234,96 +235,135 @@ object AutoConfirmEngine {
 
     fun cancel(sessionId: String) {
         val state = sessionStates[sessionId] ?: return
-        state.deadlineUptime = null
-        state.awaitingResponse = false
-        releaseWakeLock()
+        synchronized(state) {
+            state.deadlineUptime = null
+            state.awaitingResponse = false
+        }
+        releaseWakeLock(sessionId)
         sessions[sessionId]?.let { callback ->
             mainHandler.post { callback.onAutoEnterCancelled() }
         }
     }
 
     fun pause(sessionId: String) {
-        cancel(sessionId)
         val state = sessionStates[sessionId] ?: return
-        state.handledSignature = null
-        state.signature = null
+        synchronized(state) {
+            state.deadlineUptime = null
+            state.awaitingResponse = false
+            state.handledSignature = null
+            state.signature = null
+        }
+        releaseWakeLock(sessionId)
+        sessions[sessionId]?.let { callback ->
+            mainHandler.post { callback.onAutoEnterCancelled() }
+        }
     }
 
     private fun processSession(sessionId: String, callback: SessionCallback) {
-        if (!globalEnabled || !callback.isConnected() || callback.isClosed()) {
-            val state = sessionStates[sessionId]
-            if (state?.deadlineUptime != null) {
-                state.deadlineUptime = null
-                mainHandler.post { callback.onAutoEnterCancelled() }
-            }
-            return
-        }
-
-        val state = sessionStates.getOrPut(sessionId) { SessionState() }
-        val tail = callback.getVisibleTail()
-        val detectedSig = detectPromptSignature(tail)
-        val hasRequest = detectedSig != null || ActionRequestRegex.containsMatchIn(tail)
-
-        mainHandler.post { callback.onNeedsActionChanged(hasRequest) }
-
-        if (detectedSig == null) {
-            // 终端提示已消失（例如上一条命令已继续执行或已被清屏）
-            if (state.deadlineUptime != null || state.signature != null) {
-                state.signature = null
-                state.handledSignature = null
-                state.awaitingResponse = false
-                state.deadlineUptime = null
-                mainHandler.post { callback.onAutoEnterCancelled() }
-            }
-            return
-        }
-
-        if (detectedSig == state.handledSignature) {
-            // 该 prompt 已处理完毕或已被用户主动操作忽略
-            return
-        }
-
-        if (state.awaitingResponse) {
-            // 已发送回车，等待远端响应变动
-            return
-        }
-
-        val now = SystemClock.elapsedRealtime()
-        val delayMillis = globalDelaySeconds.coerceIn(1, 30) * 1_000L
-
-        if (state.signature != detectedSig) {
-            // 首次检测到该提示或提示内容发生变化，开始倒计时
-            state.signature = detectedSig
-            state.detectedAtUptime = now
-            val deadline = now + delayMillis
-            state.deadlineUptime = deadline
-
-            // 持有 CPU WakeLock，防止手机在倒数期间进入 Deep Sleep
-            acquireWakeLock(delayMillis + 3_000L)
-
-            mainHandler.post {
-                callback.onAutoEnterScheduled(deadline, detectedSig)
-            }
-            return
-        }
-
-        // signature 一致，检查倒计时是否到达
-        val elapsed = now - state.detectedAtUptime
-        if (elapsed >= delayMillis) {
-            // 倒计时已满，直接在后台发送回车！
-            try {
-                acquireWakeLock(5_000L)
-                val sent = callback.sendInput("\r")
-                if (sent) {
-                    state.handledSignature = detectedSig
-                    state.awaitingResponse = true
+        val state = sessionStates[sessionId] ?: return
+        synchronized(state) {
+            if (!callback.isConnected() || callback.isClosed()) {
+                if (state.deadlineUptime != null || state.signature != null || state.awaitingResponse) {
                     state.deadlineUptime = null
-                    mainHandler.post {
-                        callback.onAutoEnterTriggered(detectedSig)
-                    }
+                    state.signature = null
+                    state.handledSignature = null
+                    state.awaitingResponse = false
+                    releaseWakeLock(sessionId)
+                    mainHandler.post { callback.onAutoEnterCancelled() }
                 }
-            } finally {
-                releaseWakeLock()
+                return@synchronized
+            }
+
+            if (!globalEnabled) {
+                if (state.deadlineUptime != null) {
+                    state.deadlineUptime = null
+                    releaseWakeLock(sessionId)
+                    mainHandler.post { callback.onAutoEnterCancelled() }
+                }
+                return@synchronized
+            }
+
+            val tail = callback.getVisibleTail()
+            val detectedSig = detectPromptSignature(tail)
+            val hasRequest = detectedSig != null || ActionRequestRegex.containsMatchIn(tail)
+
+            mainHandler.post { callback.onNeedsActionChanged(hasRequest) }
+
+            if (detectedSig == null) {
+                // 终端提示已消失（例如上一条命令已继续执行或已被清屏）
+                if (state.deadlineUptime != null || state.signature != null) {
+                    state.signature = null
+                    state.handledSignature = null
+                    state.awaitingResponse = false
+                    state.deadlineUptime = null
+                    releaseWakeLock(sessionId)
+                    mainHandler.post { callback.onAutoEnterCancelled() }
+                }
+                return@synchronized
+            }
+
+            if (detectedSig == state.handledSignature) {
+                // 该 prompt 已处理完毕或已被用户主动操作忽略
+                return@synchronized
+            }
+
+            if (state.awaitingResponse) {
+                // 已发送回车，等待远端响应变动
+                return@synchronized
+            }
+
+            val now = SystemClock.elapsedRealtime()
+            val delayMillis = globalDelaySeconds.coerceIn(1, 30) * 1_000L
+
+            if (state.signature != detectedSig) {
+                // 首次检测到该提示或提示内容发生变化，开始倒计时
+                state.signature = detectedSig
+                state.detectedAtUptime = now
+                val deadline = now + delayMillis
+                state.deadlineUptime = deadline
+
+                // 持有 CPU WakeLock，防止手机在倒数期间进入 Deep Sleep
+                acquireWakeLock(sessionId)
+
+                mainHandler.post {
+                    callback.onAutoEnterScheduled(deadline, detectedSig)
+                }
+                return@synchronized
+            }
+
+            // signature 一致，检查倒计时是否到达
+            val elapsed = now - state.detectedAtUptime
+            if (elapsed >= delayMillis) {
+                // 倒计时已满，直接在后台发送回车！
+                try {
+                    val sent = callback.sendInput("\r")
+                    if (sent) {
+                        state.handledSignature = detectedSig
+                        state.awaitingResponse = true
+                        state.deadlineUptime = null
+                        mainHandler.post {
+                            callback.onAutoEnterTriggered(detectedSig)
+                        }
+                    }
+                } finally {
+                    releaseWakeLock(sessionId)
+                }
+            }
+        }
+    }
+
+    @Synchronized
+    private fun acquireWakeLock(sessionId: String) {
+        if (!wakeLockSessions.add(sessionId)) return
+        if (wakeLockSessions.size == 1) runCatching { wakeLock?.acquire() }
+    }
+
+    @Synchronized
+    private fun releaseWakeLock(sessionId: String) {
+        if (!wakeLockSessions.remove(sessionId)) return
+        if (wakeLockSessions.isEmpty()) {
+            runCatching {
+                if (wakeLock?.isHeld == true) wakeLock?.release()
             }
         }
     }
