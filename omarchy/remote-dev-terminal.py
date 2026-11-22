@@ -19,7 +19,7 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("Vte", "2.91")
 gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Gtk, Vte, GLib, Gdk, GdkPixbuf, Pango
-from core import load_config, save_config, ssh_argv, close_remote_session_command, auto_enter_signature, confirmation_pending, AutoEnterController, quota_agent, quota_key, read_agent_quota, hourly_quota, upload_image, MAX_IMAGE_BYTES, sync_request, sync_data_request, sync_host_key, legacy_sync_keys, ssh_address, ssh_port, ssh_host_fingerprint, sync_auth_request, save_sync_password, load_sync_password, clear_sync_password, render_battery_pixbuf, save_host_password, load_host_password, clear_host_password, ssh_auth_environment
+from core import load_config, save_config, ssh_argv, close_remote_session_command, auto_enter_signature, confirmation_pending, AutoEnterController, quota_agent, quota_key, read_agent_quota, hourly_quota, upload_image, MAX_IMAGE_BYTES, sync_request, sync_data_request, sync_host_key, legacy_sync_keys, ssh_address, ssh_port, ssh_host_fingerprint, sync_auth_request, save_sync_password, load_sync_password, clear_sync_password, render_battery_pixbuf, save_host_password, clear_host_password, ssh_auth_environment
 from version import VERSION
 from host_metrics import metrics_key, read_host_metrics
 from mcp_server import EmbeddedMCPServer
@@ -3003,20 +3003,22 @@ class App(Gtk.Window):
             grid.attach(entry, 1, row, 1, 1)
             entries[key] = entry
         password_entry = None
-        clear_password = None
+        save_password = None
         if kind == "hosts":
             hint = Gtk.Label(label="优先连接内网地址；无法连接时自动切换外网地址。主机配置会按账号同步。", xalign=0, wrap=True)
             grid.attach(hint, 1, len(fields), 1, 1)
             row = len(fields) + 1
             grid.attach(Gtk.Label(label="SSH 密码", xalign=0), 0, row, 1, 1)
-            password_entry = Gtk.Entry(text=load_host_password(old.get("credential_id")))
+            password_entry = Gtk.Entry()
             password_entry.set_hexpand(True)
             password_entry.set_visibility(False)
             password_entry.set_placeholder_text("留空保留已保存密码" if old.get("credential_id") else "可留空，使用密钥或连接时输入")
             grid.attach(password_entry, 1, row, 1, 1)
-            if old.get("credential_id"):
-                clear_password = Gtk.CheckButton(label="删除已保存的密码")
-                grid.attach(clear_password, 1, row + 1, 1, 1)
+            save_password = Gtk.CheckButton(label="保存 SSH 密码")
+            save_password.set_active(True)
+            save_password.set_tooltip_text("密码保存在本机密钥环。取消勾选并保存会清除已保存的密码。")
+            save_password.connect("toggled", lambda check: password_entry.set_sensitive(check.get_active()))
+            grid.attach(save_password, 1, row + 1, 1, 1)
         if kind == "directories":
             browse = Gtk.Button(label="浏览远端目录…")
             browse.connect("clicked", lambda *_: self.browse_directories(host, entries["path"], dialog))
@@ -3059,10 +3061,9 @@ class App(Gtk.Window):
                         values["_sync_fingerprint"] = old["_sync_fingerprint"]
                     credential_id = old.get("credential_id")
                     password = password_entry.get_text()
-                    if clear_password and clear_password.get_active():
-                        if password:
-                            raise ValueError("请输入新密码或选择删除密码，不能同时操作")
-                        clear_host_password(credential_id)
+                    if not save_password.get_active():
+                        if credential_id:
+                            clear_host_password(credential_id)
                         credential_id = None
                     elif password:
                         credential_id = credential_id or uuid.uuid4().hex

@@ -450,10 +450,24 @@ function showForm(title, fields, initial, onSave, onDelete=null) {
   const container=$('form-fields'); container.replaceChildren();
   const inputs={};
   for (const field of fields) {
-    const label=document.createElement('label'); label.textContent=field.label;
-    const input=document.createElement('input'); input.className='input'; input.type=field.type||'text'; input.placeholder=field.placeholder||'';
-    if(input.type==='checkbox') input.checked=Boolean(initial?.[field.key]??field.value); else input.value=initial?.[field.key] ?? field.value ?? ''; input.autocomplete='off'; input.dataset.key=field.key;
-    label.append(input); container.append(label); inputs[field.key]=input;
+    const label=document.createElement('label');
+    const input=document.createElement('input');
+    input.type=field.type||'text';
+    input.autocomplete='off';
+    input.dataset.key=field.key;
+    if (field.title) label.title=field.title;
+    if (input.type==='checkbox') {
+      label.className='check-row';
+      input.checked=Boolean(initial?.[field.key]??field.value);
+      label.append(input,field.label);
+    } else {
+      input.className='input';
+      input.placeholder=field.placeholder||'';
+      input.value=initial?.[field.key]??field.value??'';
+      label.append(field.label,input);
+    }
+    container.append(label);
+    inputs[field.key]=input;
   }
   const actions=formDialog.querySelector('.dialog-actions');
   actions.querySelector('.delete-form')?.remove();
@@ -471,7 +485,7 @@ function showForm(title, fields, initial, onSave, onDelete=null) {
   return inputs;
 }
 function editHost(host=null) {
-  showForm(host?'编辑主机':'添加主机',[
+  const controls=showForm(host?'编辑主机':'添加主机',[
     {key:'name',label:'名称',placeholder:'开发服务器'},
     {key:'username',label:'SSH 用户名',placeholder:'ubuntu'},
     {key:'lan_address',label:'内网地址（可选）',placeholder:'192.168.1.20'},
@@ -479,21 +493,26 @@ function editHost(host=null) {
     {key:'external_address',label:'外网地址（可选）',placeholder:'dev.example.com'},
     {key:'external_port',label:'外网端口',value:'22'},
     {key:'sync_id',label:'多端同步标识（可选）',placeholder:'同一主机在各设备使用相同标识'},
-    {key:'password',label:'SSH 密码（加密保存在本机文件）',type:'password',placeholder:host?.credential_saved?'••••••••（已保存，留空保持）':'输入 SSH 密码'},
-    {key:'clear_password',label:'删除已保存的 SSH 密码',type:'checkbox'}
-  ],{...host,password:'',clear_password:false,lan_port:String(host?.lan_port||host?.port||22),external_port:String(host?.external_port||host?.port||22)},(v)=>{
+    {key:'password',label:'SSH 密码',type:'password',placeholder:host?.credential_saved?'已保存，留空保留':'可留空，使用密钥或连接时输入'},
+    {key:'save_password',label:'保存 SSH 密码',type:'checkbox',value:true,title:'密码加密保存在本机。取消勾选并保存会清除已保存的密码。'}
+  ],{...host,password:'',lan_port:String(host?.lan_port||host?.port||22),external_port:String(host?.external_port||host?.port||22)},(v)=>{
     if(!v.name || !v.username || (!v.lan_address && !v.external_address)) return '请填写名称、SSH 用户名和至少一个 SSH 地址。';
     for(const key of ['lan_port','external_port']) if((key==='lan_port'?v.lan_address:v.external_address) && (!/^\d+$/.test(v[key]) || +v[key]<1 || +v[key]>65535)) return '端口必须是 1 到 65535 之间的数字。';
     const item=host||{id:makeId(),directories:[],selected_agent:0};
-    const password=v.password;delete v.password;const clearPassword=v.clear_password;delete v.clear_password;
-    if(password&&clearPassword)return '请输入新密码或选择删除密码，不能同时操作。';
-    Object.assign(item,v,{lan_port:Number(v.lan_port||22),external_port:Number(v.external_port||22),port:Number(v.lan_port||v.external_port||22),address:v.lan_address||v.external_address});
+    const {password,save_password:savePassword,...profile}=v;
+    Object.assign(item,profile,{lan_port:Number(v.lan_port||22),external_port:Number(v.external_port||22),port:Number(v.lan_port||v.external_port||22),address:v.lan_address||v.external_address});
     if(!host) config.hosts.push(item);
     activeHost=item.id;
-    sendConfig(password||clearPassword?{host_id:item.id,password}:null);
+    let change=null;
+    if (savePassword && password) change={host_id:item.id,password};
+    if (!savePassword && host) change={host_id:item.id,password:''};
+    sendConfig(change);
     render();
     return '';
   },host?()=>{if(confirm(`删除主机“${host.name}”及其工作区？`)){if(host.credential_id)post({action:'clear-host-password',credential_id:host.credential_id});post({action:'delete-host-profile',host_id:host.id});config.hosts=config.hosts.filter(x=>x.id!==host.id);activeHost=config.hosts[0]?.id||'';sendConfig();render();}}:null);
+  controls.save_password.addEventListener('change',()=>{
+    controls.password.disabled=!controls.save_password.checked;
+  });
 }
 function editAgent(index=-1) {
   const host=currentHost(); const list=agentsForHost(host); const old=index>=0?list[index]:null;
