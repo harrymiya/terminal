@@ -169,6 +169,15 @@
   text-align: left;
 }
 
+.flat-list-button.instance-session-button {
+  position: relative;
+}
+
+.flat-list-button.instance-session-button > :not(.terminal-running-outline) {
+  position: relative;
+  z-index: 1;
+}
+
 .flat-list-button:hover {
   border-color: var(--line);
   background: var(--hover-overlay);
@@ -575,11 +584,13 @@ body.resizing-tiles-y * {
   vector-effect: non-scaling-stroke;
 }
 
-.terminal-head.running .terminal-running-outline {
+.terminal-head.running .terminal-running-outline,
+.flat-list-button.running .terminal-running-outline {
   opacity: 1;
 }
 
-.terminal-head.running .terminal-running-outline rect {
+.terminal-head.running .terminal-running-outline rect,
+.flat-list-button.running .terminal-running-outline rect {
   animation: terminal-running-dash .5s linear infinite;
 }
 

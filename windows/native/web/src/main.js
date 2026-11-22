@@ -543,10 +543,9 @@ function startTileResize(event, splitter) {
 function updateRunningHeaders() {
   const now = performance.now();
   for (const session of sessions.values()) {
-    session.card?.querySelector('.terminal-head')?.classList.toggle(
-      'running',
-      session.lastOutputAt > 0 && now - session.lastOutputAt < 2500,
-    );
+    const running = session.lastOutputAt > 0 && now - session.lastOutputAt < 2500;
+    session.card?.querySelector('.terminal-head')?.classList.toggle('running', running);
+    session.instanceButton?.classList.toggle('running', running);
   }
 }
 
@@ -776,9 +775,10 @@ function render() { renderSessions(); updateEditing(); }
 function renderInstances() {
   const section = $('instances-section'), root = $('instances-list');
   root.replaceChildren();
+  for (const session of sessions.values()) session.instanceButton = null;
   const items = [...sessions.values()].filter(session => viewMode === 'grid'
     ? session.minimized
-    : !session.minimized && !session.floating);
+    : !session.floating);
   section.hidden = !items.length;
   if (section.hidden) return;
   for (const session of items) {
@@ -786,8 +786,18 @@ function renderInstances() {
     row.className = 'flat-list-row';
     const button = document.createElement('button');
     button.type = 'button';
-    button.className = `flat-list-button${session.id === activeSession ? ' selected' : ''}`;
+    button.className = `flat-list-button instance-session-button${session.id === activeSession ? ' selected' : ''}`;
     button.title = session.minimized ? '点击恢复已最小化终端' : '切换到终端';
+    const outline = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    outline.classList.add('terminal-running-outline');
+    outline.setAttribute('aria-hidden', 'true');
+    const outlineRect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    outlineRect.setAttribute('x', '.5');
+    outlineRect.setAttribute('y', '.5');
+    outlineRect.setAttribute('width', '99%');
+    outlineRect.setAttribute('height', '99%');
+    outlineRect.setAttribute('rx', '5');
+    outline.append(outlineRect);
     const label = document.createElement('span');
     label.className = 'agent-label';
     const icon = sessionAgentIcon(session);
@@ -796,7 +806,9 @@ function renderInstances() {
     name.className = 'flat-list-name';
     name.textContent = session.title;
     label.append(name);
-    button.append(label);
+    button.append(outline, label);
+    session.instanceButton = button;
+    button.classList.toggle('running', session.lastOutputAt > 0 && performance.now() - session.lastOutputAt < 2500);
     button.addEventListener('click', () => {
       if (session.minimized) {
         restoreSession(session.id);
