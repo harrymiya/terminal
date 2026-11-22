@@ -194,6 +194,52 @@
   text-align: right;
 }
 
+.host-identity {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.host-icon {
+  position: relative;
+  flex: 0 0 22px;
+  height: 22px;
+  border-radius: 5px;
+  background: var(--panel3);
+  color: var(--accent);
+  overflow: hidden;
+  text-align: center;
+  white-space: nowrap;
+  font-size: 14px;
+  line-height: 22px;
+}
+
+.host-icon-default::before,
+.host-icon-default::after {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  content: "";
+}
+
+.host-icon-default::before {
+  top: 4px;
+  width: 14px;
+  height: 10px;
+  border: 1.5px solid currentColor;
+  border-radius: 2px;
+}
+
+.host-icon-default::after {
+  top: 14px;
+  width: 8px;
+  height: 4px;
+  background:
+    linear-gradient(currentColor 0 0) top center / 1.5px 100% no-repeat,
+    linear-gradient(currentColor 0 0) bottom center / 100% 1.5px no-repeat;
+}
+
 .host-label {
   display: flex;
   flex-direction: column;
