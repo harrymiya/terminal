@@ -857,7 +857,7 @@ function toggleFloat(session){
 function minimizeSession(session){session.minimized=true;session.floating=false;renderSessions();}
 function restoreSession(id){const session=sessions.get(id);if(!session)return;session.minimized=false;activeSession=id;renderSessions();session.term.focus();}
 function renderMinimized(){const bar=$('minimized-sessions');if(!bar)return;bar.replaceChildren();bar.style.display=viewMode==='grid'?'none':'flex';if(viewMode==='grid')return;for(const s of sessions.values()){if(!s.minimized)continue;const b=document.createElement('button');b.className='button quiet';b.textContent=`● ${s.title}`;b.title='恢复终端';b.addEventListener('click',()=>restoreSession(s.id));bar.append(b);}}
-function chooseImage(session){$('image-file').dataset.sessionId=session.id;$('image-file').value='';$('image-file').click();}
+function chooseImage(session){const input=$('image-file');input.dataset.sessionId=session.id;input.value='';input.click();}
 
 function showForm(title, fields, initial, onSave, onDelete=null) {
   $('form-title').textContent=title; $('form-error').textContent='';
@@ -1362,9 +1362,11 @@ $('browse-select').addEventListener('click',()=>{
 browseDialog.addEventListener('close',()=>{
   if (!browseDialog.open) directoryBrowser = null;
 });
-$('image-file').addEventListener('change',async event=>{const file=event.target.files?.[0],session=sessions.get(event.target.dataset.sessionId);if(!file||!session)return;try{const data=await imageData(file);post({action:'upload-image',id:session.id,data});}catch(error){showError(error.message);}});
+$('image-file').addEventListener('change',async event=>{const input=event.target,file=input.files?.[0],session=sessions.get(input.dataset.sessionId);input.dataset.sessionId='';input.value='';await uploadImageFile(file,session);});
+async function uploadImageFile(file,session){if(!file||!session)return;try{const data=await imageData(file);post({action:'upload-image',id:session.id,data});}catch(error){showError(error.message);}}
+document.querySelector('#image-file').addEventListener('cancel',event=>{event.target.dataset.sessionId='';});
 async function imageData(file){let img=new Image();img.src=URL.createObjectURL(file);await img.decode();let width=img.naturalWidth,height=img.naturalHeight,scale=Math.min(1,4096/Math.max(width,height));width=Math.max(1,Math.round(width*scale));height=Math.max(1,Math.round(height*scale));const canvas=document.createElement('canvas');canvas.width=width;canvas.height=height;canvas.getContext('2d').drawImage(img,0,0,width,height);URL.revokeObjectURL(img.src);let quality=.92;let blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/jpeg',quality));if(!blob)throw new Error('无法转换此图片格式');while(blob.size>20*1024*1024&&quality>.35){quality-=.1;blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/jpeg',quality));if(!blob)throw new Error('无法转换此图片格式');}if(blob.size>20*1024*1024)throw new Error('图片转换后仍超过 20 MB');return await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result).split(',')[1]);reader.onerror=()=>reject(reader.error);reader.readAsDataURL(blob);});}
-document.addEventListener('paste',event=>{const item=[...(event.clipboardData?.items||[])].find(x=>x.type.startsWith('image/'));if(!item||!activeSession)return;const file=item.getAsFile();if(!file)return;event.preventDefault();imageData(file).then(data=>post({action:'upload-image',id:activeSession,data})).catch(error=>showError(error.message));});
+document.addEventListener('paste',event=>{const clipboard=event.clipboardData;const item=[...(clipboard?.items||[])].find(x=>x.kind==='file'&&x.type.startsWith('image/'));const file=item?.getAsFile()||[...(clipboard?.files||[])].find(x=>x.type.startsWith('image/'));const imageInput=$('image-file');const session=sessions.get(imageInput.dataset.sessionId||activeSession);if(!file||!session)return;event.preventDefault();imageInput.dataset.sessionId='';void uploadImageFile(file,session);},true);
 window.chrome?.webview?.addEventListener('message',handleNativeMessage);
 window.addEventListener('resize',()=>{
   const stageRect = stage.getBoundingClientRect();
