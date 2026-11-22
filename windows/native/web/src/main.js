@@ -3,6 +3,13 @@ import { FitAddon } from '@xterm/addon-fit';
 import THEMES from './themes.json';
 import AGENT_ICONS from '../../../../assets/agent-icons/catalog.json';
 import { createAutoConfirmState, observeAutoConfirm, resetAutoConfirm } from './auto-confirm.js';
+import {
+  buildSessionSyncItem,
+  findExistingSession,
+  isValidSessionId,
+  normalizeSessionId,
+  planSyncedSessionChanges,
+} from './session-sync.js';
 
 const $ = (id) => document.getElementById(id);
 const hostList = $('host-list');
@@ -174,6 +181,11 @@ function updateEditing() {
   renderWorkspaces();
 }
 function normalizeConfig(raw) {
+  const hadConfig = Boolean(lastConfigSnapshot);
+  const previous = hadConfig ? JSON.parse(lastConfigSnapshot) : null;
+  const previousActiveHost = activeHost;
+  const previousViewMode = viewMode;
+  const previousTileLayout = tileLayout;
   config = raw && typeof raw === 'object' ? raw : { hosts: [], agents: [] };
   if (!Array.isArray(config.hosts)) config.hosts=[];
   if (!Array.isArray(config.agents)) config.agents=[];
@@ -193,10 +205,31 @@ function normalizeConfig(raw) {
   document.body.classList.toggle('sidebar-hidden',Boolean(config.sidebar_hidden));
   $('sync-account').textContent=config.sync_username||'未登录';
   $('sync-admin-users').hidden=!config.sync_is_admin;
-  applyTheme();
-  applyUiScale();
+  const hostsChanged = !previous || JSON.stringify(previous.hosts) !== JSON.stringify(config.hosts) || previousActiveHost !== activeHost;
+  const agentsChanged = !previous || JSON.stringify(previous.agents) !== JSON.stringify(config.agents);
+  const themeChanged = !previous || previous.theme !== config.theme;
+  const scaleChanged = !previous || Number(previous.ui_scale) !== Number(config.ui_scale) || Number(previous.sidebar_width) !== Number(config.sidebar_width);
+  const sidebarHiddenChanged = !previous || Boolean(previous.sidebar_hidden) !== Boolean(config.sidebar_hidden);
+  const viewChanged = !previous || previousViewMode !== viewMode || previousTileLayout !== tileLayout;
+  const syncChanged = !previous || previous.offline_mode !== config.offline_mode || previous.auto_sync_enabled !== config.auto_sync_enabled || previous.sync_username !== config.sync_username || previous.sync_url !== config.sync_url;
+  if (!hadConfig || themeChanged) applyTheme();
+  if (!hadConfig || scaleChanged) applyUiScale();
+  if (hadConfig && sidebarHiddenChanged && !scaleChanged) fitSessions();
   lastConfigSnapshot=JSON.stringify(config);
-  render();
+  if (!hadConfig || viewChanged || themeChanged) {
+    render();
+    return;
+  }
+  if (hostsChanged) {
+    renderHosts();
+    renderWorkspaces();
+  } else if (syncChanged) {
+    renderSyncStatus();
+  }
+  if (agentsChanged || hostsChanged) {
+    renderAgents();
+    syncSessionHostAndIconVisuals();
+  }
 }
 
 function openSettings() {
@@ -406,7 +439,7 @@ function renderSessionQuota(session) {
   renderQuotaBatteries(root, quota, {showPercent: viewMode === 'tabs' || session.floating});
 }
 
-function renderSessions() {
+function renderSessions({ focus = true } = {}) {
   const all = [...sessions.values()];
   const docked = all.filter(session => !session.minimized && !session.floating);
   const rows = tileRows(docked);
@@ -470,12 +503,12 @@ function renderSessions() {
   for (const s of all) {
     if (rowBySession.has(s.id) || s.floating) s.fit.fit();
   }
-  sessions.get(activeSession)?.term.focus();
+  if (focus && !document.querySelector('dialog[open]')) sessions.get(activeSession)?.term.focus();
   $('session-count').textContent=`${sessions.size} / 8`;
   renderInstances();
   renderMinimized();
 }
-function render() { renderHosts(); renderAgents(); renderWorkspaces(); renderSessions(); updateEditing(); }
+function render() { renderSessions(); updateEditing(); }
 
 function renderInstances() {
   const section = $('instances-section'), root = $('instances-list');
@@ -522,7 +555,21 @@ function renderInstances() {
   }
 }
 
-function renameSession(session){const name=prompt('终端会话名称',session.title);if(name?.trim()){session.title=name.trim();post({action:'session-sync',method:'PUT',host:session.host,item:{id:session.id,directory_path:session.workspace.path,directory_name:session.workspace.name,agent_name:session.agent.name,agent_command:session.agent.command,display_name:session.title}});renderSessions();}}
+function renameSession(session){
+  const name=prompt('终端会话名称',session.title);
+  if(name?.trim()){
+    session.title=name.trim();
+    const syncId=session.remoteId||session.id;
+    post({
+      action:'session-sync',
+      method:'PUT',
+      host:session.host,
+      id:syncId,
+      item:buildSessionSyncItem({id:syncId,workspace:session.workspace,agent:session.agent,title:session.title}),
+    });
+    renderSessions();
+  }
+}
 function moveSession(sourceId,targetId){if(!sourceId||sourceId===targetId)return;const items=[...sessions.entries()];const from=items.findIndex(([,s])=>s.id===sourceId),to=items.findIndex(([,s])=>s.id===targetId);if(from<0||to<0)return;const [item]=items.splice(from,1);items.splice(to,0,item);sessions.clear();for(const [id,s] of items)sessions.set(id,s);renderSessions();}
 function toggleFloat(session){
   session.floating = !session.floating;
@@ -653,37 +700,196 @@ function deleteWorkspace(index){const host=currentHost(), item=host?.directories
 function moveWorkspace(index,offset){const host=currentHost(),items=host?.directories;if(!items||index<0||index+offset<0||index+offset>=items.length)return;[items[index],items[index+offset]]=[items[index+offset],items[index]];sendConfig();render();}
 function moveAgentAt(index,offset){const host=currentHost(),items=agentsForHost(host),target=index+offset;if(index<0||target<0||target>=items.length)return;[items[index],items[target]]=[items[target],items[index]];if(host)host.selected_agent=target;sendConfig();render();}
 
+function createTerminalSession({ id, remoteId = id, title, host, workspace, agent, restoreOnly = false, activate = true }) {
+  const normalizedId = normalizeSessionId(id);
+  const term = new Terminal({cursorBlink:true,fontFamily:'Cascadia Code,Consolas,monospace',fontSize:terminalFontSize(),scrollback:5000,convertEol:false,allowProposedApi:true,theme:terminalTheme()});
+  const fit = new FitAddon();
+  term.loadAddon(fit);
+  const session = {
+    id: normalizedId,
+    remoteId: normalizeSessionId(remoteId) || normalizedId,
+    title,
+    term,
+    fit,
+    host: { ...host },
+    workspace: { ...workspace },
+    agent: { ...agent },
+    restoreOnly: Boolean(restoreOnly),
+    startedAt: Date.now(),
+    connected: false,
+    opened: false,
+  };
+  session.autoState = createAutoConfirmState();
+  term.onData((data) => { resetAutoConfirm(session.autoState); post({ action: 'input', id: normalizedId, data }); });
+  term.onResize(({ cols, rows }) => post({ action: 'resize', id: normalizedId, cols, rows }));
+  session.autoTimer = setInterval(() => watchAutoEnter(session), 250);
+  sessions.set(normalizedId, session);
+  if (activate || !activeSession || !sessions.has(activeSession)) activeSession = normalizedId;
+  return session;
+}
+
 function openSession(workspaceIndex) {
   const host=currentHost(), agent=currentAgent(), workspace=host?.directories?.[workspaceIndex];
-  if(!host||!agent||!workspace){showError('请先配置主机、开发者和工作区。');return;}
-  if(sessions.size>=8){showError('最多同时打开 8 个终端。');return;}
+  if(!host||!agent||!workspace){showError('请先配置主机、开发者和工作区。');return '';}
+  const existing = findExistingSession(sessions.values(), {
+    hostId: host.id,
+    directoryPath: workspace.path,
+    agentCommand: agent.command,
+  });
+  if (existing) {
+    if (existing.minimized) restoreSession(existing.id);
+    else {
+      activeSession = existing.id;
+      renderSessions();
+      existing.term.focus();
+    }
+    return existing.id;
+  }
+  if(sessions.size>=8){showError('最多同时打开 8 个终端。');return '';}
   const id=makeId(), title=`${workspace.name||workspace.path} · ${agent.name||agent.command}`;
-  const term=new Terminal({cursorBlink:true,fontFamily:'Cascadia Code,Consolas,monospace',fontSize:terminalFontSize(),scrollback:5000,convertEol:false,allowProposedApi:true,theme:terminalTheme()});
-  const fit=new FitAddon();term.loadAddon(fit);
-  const session={id,title,term,fit,host:{...host},workspace:{...workspace},agent:{...agent},connected:false,opened:false};
-  session.autoState=createAutoConfirmState();
-  term.onData(data=>{resetAutoConfirm(session.autoState);post({action:'input',id,data});});
-  term.onResize(({cols,rows})=>post({action:'resize',id,cols,rows}));
-  session.autoTimer=setInterval(()=>watchAutoEnter(session),250);
-  sessions.set(id,session);activeSession=id;renderSessions();term.writeln('\x1b[90m正在连接 SSH…\x1b[0m');
-  post({action:'session-sync',method:'PUT',host:session.host,item:{id,directory_path:workspace.path,directory_name:workspace.name,agent_name:agent.name,agent_command:agent.command,display_name:title}});
+  const session=createTerminalSession({id,title,host,workspace,agent,restoreOnly:false,activate:true});
+  renderSessions();
+  session.term.writeln('\x1b[90m正在连接 SSH…\x1b[0m');
+  post({action:'session-sync',method:'PUT',host:session.host,id,item:buildSessionSyncItem(session)});
   connectSession(session);
   return id;
 }
+
+function openSyncedSession(host, item) {
+  if (!host || !isValidSessionId(item?.id) || sessions.size >= 8) return null;
+  const id = normalizeSessionId(item.id);
+  const existing = findExistingSession(sessions.values(), {
+    id,
+    hostId: host.id,
+    directoryPath: item.directory_path,
+    agentCommand: item.agent_command,
+  });
+  if (existing) return null;
+  const workspace = (host.directories || []).find((dir) => dir.path === item.directory_path) || {
+    name: item.directory_name || item.directory_path,
+    path: item.directory_path,
+  };
+  const hostAgents = agentsForHost(host);
+  const agent =
+    hostAgents.find((preset) => preset.command === item.agent_command && preset.name === item.agent_name) ||
+    hostAgents.find((preset) => preset.command === item.agent_command) ||
+    { name: item.agent_name || item.agent_command, command: item.agent_command };
+  const title = item.display_name || `${workspace.name || workspace.path} · ${agent.name || agent.command}`;
+  return createTerminalSession({
+    id,
+    remoteId: id,
+    title,
+    host,
+    workspace,
+    agent,
+    restoreOnly: true,
+    activate: !activeSession || !sessions.has(activeSession),
+  });
+}
+
 function connectSession(session) {
   session.connected=false;setBusy(true);
-  post({action:'connect',id:session.id,host:session.host,workspace:session.workspace,agent:session.agent,cols:session.term.cols,rows:session.term.rows});
+  post({
+    action:'connect',
+    id:session.id,
+    host:session.host,
+    workspace:session.workspace,
+    agent:session.agent,
+    cols:session.term.cols,
+    rows:session.term.rows,
+    restore_only:Boolean(session.restoreOnly),
+  });
 }
-function closeSession(id) {
+
+function closeSession(id, { syncDeletion = true, terminateRemote = true, skipRender = false } = {}) {
   const session=sessions.get(id);if(!session)return;
-  post({action:'session-sync',method:'DELETE',host:session.host,id});
-  post({action:'close',id});clearInterval(session.autoTimer);session.term.dispose();sessions.delete(id);
+  if (syncDeletion) {
+    post({action:'session-sync',method:'DELETE',host:session.host,id:session.remoteId||session.id});
+  }
+  post({action:'close',id,terminate_remote:Boolean(terminateRemote)});
+  clearInterval(session.autoTimer);session.term.dispose();sessions.delete(id);
   if(activeSession===id)activeSession=sessions.keys().next().value||'';
-  setBusy([...sessions.values()].some(s=>s.connected));renderSessions();
+  setBusy([...sessions.values()].some(s=>s.connected));
+  if (!skipRender) renderSessions({ focus: !document.querySelector('dialog[open]') });
+}
+
+function syncSessionHostAndIconVisuals() {
+  const hostsById = new Map(config.hosts.map((host) => [host.id, host]));
+  let updatedIcons = false;
+  for (const session of sessions.values()) {
+    const latestHost = hostsById.get(session.host?.id);
+    if (latestHost) session.host = { ...latestHost };
+    const titleEl = session.card?.querySelector('.terminal-card-title');
+    if (titleEl) {
+      const nameEl = titleEl.querySelector('.terminal-card-name');
+      const nextIcon = sessionAgentIcon(session);
+      titleEl.replaceChildren();
+      if (nextIcon) titleEl.append(nextIcon);
+      if (nameEl) titleEl.append(nameEl);
+      updatedIcons = true;
+    }
+  }
+  if (updatedIcons) renderInstances();
+}
+
+function reconcileSyncedSessions(syncedHosts, remappedHosts = {}) {
+  if (config.offline_mode) return;
+  const current = [...sessions.values()].map((session) => ({
+    id: session.id,
+    remoteId: session.remoteId || session.id,
+    host: session.host,
+    workspace: session.workspace,
+    agent: session.agent,
+    title: session.title,
+    startedAt: session.startedAt || 0,
+  }));
+  const { hostUpdates, renames, toClose, toOpen } = planSyncedSessionChanges({
+    currentSessions: current,
+    hosts: config.hosts,
+    syncedHosts,
+    remappedHosts,
+    now: Date.now(),
+  });
+  for (const update of hostUpdates) {
+    const session = sessions.get(update.sessionId);
+    if (session) session.host = update.host;
+  }
+  let titleChanged = false;
+  for (const rename of renames) {
+    const session = sessions.get(rename.sessionId);
+    if (!session) continue;
+    session.remoteId = rename.remoteId;
+    if (rename.title && rename.title !== session.title) {
+      session.title = rename.title;
+      const nameEl = session.card?.querySelector('.terminal-card-name');
+      if (nameEl) nameEl.textContent = session.title;
+      titleChanged = true;
+    }
+  }
+  const hadActive = Boolean(activeSession && sessions.has(activeSession) && !toClose.includes(activeSession));
+  for (const id of toClose) {
+    closeSession(id, { syncDeletion: false, terminateRemote: false, skipRender: true });
+  }
+  const opened = [];
+  for (const { host, item } of toOpen) {
+    const session = openSyncedSession(host, item);
+    if (session) opened.push(session);
+  }
+  if (toClose.length || opened.length) {
+    renderSessions({ focus: !hadActive && !document.querySelector('dialog[open]') });
+    for (const session of opened) {
+      session.term.writeln('\x1b[90m正在恢复远程会话 SSH…\x1b[0m');
+      connectSession(session);
+    }
+  } else if (titleChanged) {
+    renderInstances();
+    renderMinimized();
+  }
 }
 function handleNativeMessage(event) {
   const msg=event.data;
   if(msg.type==='config'){normalizeConfig(msg.config);return;}
+  if(msg.type==='sync-sessions'){reconcileSyncedSessions(msg.hosts||{},msg.remapped_hosts||{});return;}
   if(msg.type==='sync-auth-result'){if(msg.auth||(!msg.success&&msg.manual))showError(msg.message);else if(msg.success&&msg.manual)$('connection-status').title=msg.message;else if(!msg.success)$('connection-status').title=`同步失败：${msg.message}`;return;}
   if(msg.type==='admin-users'){renderAdminUsers(msg.users||[]);return;}
   if(msg.type==='browse-result'){renderBrowse(msg);return;}

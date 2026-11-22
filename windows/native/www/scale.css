@@ -79,8 +79,10 @@
   font-size: calc(12px * var(--ui-scale));
 }
 
-.scale-control .scale-step {
+.toolbar .scale-control .scale-step {
   width: calc(26px * var(--ui-scale));
+  height: calc(27px * var(--ui-scale));
+  padding: 0;
   font-size: calc(16px * var(--ui-scale));
 }
 

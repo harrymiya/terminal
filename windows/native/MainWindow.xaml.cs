@@ -24,9 +24,11 @@ public partial class MainWindow : Window
     private readonly ConcurrentDictionary<string, TaskCompletionSource<JsonElement>> _mcpCalls = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, Lazy<(string Address, int Port)>> _sshEndpointCache = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, string> _announcedSshEndpoints = new(StringComparer.Ordinal);
+    private readonly SemaphoreSlim _syncLock = new(1, 1);
     private McpServer? _mcpServer;
     private bool _ready;
-    private bool _syncInFlight;
+    private volatile bool _disposed;
+    private volatile bool _syncInFlight;
     private bool _metricsInFlight;
     private bool _quotaInFlight;
     private readonly DispatcherTimer _syncTimer = new();
@@ -85,7 +87,7 @@ public partial class MainWindow : Window
                 case "connect": Connect(message); break;
                 case "input": Input(message); break;
                 case "resize": Resize(message); break;
-                case "close": CloseSession(Text(message, "id")); break;
+                case "close": CloseSession(Text(message, "id"), terminateRemote: !message.TryGetProperty("terminate_remote", out var terminateProp) || terminateProp.ValueKind != JsonValueKind.False); break;
                 case "clear-host-password": ClearHostPassword(message); break;
                 case "upload-image": _ = UploadImageAsync(message); break;
                 case "upload-image-path": _ = UploadImagePathAsync(message); break;
@@ -94,7 +96,7 @@ public partial class MainWindow : Window
                 case "sync-now": _ = SyncNowAsync(manual: true); break;
                 case "mcp-info": ShowMcpInfo(); break;
                 case "delete-host-profile": _ = DeleteHostProfileAsync(Text(message, "host_id")); break;
-                case "session-sync": _ = SyncSessionAsync(message); break;
+                case "session-sync": HandleSessionSyncMessage(message); break;
                 case "browse-directories": _ = BrowseDirectoriesAsync(message); break;
                 case "admin-users": _ = GetAdminUsersAsync(); break;
                 case "admin-user-save": _ = SaveAdminUserAsync(message); break;
@@ -129,11 +131,12 @@ public partial class MainWindow : Window
 
     private void SaveConfig(JsonElement message)
     {
+        var previousConfig = ConfigStore.Load();
         var node = JsonNode.Parse(message.GetProperty("config").GetRawText()) as JsonObject
             ?? throw new InvalidDataException("收到的配置格式无效。");
         if (node["hosts"] is JsonArray hosts)
         {
-            var previousHosts = (ConfigStore.Load()["hosts"] as JsonArray ?? new JsonArray()).OfType<JsonObject>().ToList();
+            var previousHosts = (previousConfig["hosts"] as JsonArray ?? new JsonArray()).OfType<JsonObject>().ToList();
             foreach (var host in hosts.OfType<JsonObject>())
             {
                 var previous = previousHosts.FirstOrDefault(item => Text(item, "id") == Text(host, "id"));
@@ -161,6 +164,10 @@ public partial class MainWindow : Window
                 }
             }
         }
+        if (previousConfig["pending_session_sync"] is JsonArray pendingSessions)
+            node["pending_session_sync"] = pendingSessions.DeepClone();
+        if (node["shared_sessions"] is null && previousConfig["shared_sessions"] is JsonObject sharedSessions)
+            node["shared_sessions"] = sharedSessions.DeepClone();
         ConfigStore.Save(node);
         Send(new { type = "saved" });
         if (message.TryGetProperty("ssh_password_change", out _)) SendConfig();
@@ -173,7 +180,9 @@ public partial class MainWindow : Window
         var id = Text(message, "id");
         if (id.Length is < 8 or > 64 || id.Any(c => !Uri.IsHexDigit(c)))
             throw new ArgumentException("终端 ID 无效。");
-        CloseSession(id);
+        CloseSession(id, terminateRemote: false);
+
+        var restoreOnly = message.TryGetProperty("restore_only", out var restoreProp) && restoreProp.ValueKind == JsonValueKind.True;
 
         var requestedHost = message.GetProperty("host");
         var currentHost = (ConfigStore.Load()["hosts"] as JsonArray)?.OfType<JsonObject>()
@@ -210,7 +219,7 @@ public partial class MainWindow : Window
         try
         {
             session.Start(username, address, port, Text(workspace, "path"), Text(agent, "command"),
-                Number(message, "cols", 100), Number(message, "rows", 30), savedPassword);
+                Number(message, "cols", 100), Number(message, "rows", 30), savedPassword, restoreOnly);
             Send(new { type = "connected", id });
         }
         catch (Exception ex)
@@ -235,12 +244,26 @@ public partial class MainWindow : Window
             session.Resize(Number(message, "cols", 100), Number(message, "rows", 30));
     }
 
-    private void CloseSession(string id)
+    private void CloseSession(string id, bool terminateRemote = false)
     {
         if (!_sessions.TryGetValue(id, out var session)) return;
         _sessions.Remove(id);
+        _sessionHosts.TryGetValue(id, out var host);
         _sessionHosts.Remove(id);
         session.Dispose();
+        if (terminateRemote && host is not null)
+        {
+            var hostClone = Clone(host);
+            var remoteCommand = SshTerminalSession.BuildCloseRemoteSessionCommand(id);
+            if (remoteCommand.Length > 0)
+            {
+                _ = Task.Run(async () =>
+                {
+                    try { await RunSshCommandAsync(hostClone, remoteCommand, null, 10_000).ConfigureAwait(false); }
+                    catch { }
+                });
+            }
+        }
     }
 
     private static string ReadHostPassword(string credentialId, string username)
@@ -288,6 +311,7 @@ public partial class MainWindow : Window
                 var username = config["sync_username"]?.GetValue<string>() ?? "";
                 if (username.Length > 0) CredentialStore.Delete("RemoteDevTerminal:sync:" + username.ToLowerInvariant());
                 config["sync_token"] = ""; config["sync_username"] = ""; config["sync_is_admin"] = false;
+                config["shared_sessions"] = new JsonObject();
                 ConfigStore.Save(config);
                 Dispatcher.BeginInvoke(() => { ConfigureSyncTimer(); Send(new { type = "sync-auth-result", success = true, auth = true, message = "已退出同步账号。" }); SendConfig(); });
             }
@@ -297,31 +321,44 @@ public partial class MainWindow : Window
 
     private async Task SyncNowAsync(bool manual)
     {
-        if (_syncInFlight) return;
+        if (_disposed || (!manual && _syncInFlight)) return;
+        await _syncLock.WaitAsync().ConfigureAwait(false);
         _syncInFlight = true;
         try
         {
+            if (_disposed) return;
             var config = ConfigStore.Load();
             if (Bool(config, "offline_mode")) throw new InvalidOperationException("当前处于离线模式，已跳过跨设备同步。");
             var url = Text(config, "sync_url").TrimEnd('/');
             var token = Text(config, "sync_token");
             if (url.Length == 0 || token.Length == 0) throw new InvalidOperationException("请先填写同步服务地址并登录账号。");
-            await SynchronizeAccountAsync(config, url, token).ConfigureAwait(false);
-            if (manual) Dispatcher.BeginInvoke(() => Send(new { type = "sync-auth-result", success = true, manual = true, message = "主机、Agent、工作区和共享会话已同步。" }));
-            Dispatcher.BeginInvoke(SendConfig);
+            var syncResult = await SynchronizeAccountAsync(config, url, token).ConfigureAwait(false);
+            if (_disposed || Dispatcher.HasShutdownStarted) return;
+            await Dispatcher.InvokeAsync(() =>
+            {
+                if (_disposed) return;
+                if (manual) Send(new { type = "sync-auth-result", success = true, manual = true, message = "主机、Agent、工作区和共享会话已同步。" });
+                SendConfig();
+                Send(new { type = "sync-sessions", hosts = syncResult.SyncedSessions, remapped_hosts = syncResult.RemappedHostIds });
+            }).Task.ConfigureAwait(false);
         }
+        catch (OperationCanceledException) when (_disposed || Dispatcher.HasShutdownStarted) { }
         catch (Exception ex)
         {
-            Dispatcher.BeginInvoke(() =>
+            if (!_disposed && !Dispatcher.HasShutdownStarted)
             {
-                if (ex is SyncHttpException http && http.StatusCode == 401)
+                Dispatcher.BeginInvoke(() =>
                 {
-                    var expired = ConfigStore.Load(); expired["sync_token"] = ""; ConfigStore.Save(expired); ConfigureSyncTimer();
-                }
-                Send(new { type = "sync-auth-result", success = false, manual, message = ex.Message });
-            });
+                    if (_disposed) return;
+                    if (ex is SyncHttpException http && http.StatusCode == 401)
+                    {
+                        var expired = ConfigStore.Load(); expired["sync_token"] = ""; ConfigStore.Save(expired); ConfigureSyncTimer();
+                    }
+                    Send(new { type = "sync-auth-result", success = false, manual, message = ex.Message });
+                });
+            }
         }
-        finally { _syncInFlight = false; }
+        finally { _syncInFlight = false; _syncLock.Release(); }
     }
 
     private static async Task<string> SyncRequestAsync(string url, string method, string? token, object? payload)
@@ -374,13 +411,15 @@ public partial class MainWindow : Window
                 _syncTimer.Stop();
                 return;
             }
+            var wasEnabled = _syncTimer.IsEnabled;
             var seconds = Math.Max(5, Math.Min(300, Int(config["sync_interval_seconds"], 5)));
             _syncTimer.Interval = TimeSpan.FromSeconds(seconds);
-            if (!_syncTimer.IsEnabled)
+            if (!wasEnabled)
             {
                 _syncTimer.Tick -= SyncTimer_Tick;
                 _syncTimer.Tick += SyncTimer_Tick;
                 _syncTimer.Start();
+                _ = SyncNowAsync(manual: false);
             }
         }
         catch { _syncTimer.Stop(); }
@@ -631,10 +670,11 @@ public partial class MainWindow : Window
         return delta.TotalDays >= 1 ? Math.Floor(delta.TotalDays).ToString(CultureInfo.InvariantCulture) + "d" : delta.TotalSeconds > 0 ? "<1d" : "";
     }
 
-    private async Task SynchronizeAccountAsync(JsonObject config, string url, string token)
+    private async Task<(JsonObject SyncedSessions, JsonObject RemappedHostIds)> SynchronizeAccountAsync(JsonObject config, string url, string token)
     {
         using var me = JsonDocument.Parse(await SyncRequestAsync(url + "/v1/auth/me", "GET", token, null).ConfigureAwait(false));
         var username = Text(me.RootElement, "username");
+        var account = username.Trim().ToLowerInvariant();
         config["sync_username"] = username;
         config["sync_is_admin"] = me.RootElement.TryGetProperty("is_admin", out var isAdmin) && isAdmin.ValueKind == JsonValueKind.True;
         var previousAgents = (config["agents"] as JsonArray ?? new JsonArray()).OfType<JsonObject>().Select(Clone).ToList();
@@ -656,13 +696,20 @@ public partial class MainWindow : Window
 
         var hostResponse = ParseObject(await SyncRequestAsync(url + "/v1/hosts", "GET", token, null).ConfigureAwait(false));
         var profiles = hostResponse["hosts"] as JsonArray ?? new JsonArray();
-        var profileById = profiles.OfType<JsonObject>().Where(p => !Bool(p, "deleted"))
+        var profileList = profiles.OfType<JsonObject>().ToList();
+        var profileById = profileList.Where(p => !Bool(p, "deleted"))
+            .GroupBy(p => Text(p, "id"), StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
+        var deletedProfileById = profileList.Where(p => Bool(p, "deleted"))
             .GroupBy(p => Text(p, "id"), StringComparer.OrdinalIgnoreCase)
             .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
         var hosts = config["hosts"] as JsonArray ?? new JsonArray();
         var mergedHosts = new JsonArray();
         var matchedProfiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var originalHostIds = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var remappedHostIds = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var syncedSessionsByHost = new Dictionary<string, JsonArray>(StringComparer.OrdinalIgnoreCase);
+        var completedMutationIds = new HashSet<string>(StringComparer.Ordinal);
 
         foreach (var hostNode in hosts.OfType<JsonObject>())
         {
@@ -670,6 +717,27 @@ public partial class MainWindow : Window
             var id = Text(host, "id");
             profileById.TryGetValue(id, out var remote);
             var isDirty = dirtyHosts.Contains(id);
+            if (remote is null && !isDirty && deletedProfileById.TryGetValue(id, out var tombstone))
+            {
+                var canonicalFromTombstone = Text(tombstone, "canonical_id");
+                if (canonicalFromTombstone.Length > 0 && profileById.TryGetValue(canonicalFromTombstone, out var canonicalRemote))
+                {
+                    host["id"] = canonicalFromTombstone;
+                    originalHostIds[canonicalFromTombstone] = id;
+                    remappedHostIds[id] = canonicalFromTombstone;
+                    var dirtyWorkspaces = StringSet(config["dirty_workspaces"]);
+                    if (dirtyWorkspaces.Remove(id))
+                    {
+                        dirtyWorkspaces.Add(canonicalFromTombstone);
+                        config["dirty_workspaces"] = JsonArrayFrom(dirtyWorkspaces);
+                    }
+                    remote = canonicalRemote;
+                }
+                else
+                {
+                    continue;
+                }
+            }
             if (remote is null || isDirty)
             {
                 var profile = BuildHostProfile(host, config);
@@ -681,6 +749,13 @@ public partial class MainWindow : Window
                     {
                         host["id"] = newId;
                         originalHostIds[newId] = id;
+                        remappedHostIds[id] = newId;
+                        var dirtyWorkspaces = StringSet(config["dirty_workspaces"]);
+                        if (dirtyWorkspaces.Remove(id))
+                        {
+                            dirtyWorkspaces.Add(newId);
+                            config["dirty_workspaces"] = JsonArrayFrom(dirtyWorkspaces);
+                        }
                     }
                     if (profileById.TryGetValue(newId, out var canonicalProfile)) remote = canonicalProfile;
                     dirtyHosts.Remove(id);
@@ -693,30 +768,36 @@ public partial class MainWindow : Window
                 if (!isDirty) ApplyHostProfile(host, remote, config);
             }
             var hostIdNow = Text(host, "id");
+            if (mergedHosts.OfType<JsonObject>().Any(h => string.Equals(Text(h, "id"), hostIdNow, StringComparison.OrdinalIgnoreCase)))
+                continue;
             host["directories"] = await SyncWorkspacesAsync(host, config, url, token, username).ConfigureAwait(false);
-            var sharedUrl = url + "/v1/hosts/" + Uri.EscapeDataString(hostIdNow) + "/users/" + Uri.EscapeDataString(Text(host, "username")) + "/sessions";
-            var sessionData = ParseObject(await SyncRequestAsync(sharedUrl, "GET", token, null).ConfigureAwait(false));
-            var sharedMap = GetObject(config, "shared_sessions");
-            sharedMap[hostIdNow] = sessionData["sessions"]?.DeepClone() ?? new JsonArray();
+            originalHostIds.TryGetValue(hostIdNow, out var originalIdForHost);
+            var hostSessions = await SyncHostSessionsAsync(host, originalIdForHost, config, url, token, account, completedMutationIds).ConfigureAwait(false);
+            if (hostSessions is not null) syncedSessionsByHost[hostIdNow] = hostSessions;
             mergedHosts.Add(host);
         }
 
         foreach (var profile in profileById.Values)
         {
             var id = Text(profile, "id");
-            if (matchedProfiles.Contains(id) || mergedHosts.OfType<JsonObject>().Any(h => Text(h, "id") == id)) continue;
+            if (matchedProfiles.Contains(id) || mergedHosts.OfType<JsonObject>().Any(h => string.Equals(Text(h, "id"), id, StringComparison.OrdinalIgnoreCase))) continue;
             var host = new JsonObject();
             ApplyHostProfile(host, profile, config);
             host["directories"] = await SyncWorkspacesAsync(host, config, url, token, username).ConfigureAwait(false);
-            var sharedUrl = url + "/v1/hosts/" + Uri.EscapeDataString(id) + "/users/" + Uri.EscapeDataString(Text(host, "username")) + "/sessions";
-            var sessionData = ParseObject(await SyncRequestAsync(sharedUrl, "GET", token, null).ConfigureAwait(false));
-            var sharedMap = GetObject(config, "shared_sessions");
-            sharedMap[id] = sessionData["sessions"]?.DeepClone() ?? new JsonArray();
+            var hostSessions = await SyncHostSessionsAsync(host, null, config, url, token, account, completedMutationIds).ConfigureAwait(false);
+            if (hostSessions is not null) syncedSessionsByHost[id] = hostSessions;
             mergedHosts.Add(host);
         }
 
+        var finalSynced = new JsonObject();
+        var remappedJson = new JsonObject();
+        foreach (var pair in remappedHostIds) remappedJson[pair.Key] = pair.Value;
+
+        if (_disposed || Dispatcher.HasShutdownStarted) return (finalSynced, remappedJson);
+
         await Dispatcher.InvokeAsync(() =>
         {
+            if (_disposed) return;
             var latest = ConfigStore.Load();
             var localHosts = (latest["hosts"] as JsonArray ?? new JsonArray()).OfType<JsonObject>().ToList();
             foreach (var host in mergedHosts.OfType<JsonObject>())
@@ -732,6 +813,18 @@ public partial class MainWindow : Window
                 host.Remove("credential_id");
                 if (local?["credential_id"] is { } reference) host["credential_id"] = reference.DeepClone();
             }
+            var filteredPending = FilterPendingSessionSync(latest["pending_session_sync"] as JsonArray, completedMutationIds, remappedHostIds);
+            var latestShared = new JsonObject();
+            foreach (var host in mergedHosts.OfType<JsonObject>())
+            {
+                var hostId = Text(host, "id");
+                var hostUser = Text(host, "username");
+                if (!syncedSessionsByHost.TryGetValue(hostId, out var pulled)) continue;
+                var remainingForHost = PendingMutationsForHost(filteredPending, account, hostId, hostUser, null);
+                var merged = MergeSessionSyncItems(pulled, remainingForHost);
+                latestShared[hostId] = merged;
+                finalSynced[hostId] = merged.DeepClone();
+            }
             latest["hosts"] = mergedHosts;
             latest["agents"] = config["agents"]?.DeepClone();
             latest["sync_username"] = username;
@@ -742,9 +835,38 @@ public partial class MainWindow : Window
             latest["agents_dirty"] = config["agents_dirty"]?.DeepClone() ?? JsonValue.Create(false);
             latest["workspace_sync_revisions"] = config["workspace_sync_revisions"]?.DeepClone() ?? new JsonObject();
             latest["agent_sync_revisions"] = config["agent_sync_revisions"]?.DeepClone() ?? new JsonObject();
-            latest["shared_sessions"] = config["shared_sessions"]?.DeepClone() ?? new JsonObject();
+            latest["pending_session_sync"] = filteredPending;
+            latest["shared_sessions"] = latestShared;
             ConfigStore.Save(latest);
         }).Task.ConfigureAwait(false);
+        return (finalSynced, remappedJson);
+    }
+
+    private static async Task<JsonArray?> SyncHostSessionsAsync(
+        JsonObject host,
+        string? originalHostId,
+        JsonObject config,
+        string url,
+        string token,
+        string account,
+        HashSet<string> completedMutationIds)
+    {
+        var hostId = Text(host, "id");
+        var hostUser = Text(host, "username");
+        if (hostId.Length == 0 || hostUser.Length == 0) return null;
+        var sharedUrl = url + "/v1/hosts/" + Uri.EscapeDataString(hostId) + "/users/" + Uri.EscapeDataString(hostUser) + "/sessions";
+        var sessionData = ParseObject(await SyncRequestAsync(sharedUrl, "GET", token, null).ConfigureAwait(false));
+        var remoteItems = sessionData["sessions"] as JsonArray ?? new JsonArray();
+        var pending = PendingMutationsForHost(config["pending_session_sync"] as JsonArray, account, hostId, hostUser, originalHostId);
+        foreach (var mutation in pending)
+        {
+            if (await PushSessionMutationAsync(url, token, hostId, hostUser, mutation).ConfigureAwait(false))
+            {
+                var mutationId = Text(mutation, "mutation_id");
+                if (mutationId.Length > 0) completedMutationIds.Add(mutationId);
+            }
+        }
+        return MergeSessionSyncItems(remoteItems, pending);
     }
 
     private async Task<JsonArray> SyncWorkspacesAsync(JsonObject host, JsonObject config, string url, string token, string username)
@@ -868,26 +990,228 @@ public partial class MainWindow : Window
         host["directories"] ??= new JsonArray();
     }
 
-    private async Task SyncSessionAsync(JsonElement message)
+    private void HandleSessionSyncMessage(JsonElement message)
     {
+        var config = ConfigStore.Load();
+        if (Bool(config, "offline_mode")) return;
+        if (!message.TryGetProperty("host", out var hostProp) || hostProp.ValueKind != JsonValueKind.Object) return;
+        var hostId = Text(hostProp, "id");
+        var username = Text(hostProp, "username");
+        var method = Text(message, "method");
+        var sessionId = Text(message, "id");
+        if (sessionId.Length == 0 && message.TryGetProperty("item", out var itemProp) && itemProp.ValueKind == JsonValueKind.Object)
+            sessionId = Text(itemProp, "id");
+        sessionId = sessionId.Replace("-", "").ToLowerInvariant();
+        if (hostId.Length == 0 || username.Length == 0 || sessionId.Length == 0 || (method != "PUT" && method != "DELETE"))
+            return;
+
+        JsonObject? item = null;
+        if (method == "PUT")
+        {
+            if (!message.TryGetProperty("item", out var itemEl) || itemEl.ValueKind != JsonValueKind.Object) return;
+            item = JsonNode.Parse(itemEl.GetRawText()) as JsonObject;
+            if (item is null) return;
+            item["id"] = sessionId;
+        }
+
+        var account = Text(config, "sync_username").Trim().ToLowerInvariant();
+        var entry = new JsonObject
+        {
+            ["mutation_id"] = Guid.NewGuid().ToString("N"),
+            ["account"] = account,
+            ["host_id"] = hostId,
+            ["username"] = username,
+            ["session_id"] = sessionId,
+            ["method"] = method,
+            ["item"] = item
+        };
+
+        var pending = config["pending_session_sync"] as JsonArray ?? new JsonArray();
+        var updated = new JsonArray();
+        foreach (var existing in pending.OfType<JsonObject>())
+        {
+            var sameTarget = string.Equals(Text(existing, "host_id"), hostId, StringComparison.OrdinalIgnoreCase) &&
+                             string.Equals(Text(existing, "username"), username, StringComparison.Ordinal) &&
+                             string.Equals(Text(existing, "session_id"), sessionId, StringComparison.Ordinal) &&
+                             string.Equals(Text(existing, "account").Trim().ToLowerInvariant(), account, StringComparison.Ordinal);
+            if (!sameTarget) updated.Add(Clone(existing));
+        }
+        updated.Add(entry);
+        config["pending_session_sync"] = updated;
+        ConfigStore.Save(config);
+        _ = FlushPendingSessionSyncAsync();
+    }
+
+    private async Task FlushPendingSessionSyncAsync()
+    {
+        if (_disposed) return;
+        await _syncLock.WaitAsync().ConfigureAwait(false);
         try
         {
-            var config = ConfigStore.Load();
-            if (Bool(config, "offline_mode")) return;
-            var url = Text(config, "sync_url").TrimEnd('/'); var token = Text(config, "sync_token");
-            var host = message.GetProperty("host"); var id = Text(host, "id"); var username = Text(host, "username");
-            if (url.Length == 0 || token.Length == 0 || id.Length == 0 || username.Length == 0) return;
-            var sessionId = Text(message, "id"); var method = Text(message, "method");
-            var endpoint = url + "/v1/hosts/" + Uri.EscapeDataString(id) + "/users/" + Uri.EscapeDataString(username) + "/sessions/" + Uri.EscapeDataString(sessionId);
+            if (_disposed || Dispatcher.HasShutdownStarted) return;
+            string url = "", token = "", account = "";
+            var toPush = new List<JsonObject>();
+            await Dispatcher.InvokeAsync(() =>
+            {
+                if (_disposed) return;
+                var config = ConfigStore.Load();
+                if (Bool(config, "offline_mode")) return;
+                url = Text(config, "sync_url").TrimEnd('/');
+                token = Text(config, "sync_token");
+                account = Text(config, "sync_username").Trim().ToLowerInvariant();
+                if (url.Length == 0 || token.Length == 0) return;
+                foreach (var entry in (config["pending_session_sync"] as JsonArray ?? new JsonArray()).OfType<JsonObject>())
+                {
+                    var entryAccount = Text(entry, "account").Trim().ToLowerInvariant();
+                    if (entryAccount.Length == 0 || entryAccount == account) toPush.Add(Clone(entry));
+                }
+            }).Task.ConfigureAwait(false);
+
+            if (url.Length == 0 || token.Length == 0 || toPush.Count == 0) return;
+            var completedIds = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var mutation in toPush)
+            {
+                if (await PushSessionMutationAsync(url, token, Text(mutation, "host_id"), Text(mutation, "username"), mutation).ConfigureAwait(false))
+                {
+                    var mutationId = Text(mutation, "mutation_id");
+                    if (mutationId.Length > 0) completedIds.Add(mutationId);
+                }
+            }
+            if (completedIds.Count == 0 || _disposed || Dispatcher.HasShutdownStarted) return;
+            await Dispatcher.InvokeAsync(() =>
+            {
+                if (_disposed) return;
+                var latest = ConfigStore.Load();
+                latest["pending_session_sync"] = FilterPendingSessionSync(latest["pending_session_sync"] as JsonArray, completedIds, null);
+                ConfigStore.Save(latest);
+            }).Task.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (_disposed || Dispatcher.HasShutdownStarted) { }
+        catch { }
+        finally { _syncLock.Release(); }
+    }
+
+    private static async Task<bool> PushSessionMutationAsync(string url, string token, string hostId, string username, JsonObject mutation)
+    {
+        var sessionId = Text(mutation, "session_id").Replace("-", "").ToLowerInvariant();
+        var method = Text(mutation, "method");
+        if (hostId.Length == 0 || username.Length == 0 || sessionId.Length == 0) return true;
+        var endpoint = url + "/v1/hosts/" + Uri.EscapeDataString(hostId) + "/users/" + Uri.EscapeDataString(username) + "/sessions/" + Uri.EscapeDataString(sessionId);
+        try
+        {
             if (method == "PUT")
             {
-                var item = JsonNode.Parse(message.GetProperty("item").GetRawText()) as JsonObject;
-                if (item is null) return;
-                await SyncRequestAsync(endpoint, "PUT", token, item).ConfigureAwait(false);
+                if (mutation["item"] is not JsonObject item) return true;
+                var payload = Clone(item);
+                payload["id"] = sessionId;
+                await SyncRequestAsync(endpoint, "PUT", token, payload).ConfigureAwait(false);
+                return true;
             }
-            else if (method == "DELETE") await SyncRequestAsync(endpoint, "DELETE", token, null).ConfigureAwait(false);
+            if (method == "DELETE")
+            {
+                await SyncRequestAsync(endpoint, "DELETE", token, null).ConfigureAwait(false);
+                return true;
+            }
+            return true;
         }
-        catch { }
+        catch (SyncHttpException ex) when (ex.StatusCode is 400 or 404)
+        {
+            return true;
+        }
+        catch (SyncHttpException ex) when (ex.StatusCode == 401)
+        {
+            throw;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static List<JsonObject> PendingMutationsForHost(
+        JsonArray? pending,
+        string account,
+        string hostId,
+        string username,
+        string? originalHostId)
+    {
+        var items = new List<JsonObject>();
+        if (pending is null) return items;
+        foreach (var entry in pending.OfType<JsonObject>())
+        {
+            var entryAccount = Text(entry, "account").Trim().ToLowerInvariant();
+            if (entryAccount.Length > 0 && entryAccount != account) continue;
+            var entryHostId = Text(entry, "host_id");
+            var matchesHost = string.Equals(entryHostId, hostId, StringComparison.OrdinalIgnoreCase) ||
+                              (originalHostId is not null && string.Equals(entryHostId, originalHostId, StringComparison.OrdinalIgnoreCase));
+            if (matchesHost && string.Equals(Text(entry, "username"), username, StringComparison.Ordinal))
+                items.Add(Clone(entry));
+        }
+        return items;
+    }
+
+    private static JsonArray FilterPendingSessionSync(
+        JsonArray? pending,
+        HashSet<string> completedMutationIds,
+        Dictionary<string, string>? remappedHostIds)
+    {
+        var result = new JsonArray();
+        if (pending is null) return result;
+        foreach (var entry in pending.OfType<JsonObject>())
+        {
+            var mutationId = Text(entry, "mutation_id");
+            if (mutationId.Length > 0 && completedMutationIds.Contains(mutationId)) continue;
+            var copy = Clone(entry);
+            var hostId = Text(copy, "host_id");
+            if (remappedHostIds is not null && remappedHostIds.TryGetValue(hostId, out var canonicalId))
+                copy["host_id"] = canonicalId;
+            result.Add(copy);
+        }
+        return result;
+    }
+
+    private static JsonArray MergeSessionSyncItems(JsonArray remoteItems, IEnumerable<JsonObject> mutations)
+    {
+        var merged = new List<(string Id, JsonObject Item)>();
+        void UpsertById(string id, JsonObject item)
+        {
+            for (var i = 0; i < merged.Count; i++)
+            {
+                if (string.Equals(merged[i].Id, id, StringComparison.Ordinal))
+                {
+                    merged[i] = (id, Clone(item));
+                    return;
+                }
+            }
+            merged.Add((id, Clone(item)));
+        }
+        foreach (var item in remoteItems.OfType<JsonObject>())
+        {
+            var id = Text(item, "id").Replace("-", "").ToLowerInvariant();
+            if (id.Length > 0) UpsertById(id, item);
+        }
+        foreach (var mutation in mutations)
+        {
+            var sessionId = Text(mutation, "session_id").Replace("-", "").ToLowerInvariant();
+            if (sessionId.Length == 0) continue;
+            var method = Text(mutation, "method");
+            if (method == "DELETE")
+                merged.RemoveAll(entry => string.Equals(entry.Id, sessionId, StringComparison.Ordinal));
+            else if (method == "PUT" && mutation["item"] is JsonObject item)
+                UpsertById(sessionId, item);
+        }
+        var byWorkspace = new List<(string Key, JsonObject Item)>();
+        foreach (var (id, item) in merged)
+        {
+            var dirPath = Text(item, "directory_path");
+            var cmd = Text(item, "agent_command");
+            var wsKey = dirPath.Length > 0 && cmd.Length > 0 ? "ws:" + dirPath + "\0" + cmd : "id:" + id;
+            byWorkspace.RemoveAll(entry => string.Equals(entry.Key, wsKey, StringComparison.Ordinal));
+            byWorkspace.Add((wsKey, item));
+        }
+        var result = new JsonArray();
+        foreach (var (_, item) in byWorkspace) result.Add(Clone(item));
+        return result;
     }
 
     private async Task DeleteHostProfileAsync(string hostId)
@@ -1298,6 +1622,7 @@ public partial class MainWindow : Window
 
     private void Window_Closed(object? sender, EventArgs e)
     {
+        _disposed = true;
         _syncTimer.Stop(); _metricsTimer.Stop(); _quotaTimer.Stop();
         _mcpServer?.Dispose(); _mcpServer = null;
         foreach (var session in _sessions.Values.ToArray()) session.Dispose();

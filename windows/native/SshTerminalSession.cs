@@ -33,7 +33,7 @@ internal sealed class SshTerminalSession : IDisposable
 
     public SshTerminalSession(string id) => Id = id;
 
-    public void Start(string username, string address, int port, string directory, string agent, int columns, int rows, string savedPassword = "")
+    public void Start(string username, string address, int port, string directory, string agent, int columns, int rows, string savedPassword = "", bool restoreOnly = false)
     {
         if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(address))
             throw new ArgumentException("请填写 SSH 用户名和地址。");
@@ -67,7 +67,7 @@ internal sealed class SshTerminalSession : IDisposable
                     _pseudoConsole, (nuint)IntPtr.Size, IntPtr.Zero, IntPtr.Zero))
                 ThrowLastError("附加 Windows 伪终端失败");
 
-            var remote = BuildRemoteCommand(Id, directory, agent);
+            var remote = BuildRemoteCommand(Id, directory, agent, restoreOnly);
             var commandLine = string.Join(" ", new[] {
                 QuoteArgument(ssh), "-tt", "-o", "ServerAliveInterval=20", "-o", "ServerAliveCountMax=6",
                 "-p", port.ToString(), "-l", QuoteArgument(username), "--", QuoteArgument(address), QuoteArgument(remote)
@@ -221,13 +221,32 @@ internal sealed class SshTerminalSession : IDisposable
         if (handle != IntPtr.Zero) ClosePseudoConsole(handle);
     }
 
-    private static string BuildRemoteCommand(string id, string directory, string agent)
+    internal static string BuildCloseRemoteSessionCommand(string id)
+    {
+        var safeId = new string(id.Where(Uri.IsHexDigit).Take(18).ToArray()).ToLowerInvariant();
+        if (safeId.Length < 8) return "";
+        var session = "rdt_" + safeId;
+        return $"if command -v tmux >/dev/null 2>&1 && tmux has-session -t {session} 2>/dev/null; then " +
+               $"for p in $(tmux list-panes -t {session} -F '#{{pane_pid}}' 2>/dev/null); do " +
+               $"pkill -TERM -P \"$p\" 2>/dev/null || true; kill -TERM \"$p\" 2>/dev/null || true; " +
+               $"done; " +
+               $"tmux kill-session -t {session} 2>/dev/null || true; " +
+               $"fi";
+    }
+
+    private static string BuildRemoteCommand(string id, string directory, string agent, bool restoreOnly = false)
     {
         var safeId = new string(id.Where(Uri.IsHexDigit).Take(18).ToArray()).ToLowerInvariant();
         if (safeId.Length < 8) safeId = Guid.NewGuid().ToString("N").Substring(0, 18);
         var session = "rdt_" + safeId;
         var qDirectory = ShellQuote(directory);
         var qAgent = ShellQuote(agent);
+        if (restoreOnly)
+        {
+            return $"cd -- {qDirectory} && if command -v tmux >/dev/null 2>&1 && tmux has-session -t {session} 2>/dev/null; then " +
+                   $"tmux set-option -t {session} mouse on && tmux attach-session -t {session}; " +
+                   $"else printf '\\n[会话已不存在，无法恢复]\\n'; exit 1; fi";
+        }
         var inner = $"\"${{SHELL:-/bin/bash}}\" -l -i -c {qAgent}; code=$?; printf \\\"\\n[命令已退出，状态 %s；Shell 仍然可用]\\n\\\" \\\"$code\\\"; exec \\\"${{SHELL:-/bin/bash}}\\\" -l -i";
         return $"cd -- {qDirectory} && if command -v tmux >/dev/null 2>&1; then " +
                $"(tmux has-session -t {session} 2>/dev/null || tmux new-session -d -s {session} -c {qDirectory} {ShellQuote(inner)}) && " +
