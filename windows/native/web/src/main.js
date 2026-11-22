@@ -320,6 +320,13 @@ function agentIcon(value) {
   symbol.setAttribute('aria-hidden', 'true');
   return symbol;
 }
+function sessionAgentIcon(session) {
+  const host = config.hosts.find(host => host.id === session.host.id) ?? session.host;
+  const agents = agentsForHost(host);
+  const preset = agents.find(agent => agent.id && agent.id === session.agent.id) ??
+    agents.find(agent => agent.command === session.agent.command && agent.name === session.agent.name);
+  return agentIcon(preset?.icon ?? session.agent.icon);
+}
 function renderAgents() {
   const host=currentHost(), list=agentsForHost(host);
   agentList.replaceChildren();
@@ -414,11 +421,14 @@ function renderSessions() {
     card.className='terminal-card';
     card.classList.toggle('active', s.id === activeSession);
     card.classList.toggle('inactive', !row && !s.floating);
-    card.innerHTML=`<div class="terminal-head"><span class="terminal-card-title" title="双击重命名">${escapeHtml(s.title)}</span><span class="terminal-quota quota-batteries" hidden></span><span class="terminal-tools"><button class="terminal-close rename-session" title="重命名">✎</button><button class="terminal-close image-session" title="发送图片">▧</button><button class="terminal-close minimize-session" title="最小化">−</button><button class="terminal-close float-session" title="浮动窗口">□</button><button class="terminal-close reconnect" title="重新连接">↻</button><button class="terminal-close close-session" title="关闭终端">×</button></span></div><div class="terminal-body"></div>`;
+    card.innerHTML=`<div class="terminal-head"><span class="terminal-card-title agent-label" title="双击重命名"><span class="terminal-card-name">${escapeHtml(s.title)}</span></span><span class="terminal-quota quota-batteries" hidden></span><span class="terminal-tools"><button class="terminal-close rename-session" title="重命名">✎</button><button class="terminal-close image-session" title="发送图片">▧</button><button class="terminal-close minimize-session" title="最小化">−</button><button class="terminal-close float-session" title="浮动窗口">□</button><button class="terminal-close reconnect" title="重新连接">↻</button><button class="terminal-close close-session" title="关闭终端">×</button></span></div><div class="terminal-body"></div>`;
+    const title = card.querySelector('.terminal-card-title');
+    const icon = sessionAgentIcon(s);
+    if (icon) title.prepend(icon);
     card.querySelector('.terminal-close.close-session').addEventListener('click',()=>closeSession(s.id));
     card.querySelector('.terminal-close.reconnect').addEventListener('click',()=>connectSession(s));
     card.querySelector('.terminal-close.rename-session').addEventListener('click',()=>renameSession(s));
-    card.querySelector('.terminal-card-title').addEventListener('dblclick',()=>renameSession(s));
+    title.addEventListener('dblclick',()=>renameSession(s));
     card.querySelector('.terminal-close.image-session').addEventListener('click',()=>chooseImage(s));
     card.querySelector('.terminal-close.minimize-session').addEventListener('click',()=>minimizeSession(s));
     card.querySelector('.terminal-close.float-session').addEventListener('click',()=>toggleFloat(s));
@@ -456,7 +466,50 @@ function renderSessions() {
 }
 function render() { renderHosts(); renderAgents(); renderWorkspaces(); renderSessions(); updateEditing(); }
 
-function renderInstances(){const section=$('instances-section'),root=$('instances-list');root.replaceChildren();const items=[...sessions.values()].filter(session=>!session.minimized&&!session.floating);section.hidden=viewMode==='grid'||!items.length;if(section.hidden)return;for(const session of items){const row=document.createElement('div');row.className='flat-list-row';const button=document.createElement('button');button.type='button';button.className=`flat-list-button${session.id===activeSession?' selected':''}`;const name=document.createElement('span');name.className='flat-list-name';name.textContent=session.title;button.append(name);button.addEventListener('click',()=>{activeSession=session.id;renderSessions();session.term.focus();});row.append(button);const actions=document.createElement('span');actions.className='flat-list-actions instance-actions';const rename=document.createElement('button');rename.type='button';rename.textContent='✎';rename.title='编辑实例名称';rename.addEventListener('click',()=>renameSession(session));const image=document.createElement('button');image.type='button';image.textContent='▧';image.title='发送图片';image.addEventListener('click',()=>chooseImage(session));const close=document.createElement('button');close.type='button';close.textContent='×';close.title='关闭终端';close.addEventListener('click',()=>closeSession(session.id));actions.append(rename,image,close);row.append(actions);root.append(row);}}
+function renderInstances() {
+  const section = $('instances-section'), root = $('instances-list');
+  root.replaceChildren();
+  const items = [...sessions.values()].filter(session => !session.minimized && !session.floating);
+  section.hidden = viewMode === 'grid' || !items.length;
+  if (section.hidden) return;
+  for (const session of items) {
+    const row = document.createElement('div');
+    row.className = 'flat-list-row';
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = `flat-list-button${session.id === activeSession ? ' selected' : ''}`;
+    const label = document.createElement('span');
+    label.className = 'agent-label';
+    const icon = sessionAgentIcon(session);
+    if (icon) label.append(icon);
+    const name = document.createElement('span');
+    name.className = 'flat-list-name';
+    name.textContent = session.title;
+    label.append(name);
+    button.append(label);
+    button.addEventListener('click', () => {
+      activeSession = session.id;
+      renderSessions();
+      session.term.focus();
+    });
+    const actions = document.createElement('span');
+    actions.className = 'flat-list-actions instance-actions';
+    for (const [symbol, tooltip, action] of [
+      ['✎', '编辑实例名称', () => renameSession(session)],
+      ['▧', '发送图片', () => chooseImage(session)],
+      ['×', '关闭终端', () => closeSession(session.id)],
+    ]) {
+      const control = document.createElement('button');
+      control.type = 'button';
+      control.textContent = symbol;
+      control.title = tooltip;
+      control.addEventListener('click', action);
+      actions.append(control);
+    }
+    row.append(button, actions);
+    root.append(row);
+  }
+}
 
 function renameSession(session){const name=prompt('终端会话名称',session.title);if(name?.trim()){session.title=name.trim();post({action:'session-sync',method:'PUT',host:session.host,item:{id:session.id,directory_path:session.workspace.path,directory_name:session.workspace.name,agent_name:session.agent.name,agent_command:session.agent.command,display_name:session.title}});renderSessions();}}
 function moveSession(sourceId,targetId){if(!sourceId||sourceId===targetId)return;const items=[...sessions.entries()];const from=items.findIndex(([,s])=>s.id===sourceId),to=items.findIndex(([,s])=>s.id===targetId);if(from<0||to<0)return;const [item]=items.splice(from,1);items.splice(to,0,item);sessions.clear();for(const [id,s] of items)sessions.set(id,s);renderSessions();}

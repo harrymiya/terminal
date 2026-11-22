@@ -430,6 +430,12 @@
   min-width: 0;
 }
 
+.terminal-card-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .terminal-quota {
   flex: 0 0 auto;
 }

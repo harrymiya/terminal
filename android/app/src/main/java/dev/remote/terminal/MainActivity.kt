@@ -963,6 +963,17 @@ private fun RemoteTerminalApp(store: LocalStore) {
             sessionsRestored = true
         }
 
+        LaunchedEffect(agents.toList(), sessions.size) {
+            for (session in sessions) {
+                val agent = session.task.agent
+                val preset = agents.firstOrNull { it.id == agent.id }
+                    ?: agents.firstOrNull { it.command == agent.command && it.name == agent.name }
+                if (preset != null && preset.icon != agent.icon) {
+                    session.task = session.task.copy(agent = agent.copy(icon = preset.icon))
+                }
+            }
+        }
+
         LaunchedEffect(syncUrl, syncToken, offlineMode, autoSyncEnabled, syncIntervalSeconds) {
             val syncEnabled = !offlineMode && autoSyncEnabled && syncUrl.isNotBlank() && syncToken.isNotBlank()
             syncLoading = syncEnabled && hosts.isNotEmpty()
@@ -2073,7 +2084,10 @@ private fun TerminalWorkspace(
                     }
                     Text(currentSession.task.directory.path, color = Muted, fontSize = 10.sp, maxLines = 1,
                         overflow = TextOverflow.StartEllipsis, modifier = Modifier.weight(1f, fill = false))
-                    Text("  ·  ${currentSession.task.agent.name}", color = Muted, fontSize = 10.sp, maxLines = 1)
+                    Text("  ·  ", color = Muted, fontSize = 10.sp)
+                    AgentMark(currentSession.task.agent.icon, 12.dp)
+                    Spacer(Modifier.width(4.dp))
+                    Text(currentSession.task.agent.name, color = Muted, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
             }
             IconButton(onClick = onNewTask, modifier = Modifier.size(40.dp)) { Icon(Icons.Default.Add, "新建任务", tint = Mint) }
@@ -2157,6 +2171,7 @@ private fun SessionTab(
                 Text(remainingSeconds.toString(), color = color, fontWeight = FontWeight.Bold, fontSize = 11.sp)
             }
             if (supportsQuota) HourlyQuotaLabel(session.quota)
+            AgentMark(session.task.agent.icon, 14.dp)
             Text(
                 sessionDisplayLabel(session.task),
                 color = if (selected) White else Muted,
@@ -2880,6 +2895,8 @@ private fun TerminalTileCard(
                     .background(statusTint(session.status))
             )
             Spacer(Modifier.width(6.dp))
+            AgentMark(session.task.agent.icon, 16.dp)
+            Spacer(Modifier.width(5.dp))
             Text(
                 text = sessionDisplayLabel(session.task),
                 color = White,
@@ -3114,6 +3131,8 @@ private fun PadSidebar(
                                     .background(statusTint(session.status))
                             )
                             Spacer(Modifier.width(8.dp))
+                            AgentMark(session.task.agent.icon, 16.dp)
+                            Spacer(Modifier.width(5.dp))
                             Text(
                                 text = sessionDisplayLabel(session.task),
                                 color = White,
@@ -3152,6 +3171,8 @@ private fun PadSidebar(
                             modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
+                            AgentMark(agent.icon, 17.dp)
+                            Spacer(Modifier.width(6.dp))
                             Text(agent.name, color = White, fontSize = 13.sp, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
                             selectedHost?.let { host ->
                                 HourlyQuotaLabel(quota = quotaFor(host, agent))
@@ -3167,6 +3188,8 @@ private fun PadSidebar(
                             .padding(horizontal = 8.dp, vertical = 4.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        AgentMark(agent.icon, 17.dp)
+                        Spacer(Modifier.width(6.dp))
                         Text(agent.name, color = White, fontSize = 13.sp, modifier = Modifier.weight(1f), maxLines = 1)
                         if (index > 0) {
                             IconButton(onClick = { onMoveAgent(index, -1) }, modifier = Modifier.size(28.dp)) {
@@ -3443,6 +3466,18 @@ private fun PadWorkspaceMain(
                         onClose = { onCloseSession(session) }
                     )
                 }
+            }
+            Divider(color = Edge)
+            Row(
+                modifier = Modifier.fillMaxWidth().background(PanelRaised).padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                AgentMark(currentSession.task.agent.icon, 16.dp)
+                Text(
+                    sessionDisplayLabel(currentSession.task), color = White, fontSize = 12.sp,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                )
             }
             Divider(color = Edge)
             Box(Modifier.weight(1f).fillMaxWidth()) {

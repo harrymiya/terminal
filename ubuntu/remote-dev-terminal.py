@@ -50,6 +50,31 @@ def agent_icon_pixbuf(value, size):
         return None
 
 
+def agent_icon_widget(value, size=17):
+    value = value or "✳"
+    pixbuf = agent_icon_pixbuf(value, size)
+    if pixbuf is not None:
+        return Gtk.Image.new_from_pixbuf(pixbuf)
+    if value != "✳" and not value.startswith("brand:") and len(value) <= 8:
+        return Gtk.Label(label=value)
+    return None
+
+
+def update_agent_icon(box, value):
+    if getattr(box, "agent_icon_value", None) == value:
+        return False
+    for child in box.get_children():
+        box.remove(child)
+    icon = agent_icon_widget(value)
+    if icon is not None:
+        box.pack_start(icon, False, False, 0)
+        icon.show()
+    box.set_no_show_all(True)
+    box.set_visible(icon is not None)
+    box.agent_icon_value = value
+    return True
+
+
 def agent_icon_picker(selected):
     _, catalog = agent_icon_catalog()
     model = Gtk.ListStore(str, str, GdkPixbuf.Pixbuf)
@@ -1223,7 +1248,19 @@ class App(Gtk.Window):
         self.tabs.set_show_tabs(False)
         self.tabs.set_show_border(False)
         self.tabs.connect("switch-page", self.on_tab_switched)
-        self.views.add_named(self.tabs, "tabs")
+        tab_view = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        tab_header = Gtk.EventBox()
+        tab_header.get_style_context().add_class("tile-header")
+        tab_header.set_size_request(-1, 25)
+        tab_heading = Gtk.Box(spacing=4)
+        self.tab_header_icon = Gtk.Box()
+        self.tab_header_title = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END, single_line_mode=True)
+        tab_heading.pack_start(self.tab_header_icon, False, False, 0)
+        tab_heading.pack_start(self.tab_header_title, True, True, 0)
+        tab_header.add(tab_heading)
+        tab_view.pack_start(tab_header, False, False, 0)
+        tab_view.pack_start(self.tabs, True, True, 0)
+        self.views.add_named(tab_view, "tabs")
         self.grid = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.grid.get_style_context().add_class("tile-grid")
         self.grid.set_hexpand(True)
@@ -2025,13 +2062,30 @@ class App(Gtk.Window):
         else:
             for session in docked:
                 self.tabs.append_page(session["terminal"], None)
-            self.tabs.show_all()
+            self.tabs.get_parent().show_all()
             self.views.set_visible_child_name("tabs")
             if selected is not None:
                 index = self.tabs.page_num(selected)
                 if index >= 0:
                     self.tabs.set_current_page(index)
+            self.update_tab_header(self.tabs.get_nth_page(self.tabs.get_current_page()))
             self.rebuild_instances_sidebar(docked)
+
+    def session_icon_value(self, session):
+        agent = session.get("agent", {})
+        presets = self.host_agents(session.get("host"))
+        preset = next((item for item in presets if item.get("id") and item["id"] == agent.get("id")), None)
+        if preset is None:
+            preset = next((item for item in presets if item["command"] == agent.get("command")
+                           and item["name"] == agent.get("name")), agent)
+        return preset.get("icon") or "✳"
+
+    def update_tab_header(self, terminal):
+        session = next((session for session in self.sessions if session["terminal"] is terminal), None)
+        if session is not None:
+            item = session.get("item") or {}
+            self.tab_header_title.set_text(item.get("display_name") or item.get("directory_name") or "终端")
+            update_agent_icon(self.tab_header_icon, self.session_icon_value(session))
 
     def rebuild_instances_sidebar(self, docked=None):
         if docked is None:
@@ -2071,6 +2125,9 @@ class App(Gtk.Window):
             button.set_tooltip_text(display_name)
             btn_content = Gtk.Box(spacing=4)
             btn_content.set_hexpand(True)
+            icon = agent_icon_widget(self.session_icon_value(session))
+            if icon is not None:
+                btn_content.pack_start(icon, False, False, 0)
             title = Gtk.Label(label=display_name, xalign=0)
             title.set_single_line_mode(True)
             title.set_ellipsize(Pango.EllipsizeMode.END)
@@ -2197,6 +2254,7 @@ class App(Gtk.Window):
             session["minimized_button"].set_tooltip_text(new_name)
 
         if not self.tiled:
+            self.update_tab_header(self.tabs.get_nth_page(self.tabs.get_current_page()))
             self.rebuild_instances_sidebar()
 
         if sync and session.get("host") and session.get("id"):
@@ -2215,6 +2273,7 @@ class App(Gtk.Window):
 
     def on_tab_switched(self, _notebook, page, _page_num):
         self.active_terminal = page
+        self.update_tab_header(page)
         for button, terminal in self.instance_buttons:
             ctx = button.get_style_context()
             (ctx.add_class if terminal is page else ctx.remove_class)("host-selected")
@@ -2514,6 +2573,14 @@ class App(Gtk.Window):
             self.hosts.set_active(min(max(selected, 0), len(self.data["hosts"]) - 1))
         self.refreshing = False
         self.refresh_host_content()
+        icons_changed = False
+        for session in self.sessions:
+            icon_box = session.get("title_icon")
+            if icon_box is not None and update_agent_icon(icon_box, self.session_icon_value(session)):
+                icons_changed = True
+        if icons_changed and not self.tiled:
+            self.update_tab_header(self.tabs.get_nth_page(self.tabs.get_current_page()))
+            self.rebuild_instances_sidebar()
 
     def host_changed(self, *_):
         if not self.refreshing:
@@ -2646,12 +2713,9 @@ class App(Gtk.Window):
             button.set_tooltip_text(item["command"] + "\n点击选择开发者")
             button.get_style_context().add_class("host-button")
             content = Gtk.Box(spacing=6)
-            icon = item.get("icon") or "✳"
-            pixbuf = agent_icon_pixbuf(icon, 17)
-            if pixbuf is not None:
-                content.pack_start(Gtk.Image.new_from_pixbuf(pixbuf), False, False, 0)
-            elif icon != "✳" and not icon.startswith("brand:") and len(icon) <= 8:
-                content.pack_start(Gtk.Label(label=icon), False, False, 0)
+            icon = agent_icon_widget(item.get("icon"))
+            if icon is not None:
+                content.pack_start(icon, False, False, 0)
             name = Gtk.Label(label=item["name"], valign=Gtk.Align.CENTER)
             self.fit_sidebar_label(name)
             content.pack_start(name, True, True, 0)
@@ -4146,7 +4210,10 @@ class App(Gtk.Window):
         terminal.set_scrollback_lines(10000)
         label = Gtk.Box(spacing=5)
         title_box = Gtk.Box(spacing=4)
+        title_icon = Gtk.Box()
+        title_box.pack_start(title_icon, False, False, 0)
         session_title = Gtk.Label(label=display_name, xalign=0)
+        session_title.set_single_line_mode(True)
         session_title.set_ellipsize(Pango.EllipsizeMode.END)
         session_title.set_tooltip_text(display_name)
         title_box.pack_start(session_title, False, False, 0)
@@ -4278,13 +4345,20 @@ class App(Gtk.Window):
                     shutil.rmtree(socket_dir, ignore_errors=True)
             threading.Thread(target=cleanup_remote, daemon=True).start()
         close.connect("clicked", close_tab)
+        session_agent = agent
+        if shared_item:
+            presets = [preset for preset in self.host_agents(host) if preset["command"] == agent["command"]]
+            session_agent = next((preset for preset in presets if preset["name"] == agent["name"]),
+                                 presets[0] if presets else agent)
         session = {"terminal": terminal, "label": label, "key": key, "id": session_id, "host": host, "state": state,
+                   "agent": dict(session_agent), "title_icon": title_icon,
                    "item": item, "socket_path": socket_path, "close_button": close, "image_button": image_button,
                    "edit_button": edit_button, "session_title": session_title,
                    "started_at": time.monotonic(),
                    "quota_indicators": (hourly_img, weekly_img) if kind else (),
                    "update_quota": update_quota_display}
         session["float_button"] = float_button
+        update_agent_icon(title_icon, self.session_icon_value(session))
         self.update_float_button(session)
         minimize.connect("clicked", lambda *_: self.minimize_session(session))
         float_button.connect("clicked", lambda *_: self.toggle_floating_session(session))
