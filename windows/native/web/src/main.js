@@ -10,6 +10,11 @@ import {
   normalizeSessionId,
   planSyncedSessionChanges,
 } from './session-sync.js';
+import {
+  clampFloatingRect,
+  computeDraggedFloatingRect,
+  defaultFloatingRect,
+} from './floating-layout.js';
 
 const $ = (id) => document.getElementById(id);
 const hostList = $('host-list');
@@ -29,6 +34,9 @@ let tileLayout = 'grid';
 let editing = false;
 let lastConfigSnapshot = '';
 let directoryBrowser = null;
+let floatZCounter = 5;
+const floatingObservers = [];
+let activeFloatDragCleanup = null;
 const pendingMcp = new Map();
 const sessions = new Map();
 const metricsByHost = new Map();
@@ -439,6 +447,89 @@ function renderSessionQuota(session) {
   renderQuotaBatteries(root, quota, {showPercent: viewMode === 'tabs' || session.floating});
 }
 
+function bringFloatingToFront(session, card = session?.card) {
+  if (!session?.floating) return;
+  if (session.floatZ !== floatZCounter) session.floatZ = ++floatZCounter;
+  if (card) card.style.zIndex = String(session.floatZ);
+}
+
+function enableFloatingHeaderDrag(session, card, head) {
+  let dragState = null;
+  const finishDrag = (event) => {
+    if (!dragState) return;
+    if (event && event.pointerId !== undefined && dragState.pointerId !== event.pointerId) return;
+    window.removeEventListener('pointermove', onPointerMove);
+    window.removeEventListener('pointerup', finishDrag);
+    window.removeEventListener('pointercancel', finishDrag);
+    if (dragState.captured && head.hasPointerCapture?.(dragState.pointerId)) {
+      try { head.releasePointerCapture(dragState.pointerId); } catch {}
+    }
+    card.classList.remove('floating-dragging');
+    dragState = null;
+    activeFloatDragCleanup = null;
+  };
+  const onPointerMove = (event) => {
+    if (!dragState || event.pointerId !== dragState.pointerId) return;
+    const dx = event.clientX - dragState.startX;
+    const dy = event.clientY - dragState.startY;
+    if (!dragState.active) {
+      if (Math.abs(dx) < 3 && Math.abs(dy) < 3) return;
+      dragState.active = true;
+      card.classList.add('floating-dragging');
+      if (head.setPointerCapture) {
+        try {
+          head.setPointerCapture(event.pointerId);
+          dragState.captured = true;
+        } catch {}
+      }
+    }
+    const stageRect = stage.getBoundingClientRect();
+    const next = computeDraggedFloatingRect({
+      originLeft: dragState.originLeft,
+      originTop: dragState.originTop,
+      deltaX: dx,
+      deltaY: dy,
+      width: dragState.width,
+      height: dragState.height,
+      stageWidth: stageRect.width,
+      stageHeight: stageRect.height,
+      headHeight: dragState.headHeight,
+    });
+    session.floatRect = next;
+    card.style.left = `${next.left}px`;
+    card.style.top = `${next.top}px`;
+  };
+  head.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0) return;
+    if (event.target.closest('button, input, select, a, .terminal-tools')) return;
+    activeFloatDragCleanup?.();
+    bringFloatingToFront(session, card);
+    const stageRect = stage.getBoundingClientRect();
+    const cardRect = card.getBoundingClientRect();
+    const originLeft = session.floatRect?.left ?? Math.round(cardRect.left - stageRect.left);
+    const originTop = session.floatRect?.top ?? Math.round(cardRect.top - stageRect.top);
+    const width = session.floatRect?.width ?? Math.round(cardRect.width);
+    const height = session.floatRect?.height ?? Math.round(cardRect.height);
+    session.floatRect = { left: originLeft, top: originTop, width, height };
+    dragState = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      originLeft,
+      originTop,
+      width,
+      height,
+      headHeight: head.getBoundingClientRect().height || 29,
+      active: false,
+      captured: false,
+    };
+    activeFloatDragCleanup = () => finishDrag();
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', finishDrag);
+    window.addEventListener('pointercancel', finishDrag);
+  });
+}
+
 function renderSessions({ focus = true } = {}) {
   const all = [...sessions.values()];
   const docked = all.filter(session => !session.minimized && !session.floating);
@@ -451,6 +542,9 @@ function renderSessions({ focus = true } = {}) {
   layoutButton.textContent = tileLayouts[tileLayout];
   layoutButton.hidden = viewMode !== 'grid';
   layoutButton.disabled = docked.length < 2;
+  activeFloatDragCleanup?.();
+  for (const observer of floatingObservers) observer.disconnect();
+  floatingObservers.length = 0;
   terminalGrid.replaceChildren();
   const rowBySession = new Map();
   for (const rowSessions of rows) {
@@ -459,13 +553,15 @@ function renderSessions({ focus = true } = {}) {
     terminalGrid.append(row);
     for (const session of rowSessions) rowBySession.set(session.id, row);
   }
+  const stageRect = stage.getBoundingClientRect();
   for (const s of all) {
     const row = rowBySession.get(s.id);
     const card=document.createElement('section');
     card.className='terminal-card';
     card.classList.toggle('active', s.id === activeSession);
     card.classList.toggle('inactive', !row && !s.floating);
-    card.innerHTML=`<div class="terminal-head"><span class="terminal-card-title agent-label" title="双击重命名"><span class="terminal-card-name">${escapeHtml(s.title)}</span></span><span class="terminal-quota quota-batteries" hidden></span><span class="terminal-tools"><button class="terminal-close rename-session" title="重命名">✎</button><button class="terminal-close image-session" title="发送图片">▧</button><button class="terminal-close minimize-session" title="最小化">−</button><button class="terminal-close float-session" title="浮动窗口">□</button><button class="terminal-close reconnect" title="重新连接">↻</button><button class="terminal-close close-session" title="关闭终端">×</button></span></div><div class="terminal-body"></div>`;
+    card.innerHTML=`<div class="terminal-head"><span class="terminal-card-title agent-label" title="双击重命名"><span class="terminal-card-name">${escapeHtml(s.title)}</span></span><span class="terminal-quota quota-batteries" hidden></span><span class="terminal-tools"><button class="terminal-close rename-session" title="重命名">✎</button><button class="terminal-close image-session" title="发送图片">▧</button><button class="terminal-close minimize-session" title="最小化">−</button><button class="terminal-close float-session" title="${s.floating ? '还原到工作区' : '浮动窗口'}">□</button><button class="terminal-close reconnect" title="重新连接">↻</button><button class="terminal-close close-session" title="关闭终端">×</button></span></div><div class="terminal-body"></div>`;
+    const head = card.querySelector('.terminal-head');
     const title = card.querySelector('.terminal-card-title');
     const icon = sessionAgentIcon(s);
     if (icon) title.prepend(icon);
@@ -476,13 +572,16 @@ function renderSessions({ focus = true } = {}) {
     card.querySelector('.terminal-close.image-session').addEventListener('click',()=>chooseImage(s));
     card.querySelector('.terminal-close.minimize-session').addEventListener('click',()=>minimizeSession(s));
     card.querySelector('.terminal-close.float-session').addEventListener('click',()=>toggleFloat(s));
-    card.draggable=true;
-    card.addEventListener('dragstart',event=>{event.dataTransfer.setData('text/plain',s.id);event.dataTransfer.effectAllowed='move';card.classList.add('dragging');});
-    card.addEventListener('dragend',()=>card.classList.remove('dragging'));
-    card.addEventListener('dragover',event=>{event.preventDefault();card.classList.add('drop-target');});
-    card.addEventListener('dragleave',()=>card.classList.remove('drop-target'));
-    card.addEventListener('drop',event=>{event.preventDefault();card.classList.remove('drop-target');moveSession(event.dataTransfer.getData('text/plain'),s.id);});
+    card.draggable = !s.floating;
+    if (!s.floating) {
+      card.addEventListener('dragstart',event=>{event.dataTransfer.setData('text/plain',s.id);event.dataTransfer.effectAllowed='move';card.classList.add('dragging');});
+      card.addEventListener('dragend',()=>card.classList.remove('dragging'));
+      card.addEventListener('dragover',event=>{event.preventDefault();card.classList.add('drop-target');});
+      card.addEventListener('dragleave',()=>card.classList.remove('drop-target'));
+      card.addEventListener('drop',event=>{event.preventDefault();card.classList.remove('drop-target');moveSession(event.dataTransfer.getData('text/plain'),s.id);});
+    }
     card.addEventListener('pointerdown',()=>{
+      if (s.floating) bringFloatingToFront(s, card);
       if (activeSession === s.id) return;
       sessions.get(activeSession)?.card?.classList.remove('active');
       activeSession = s.id;
@@ -490,7 +589,20 @@ function renderSessions({ focus = true } = {}) {
       renderInstances();
     });
     if(s.minimized) card.classList.add('terminal-minimized');
-    if(s.floating) card.classList.add('terminal-floating');
+    if(s.floating) {
+      card.classList.add('terminal-floating');
+      if (s.floatZ) card.style.zIndex = String(s.floatZ);
+      if (s.floatRect) {
+        if (stageRect.width > 0 && stageRect.height > 0) {
+          s.floatRect = clampFloatingRect(s.floatRect, stageRect.width, stageRect.height);
+        }
+        card.style.left = `${s.floatRect.left}px`;
+        card.style.top = `${s.floatRect.top}px`;
+        card.style.width = `${s.floatRect.width}px`;
+        card.style.height = `${s.floatRect.height}px`;
+      }
+      enableFloatingHeaderDrag(s, card, head);
+    }
     const body=card.querySelector('.terminal-body');
     (row ?? terminalGrid).append(card);
     s.card=card;
@@ -502,6 +614,27 @@ function renderSessions({ focus = true } = {}) {
   // Populate every row before measuring so all terminals see their final widths.
   for (const s of all) {
     if (rowBySession.has(s.id) || s.floating) s.fit.fit();
+    if (s.floating && s.card && typeof ResizeObserver !== 'undefined') {
+      let lastWidth = s.card.offsetWidth;
+      let lastHeight = s.card.offsetHeight;
+      const observer = new ResizeObserver(() => {
+        if (!s.card?.isConnected || s.card.classList.contains('floating-dragging')) return;
+        const width = s.card.offsetWidth;
+        const height = s.card.offsetHeight;
+        if (width <= 0 || height <= 0 || (width === lastWidth && height === lastHeight)) return;
+        lastWidth = width;
+        lastHeight = height;
+        s.floatRect = {
+          left: s.floatRect?.left ?? s.card.offsetLeft,
+          top: s.floatRect?.top ?? s.card.offsetTop,
+          width,
+          height,
+        };
+        try { s.fit.fit(); } catch {}
+      });
+      observer.observe(s.card);
+      floatingObservers.push(observer);
+    }
   }
   if (focus && !document.querySelector('dialog[open]')) sessions.get(activeSession)?.term.focus();
   $('session-count').textContent=`${sessions.size} / 8`;
@@ -574,6 +707,16 @@ function moveSession(sourceId,targetId){if(!sourceId||sourceId===targetId)return
 function toggleFloat(session){
   session.floating = !session.floating;
   activeSession = session.id;
+  if (session.floating) {
+    session.floatZ = ++floatZCounter;
+    if (!session.floatRect) {
+      const stageRect = stage.getBoundingClientRect();
+      if (stageRect.width > 0 && stageRect.height > 0) {
+        const floatingIndex = [...sessions.values()].filter((item) => item.floating && item !== session).length;
+        session.floatRect = defaultFloatingRect(stageRect.width, stageRect.height, floatingIndex);
+      }
+    }
+  }
   renderSessions();
 }
 function minimizeSession(session){session.minimized=true;session.floating=false;renderSessions();}
@@ -1087,6 +1230,18 @@ $('image-file').addEventListener('change',async event=>{const file=event.target.
 async function imageData(file){let img=new Image();img.src=URL.createObjectURL(file);await img.decode();let width=img.naturalWidth,height=img.naturalHeight,scale=Math.min(1,4096/Math.max(width,height));width=Math.max(1,Math.round(width*scale));height=Math.max(1,Math.round(height*scale));const canvas=document.createElement('canvas');canvas.width=width;canvas.height=height;canvas.getContext('2d').drawImage(img,0,0,width,height);URL.revokeObjectURL(img.src);let quality=.92;let blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/jpeg',quality));if(!blob)throw new Error('无法转换此图片格式');while(blob.size>20*1024*1024&&quality>.35){quality-=.1;blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/jpeg',quality));if(!blob)throw new Error('无法转换此图片格式');}if(blob.size>20*1024*1024)throw new Error('图片转换后仍超过 20 MB');return await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result).split(',')[1]);reader.onerror=()=>reject(reader.error);reader.readAsDataURL(blob);});}
 document.addEventListener('paste',event=>{const item=[...(event.clipboardData?.items||[])].find(x=>x.type.startsWith('image/'));if(!item||!activeSession)return;const file=item.getAsFile();if(!file)return;event.preventDefault();imageData(file).then(data=>post({action:'upload-image',id:activeSession,data})).catch(error=>showError(error.message));});
 window.chrome?.webview?.addEventListener('message',handleNativeMessage);
-window.addEventListener('resize',()=>{for(const s of sessions.values()){try{s.fit.fit();}catch{} }});
+window.addEventListener('resize',()=>{
+  const stageRect = stage.getBoundingClientRect();
+  for(const s of sessions.values()){
+    if (s.floating && s.floatRect && s.card && stageRect.width > 0 && stageRect.height > 0) {
+      const headHeight = s.card.querySelector('.terminal-head')?.getBoundingClientRect().height || 29;
+      const clamped = clampFloatingRect(s.floatRect, stageRect.width, stageRect.height, headHeight);
+      s.floatRect = clamped;
+      s.card.style.left = `${clamped.left}px`;
+      s.card.style.top = `${clamped.top}px`;
+    }
+    try{s.fit.fit();}catch{}
+  }
+});
 if(window.chrome?.webview)post({action:'load-config'});
 else $('empty-state').querySelector('p').textContent='请从 Remote Dev Terminal Windows 程序启动此界面。';

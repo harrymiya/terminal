@@ -10,6 +10,11 @@ import {
   normalizeSessionId,
   planSyncedSessionChanges,
 } from '../windows/native/web/src/session-sync.js';
+import {
+  clampFloatingRect,
+  computeDraggedFloatingRect,
+  defaultFloatingRect,
+} from '../windows/native/web/src/floating-layout.js';
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -175,10 +180,55 @@ assert.deepEqual(capacityPlan.toClose, [eightIds[0]]);
 assert.equal(capacityPlan.toOpen.length, 1);
 assert.equal(capacityPlan.toOpen[0].item.id, '9'.repeat(32));
 
-// 6. CSS centering checks for top-right zoom step buttons
+// 6. CSS checks for top-right zoom step buttons and floating header drag cursor
 const layoutCss = fs.readFileSync(path.join(rootDir, 'windows/native/www/layout.css'), 'utf8');
 const scaleCss = fs.readFileSync(path.join(rootDir, 'windows/native/www/scale.css'), 'utf8');
 assert.match(layoutCss, /\.scale-control\s+\.scale-step\s*\{[^}]*display:\s*inline-flex;[^}]*align-items:\s*center;[^}]*justify-content:\s*center;[^}]*padding:\s*0;/s);
 assert.match(scaleCss, /\.toolbar\s+\.scale-control\s+\.scale-step\s*\{[^}]*padding:\s*0;/s);
+assert.match(layoutCss, /\.terminal-card\.terminal-floating\s+\.terminal-head\s*\{[^}]*cursor:\s*move;/s);
 
-console.log('All Windows native sync & zoom CSS checks passed.');
+// 7. Floating header drag & geometry clamping checks
+const firstFloat = defaultFloatingRect(1000, 700, 0);
+const secondFloat = defaultFloatingRect(1000, 700, 1);
+assert.equal(secondFloat.left - firstFloat.left, 24);
+assert.equal(secondFloat.top - firstFloat.top, 24);
+
+const moved = computeDraggedFloatingRect({
+  originLeft: firstFloat.left,
+  originTop: firstFloat.top,
+  deltaX: 80,
+  deltaY: -40,
+  width: firstFloat.width,
+  height: firstFloat.height,
+  stageWidth: 1000,
+  stageHeight: 700,
+  headHeight: 29,
+});
+assert.equal(moved.left, firstFloat.left + 80);
+assert.equal(moved.top, firstFloat.top - 40);
+
+// Prevents dragging header above toolbar (top < 0) or completely off-screen
+const clampedEdges = computeDraggedFloatingRect({
+  originLeft: 100,
+  originTop: 100,
+  deltaX: 5000,
+  deltaY: -500,
+  width: 600,
+  height: 400,
+  stageWidth: 1000,
+  stageHeight: 700,
+  headHeight: 29,
+});
+assert.equal(clampedEdges.top, 0);
+assert.equal(clampedEdges.left, 880);
+
+const clampedBottom = clampFloatingRect(
+  { left: -900, top: 2000, width: 600, height: 400 },
+  1000,
+  700,
+  29,
+);
+assert.equal(clampedBottom.left, -480);
+assert.equal(clampedBottom.top, 671);
+
+console.log('All Windows native sync, floating drag & zoom CSS checks passed.');

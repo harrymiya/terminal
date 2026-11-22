@@ -464,6 +464,20 @@
   container-type: inline-size;
 }
 
+.session-stage {
+  overflow: hidden;
+}
+
+.terminal-card.terminal-floating .terminal-head {
+  cursor: move;
+  user-select: none;
+  touch-action: none;
+}
+
+.terminal-card.terminal-floating .terminal-head button {
+  cursor: pointer;
+}
+
 .terminal-card.active:not(.terminal-floating) {
   border-color: var(--accent);
 }
