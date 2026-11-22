@@ -441,7 +441,7 @@
   display: none;
   height: 100%;
   padding: 5px;
-  gap: 5px;
+  gap: 0;
   flex-direction: column;
 }
 
@@ -453,11 +453,76 @@
   flex: 1 1 0;
   min-height: 0;
   min-width: 0;
-  display: grid;
-  grid-auto-flow: column;
-  grid-auto-columns: minmax(0, 1fr);
-  grid-template-rows: minmax(0, 1fr);
-  gap: 5px;
+  display: flex;
+  overflow: hidden;
+}
+
+.tile-cell {
+  display: flex;
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+}
+
+.tile-cell > .terminal-card {
+  flex: 1 1 0;
+  width: 100%;
+  height: 100%;
+}
+
+.tile-splitter {
+  position: relative;
+  z-index: 2;
+  flex: 0 0 9px;
+  touch-action: none;
+  user-select: none;
+}
+
+.tile-splitter-x {
+  cursor: col-resize;
+}
+
+.tile-splitter-y {
+  cursor: row-resize;
+}
+
+.tile-splitter::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  border-radius: 4px;
+  background: var(--line);
+  opacity: .75;
+  transition: background .12s ease, opacity .12s ease;
+}
+
+.tile-splitter-x::before {
+  width: 2px;
+  height: 100%;
+}
+
+.tile-splitter-y::before {
+  width: 100%;
+  height: 2px;
+}
+
+.tile-splitter:hover::before,
+.tile-splitter:active::before {
+  background: var(--accent);
+  opacity: 1;
+}
+
+body.resizing-tiles-x,
+body.resizing-tiles-x * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+
+body.resizing-tiles-y,
+body.resizing-tiles-y * {
+  cursor: row-resize !important;
+  user-select: none !important;
 }
 
 .terminal-card {
@@ -487,7 +552,44 @@
 }
 
 .terminal-head {
+  position: relative;
   gap: 6px;
+}
+
+.terminal-running-outline {
+  position: absolute;
+  inset: 2px;
+  width: auto;
+  height: auto;
+  overflow: visible;
+  z-index: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.terminal-running-outline rect {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1;
+  stroke-dasharray: 4 4;
+  vector-effect: non-scaling-stroke;
+}
+
+.terminal-head.running .terminal-running-outline {
+  opacity: 1;
+}
+
+.terminal-head.running .terminal-running-outline rect {
+  animation: terminal-running-dash .5s linear infinite;
+}
+
+.terminal-head > :not(.terminal-running-outline) {
+  position: relative;
+  z-index: 1;
+}
+
+@keyframes terminal-running-dash {
+  to { stroke-dashoffset: -8; }
 }
 
 .terminal-card-title {

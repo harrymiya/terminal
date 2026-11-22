@@ -45,6 +45,9 @@ const sshEndpoints = new Map();
 const encoder = new TextEncoder();
 const tileLayouts = {grid:'⊞ 网格', columns:'⬓ 左右', rows:'⬒ 上下'};
 const uiScale = {min:50, max:200, step:5};
+const tileResizeWeights = new Map();
+const pendingTileFitIds = new Set();
+let tileFitFrame = 0;
 
 function post(message) {
   if (window.chrome?.webview) window.chrome.webview.postMessage(message);
@@ -438,6 +441,115 @@ function tileRows(docked) {
   return [docked.slice(0, firstRowSize), docked.slice(firstRowSize)];
 }
 
+function getTileWeights(key, count) {
+  const saved = tileResizeWeights.get(key);
+  if (saved?.length === count) return saved.slice();
+  const weights = Array(count).fill(1);
+  tileResizeWeights.set(key, weights);
+  return weights.slice();
+}
+
+function makeTileSplitter(axis, key, index, count) {
+  const splitter = document.createElement('div');
+  splitter.className = `tile-splitter tile-splitter-${axis}`;
+  splitter.dataset.axis = axis;
+  splitter.dataset.weightKey = key;
+  splitter.dataset.weightIndex = String(index);
+  splitter.dataset.weightCount = String(count);
+  splitter.setAttribute('role', 'separator');
+  splitter.setAttribute('aria-orientation', axis === 'x' ? 'vertical' : 'horizontal');
+  splitter.setAttribute('aria-label', axis === 'x' ? '调整终端卡片宽度' : '调整终端卡片高度');
+  splitter.title = axis === 'x' ? '拖动调整卡片宽度' : '拖动调整卡片高度';
+  splitter.addEventListener('pointerdown', (event) => startTileResize(event, splitter));
+  return splitter;
+}
+
+function fitTileNode(node) {
+  const ids = node.dataset.sessionId
+    ? [node.dataset.sessionId]
+    : [...node.querySelectorAll('.tile-cell[data-session-id]')].map((cell) => cell.dataset.sessionId);
+  for (const id of ids) {
+    if (id) pendingTileFitIds.add(id);
+  }
+  if (tileFitFrame) return;
+  tileFitFrame = requestAnimationFrame(() => {
+    tileFitFrame = 0;
+    for (const id of pendingTileFitIds) {
+      try { sessions.get(id)?.fit.fit(); } catch {}
+    }
+    pendingTileFitIds.clear();
+  });
+}
+
+function resizeTileSplitter(splitter, delta) {
+  const before = splitter.previousElementSibling;
+  const after = splitter.nextElementSibling;
+  if (!before || !after) return;
+  const axis = splitter.dataset.axis;
+  const key = splitter.dataset.weightKey;
+  const index = Number(splitter.dataset.weightIndex);
+  const count = Number(splitter.dataset.weightCount);
+  const weights = getTileWeights(key, count);
+  const beforeRect = before.getBoundingClientRect();
+  const afterRect = after.getBoundingClientRect();
+  const beforeSize = axis === 'x' ? beforeRect.width : beforeRect.height;
+  const afterSize = axis === 'x' ? afterRect.width : afterRect.height;
+  const pairSize = beforeSize + afterSize;
+  if (!Number.isFinite(pairSize) || pairSize <= 0) return;
+  const minSize = Math.min(axis === 'x' ? 128 : 96, pairSize / 2);
+  const nextBeforeSize = Math.max(minSize, Math.min(pairSize - minSize, beforeSize + delta));
+  const pairWeight = weights[index] + weights[index + 1];
+  weights[index] = pairWeight * nextBeforeSize / pairSize;
+  weights[index + 1] = pairWeight - weights[index];
+  tileResizeWeights.set(key, weights);
+  before.style.flex = `${weights[index]} 1 0px`;
+  after.style.flex = `${weights[index + 1]} 1 0px`;
+  fitTileNode(before);
+  fitTileNode(after);
+}
+
+function startTileResize(event, splitter) {
+  if (event.button !== 0) return;
+  event.preventDefault();
+  const axis = splitter.dataset.axis;
+  const pointerId = event.pointerId;
+  const start = axis === 'x' ? event.clientX : event.clientY;
+  let previous = start;
+  document.body.classList.add('resizing-tiles', axis === 'x' ? 'resizing-tiles-x' : 'resizing-tiles-y');
+  const move = (moveEvent) => {
+    if (moveEvent.pointerId !== pointerId) return;
+    const current = axis === 'x' ? moveEvent.clientX : moveEvent.clientY;
+    resizeTileSplitter(splitter, current - previous);
+    previous = current;
+  };
+  const finish = (finishEvent) => {
+    if (finishEvent?.pointerId !== undefined && finishEvent.pointerId !== pointerId) return;
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', finish);
+    window.removeEventListener('pointercancel', finish);
+    splitter.removeEventListener('lostpointercapture', finish);
+    document.body.classList.remove('resizing-tiles', 'resizing-tiles-x', 'resizing-tiles-y');
+    fitTileNode(splitter.previousElementSibling || splitter);
+    fitTileNode(splitter.nextElementSibling || splitter);
+    if (splitter.hasPointerCapture?.(pointerId)) splitter.releasePointerCapture(pointerId);
+  };
+  splitter.addEventListener('lostpointercapture', finish);
+  try { splitter.setPointerCapture(pointerId); } catch {}
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', finish);
+  window.addEventListener('pointercancel', finish);
+}
+
+function updateRunningHeaders() {
+  const now = performance.now();
+  for (const session of sessions.values()) {
+    session.card?.querySelector('.terminal-head')?.classList.toggle(
+      'running',
+      session.lastOutputAt > 0 && now - session.lastOutputAt < 2500,
+    );
+  }
+}
+
 function renderSessionQuota(session) {
   if (!supportsQuota(session.agent.command)) return;
   const root = session.card?.querySelector('.terminal-quota');
@@ -547,20 +659,37 @@ function renderSessions({ focus = true } = {}) {
   floatingObservers.length = 0;
   terminalGrid.replaceChildren();
   const rowBySession = new Map();
-  for (const rowSessions of rows) {
+  const cellBySession = new Map();
+  const rowWeightsKey = `rows:${tileLayout}:${docked.map((session) => session.id).join('|')}`;
+  const rowWeights = getTileWeights(rowWeightsKey, rows.length);
+  rows.forEach((rowSessions, rowIndex) => {
+    if (rowIndex > 0) terminalGrid.append(makeTileSplitter('y', rowWeightsKey, rowIndex - 1, rows.length));
     const row = document.createElement('div');
     row.className = 'terminal-row';
+    row.style.flex = `${rowWeights[rowIndex]} 1 0px`;
+    const columnWeightsKey = `columns:${tileLayout}:${rowSessions.map((session) => session.id).join('|')}`;
+    const columnWeights = getTileWeights(columnWeightsKey, rowSessions.length);
+    rowSessions.forEach((session, columnIndex) => {
+      if (columnIndex > 0) row.append(makeTileSplitter('x', columnWeightsKey, columnIndex - 1, rowSessions.length));
+      const cell = document.createElement('div');
+      cell.className = 'tile-cell';
+      cell.dataset.sessionId = session.id;
+      cell.style.flex = `${columnWeights[columnIndex]} 1 0px`;
+      row.append(cell);
+      cellBySession.set(session.id, cell);
+      rowBySession.set(session.id, row);
+    });
     terminalGrid.append(row);
-    for (const session of rowSessions) rowBySession.set(session.id, row);
-  }
+  });
   const stageRect = stage.getBoundingClientRect();
   for (const s of all) {
     const row = rowBySession.get(s.id);
+    const tileCell = cellBySession.get(s.id);
     const card=document.createElement('section');
     card.className='terminal-card';
     card.classList.toggle('active', s.id === activeSession);
     card.classList.toggle('inactive', !row && !s.floating);
-    card.innerHTML=`<div class="terminal-head"><span class="terminal-card-title agent-label" title="双击重命名"><span class="terminal-card-name">${escapeHtml(s.title)}</span></span><span class="terminal-quota quota-batteries" hidden></span><span class="terminal-tools"><button class="terminal-close rename-session" title="重命名">✎</button><button class="terminal-close image-session" title="发送图片">▧</button><button class="terminal-close minimize-session" title="最小化">−</button><button class="terminal-close float-session" title="${s.floating ? '还原到工作区' : '浮动窗口'}">□</button><button class="terminal-close reconnect" title="重新连接">↻</button><button class="terminal-close close-session" title="关闭终端">×</button></span></div><div class="terminal-body"></div>`;
+    card.innerHTML=`<div class="terminal-head"><svg class="terminal-running-outline" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><rect x=".5" y=".5" width="99" height="99" rx="2"></rect></svg><span class="terminal-card-title agent-label" title="双击重命名"><span class="terminal-card-name">${escapeHtml(s.title)}</span></span><span class="terminal-quota quota-batteries" hidden></span><span class="terminal-tools"><button class="terminal-close rename-session" title="重命名">✎</button><button class="terminal-close image-session" title="发送图片">▧</button><button class="terminal-close minimize-session" title="最小化">−</button><button class="terminal-close float-session" title="${s.floating ? '还原到工作区' : '浮动窗口'}">□</button><button class="terminal-close reconnect" title="重新连接">↻</button><button class="terminal-close close-session" title="关闭终端">×</button></span></div><div class="terminal-body"></div>`;
     const head = card.querySelector('.terminal-head');
     const title = card.querySelector('.terminal-card-title');
     const icon = sessionAgentIcon(s);
@@ -604,7 +733,7 @@ function renderSessions({ focus = true } = {}) {
       enableFloatingHeaderDrag(s, card, head);
     }
     const body=card.querySelector('.terminal-body');
-    (row ?? terminalGrid).append(card);
+    (tileCell ?? terminalGrid).append(card);
     s.card=card;
     renderSessionQuota(s);
     if (!s.opened) { s.term.open(body); s.opened=true; }
@@ -638,6 +767,7 @@ function renderSessions({ focus = true } = {}) {
   }
   if (focus && !document.querySelector('dialog[open]')) sessions.get(activeSession)?.term.focus();
   $('session-count').textContent=`${sessions.size} / 8`;
+  updateRunningHeaders();
   renderInstances();
   renderMinimized();
 }
@@ -866,6 +996,7 @@ function createTerminalSession({ id, remoteId = id, title, host, workspace, agen
     agent: { ...agent },
     restoreOnly: Boolean(restoreOnly),
     startedAt: Date.now(),
+    lastOutputAt: 0,
     connected: false,
     opened: false,
   };
@@ -1059,7 +1190,7 @@ function handleNativeMessage(event) {
   if(msg.type==='mcp-tool'){void executeMcpRequest(msg);return;}
   if(msg.type==='mcp-image-result'||msg.type==='mcp-public-key'){const pending=pendingMcp.get(msg.request_id);if(pending){pendingMcp.delete(msg.request_id);msg.error?pending.reject(new Error(msg.error)):pending.resolve(msg.result);}return;}
   const session=sessions.get(msg.id);
-  if(msg.type==='output'&&session){const raw=atob(msg.data);const bytes=Uint8Array.from(raw,c=>c.charCodeAt(0));session.term.write(bytes,()=>watchAutoEnter(session));}
+  if(msg.type==='output'&&session){session.lastOutputAt=performance.now();session.card?.querySelector('.terminal-head')?.classList.add('running');const raw=atob(msg.data);const bytes=Uint8Array.from(raw,c=>c.charCodeAt(0));session.term.write(bytes,()=>watchAutoEnter(session));}
   else if(msg.type==='endpoint-selected'&&session){const address=String(msg.address||'').replace(/[\x00-\x1f\x7f]/g,'');session.term.writeln(`\r\n\x1b[90m连接目标 ${address}:${Number(msg.port)||22} …\x1b[0m`);}
   else if(msg.type==='connected'&&session){session.connected=true;setBusy(false);session.term.focus();}
   else if(msg.type==='closed'&&session){session.connected=false;setBusy([...sessions.values()].some(s=>s.connected));const exitCode=(Number(msg.code)>>>0).toString(16).toUpperCase().padStart(8,'0');session.term.writeln(`\r\n\x1b[90m[SSH 已断开，退出码 0x${exitCode}；点击右上角 ↻ 重新连接]\x1b[0m`);}
@@ -1250,5 +1381,6 @@ window.addEventListener('resize',()=>{
     try{s.fit.fit();}catch{}
   }
 });
+setInterval(updateRunningHeaders, 100);
 if(window.chrome?.webview)post({action:'load-config'});
 else $('empty-state').querySelector('p').textContent='请从 Remote Dev Terminal Windows 程序启动此界面。';
