@@ -95,7 +95,6 @@ public partial class MainWindow : Window
                 case "mcp-info": ShowMcpInfo(); break;
                 case "delete-host-profile": _ = DeleteHostProfileAsync(Text(message, "host_id")); break;
                 case "session-sync": _ = SyncSessionAsync(message); break;
-                case "get-shared-sessions": _ = GetSharedSessionsAsync(message); break;
                 case "browse-directories": _ = BrowseDirectoriesAsync(message); break;
                 case "admin-users": _ = GetAdminUsersAsync(); break;
                 case "admin-user-save": _ = SaveAdminUserAsync(message); break;
@@ -889,20 +888,6 @@ public partial class MainWindow : Window
             else if (method == "DELETE") await SyncRequestAsync(endpoint, "DELETE", token, null).ConfigureAwait(false);
         }
         catch { }
-    }
-
-    private async Task GetSharedSessionsAsync(JsonElement message)
-    {
-        try
-        {
-            var config = ConfigStore.Load(); var url = Text(config, "sync_url").TrimEnd('/'); var token = Text(config, "sync_token");
-            if (Bool(config, "offline_mode") || !Bool(config, "auto_sync_enabled") || url.Length == 0 || token.Length == 0) throw new InvalidOperationException("请在系统设置中填写服务地址、登录账号并启用跨设备同步。");
-            var host = message.GetProperty("host"); var id = Text(host, "id"); var username = Text(host, "username");
-            var endpoint = url + "/v1/hosts/" + Uri.EscapeDataString(id) + "/users/" + Uri.EscapeDataString(username) + "/sessions";
-            var result = ParseObject(await SyncRequestAsync(endpoint, "GET", token, null).ConfigureAwait(false));
-            Dispatcher.BeginInvoke(() => Send(new { type = "shared-sessions", host_id = id, host = JsonDocument.Parse(host.GetRawText()).RootElement.Clone(), sessions = result["sessions"] }));
-        }
-        catch (Exception ex) { Dispatcher.BeginInvoke(() => Send(new { type = "sync-auth-result", success = false, message = ex.Message })); }
     }
 
     private async Task DeleteHostProfileAsync(string hostId)

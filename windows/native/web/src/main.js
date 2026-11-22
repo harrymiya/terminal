@@ -190,7 +190,6 @@ function normalizeConfig(raw) {
   document.body.classList.toggle('sidebar-hidden',Boolean(config.sidebar_hidden));
   $('sync-account').textContent=config.sync_username||'未登录';
   $('sync-admin-users').hidden=!config.sync_is_admin;
-  $('shared-sessions').disabled=!config.sync_username;
   applyTheme();
   applyUiScale(Number($('scale').value));
   lastConfigSnapshot=JSON.stringify(config);
@@ -518,15 +517,14 @@ function deleteWorkspace(index){const host=currentHost(), item=host?.directories
 function moveWorkspace(index,offset){const host=currentHost(),items=host?.directories;if(!items||index<0||index+offset<0||index+offset>=items.length)return;[items[index],items[index+offset]]=[items[index+offset],items[index]];sendConfig();render();}
 function moveAgentAt(index,offset){const host=currentHost(),items=agentsForHost(host),target=index+offset;if(index<0||target<0||target>=items.length)return;[items[index],items[target]]=[items[target],items[index]];if(host)host.selected_agent=target;sendConfig();render();}
 
-function openSession(workspaceIndex, sharedItem=null) {
+function openSession(workspaceIndex) {
   const host=currentHost(), agent=currentAgent(), workspace=host?.directories?.[workspaceIndex];
   if(!host||!agent||!workspace){showError('请先配置主机、开发者和工作区。');return;}
-  if(sharedItem&&sessions.has(sharedItem.id)){activeSession=sharedItem.id;renderSessions();sessions.get(sharedItem.id).term.focus();return;}
   if(sessions.size>=8){showError('最多同时打开 8 个终端。');return;}
-  const id=sharedItem?.id||makeId(), title=sharedItem?.display_name||`${workspace.name||workspace.path} · ${agent.name||agent.command}`;
+  const id=makeId(), title=`${workspace.name||workspace.path} · ${agent.name||agent.command}`;
   const term=new Terminal({cursorBlink:true,fontFamily:'Cascadia Code,Consolas,monospace',fontSize:terminalFontSize(),scrollback:5000,convertEol:false,allowProposedApi:true,theme:terminalTheme()});
   const fit=new FitAddon();term.loadAddon(fit);
-  const session={id,title,term,fit,host:{...host},workspace:{...workspace},agent:{...agent},connected:false,opened:false,shared:Boolean(sharedItem)};
+  const session={id,title,term,fit,host:{...host},workspace:{...workspace},agent:{...agent},connected:false,opened:false};
   session.autoState={signature:'',since:0,sent:false};
   term.onData(data=>{session.autoState.signature='';session.autoState.since=0;session.autoState.sent=false;post({action:'input',id,data});});
   term.onResize(({cols,rows})=>post({action:'resize',id,cols,rows}));
@@ -551,7 +549,6 @@ function handleNativeMessage(event) {
   const msg=event.data;
   if(msg.type==='config'){normalizeConfig(msg.config);return;}
   if(msg.type==='sync-auth-result'){if(msg.auth||(!msg.success&&msg.manual))showError(msg.message);else if(msg.success&&msg.manual)$('connection-status').title=msg.message;else if(!msg.success)$('connection-status').title=`同步失败：${msg.message}`;return;}
-  if(msg.type==='shared-sessions'){renderSharedSessions(msg.host_id,msg.host,msg.sessions||[]);return;}
   if(msg.type==='admin-users'){renderAdminUsers(msg.users||[]);return;}
   if(msg.type==='browse-result'){renderBrowse(msg);return;}
   if(msg.type==='host-metrics'){metricsByHost.set(msg.host_id,{memory:Number(msg.memory),cpu:Number(msg.cpu)});renderHosts();return;}
@@ -579,7 +576,6 @@ function handleNativeMessage(event) {
   else if(msg.type==='notice')showError(msg.message);
 }
 
-function renderSharedSessions(hostId,host,items){const root=$('shared-list');root.replaceChildren();if(!items.length){const p=document.createElement('p');p.className='muted';p.textContent='暂无共享会话';root.append(p);}for(const item of items){const b=document.createElement('button');b.type='button';b.className='button';b.textContent=item.display_name||`${item.directory_name} · ${item.agent_name}`;b.addEventListener('click',()=>{const h=config.hosts.find(x=>x.id===hostId)||host;if(!h)return;activeHost=h.id;let wi=(h.directories||[]).findIndex(w=>w.path===item.directory_path);if(wi<0){h.directories||=[];h.directories.push({name:item.directory_name,path:item.directory_path});wi=h.directories.length-1;}let agents=agentsForHost(h),ai=agents.findIndex(a=>a.command===item.agent_command);if(ai<0){config.agents.push({name:item.agent_name,command:item.agent_command});agents=config.agents;ai=agents.length-1;}h.selected_agent=ai;sendConfig();render();$('shared-dialog').close();openSession(wi,item);});root.append(b);}$('shared-dialog').showModal();}
 function renderAdminUsers(users){const root=$('admin-users-list');root.replaceChildren();for(const user of users){const row=document.createElement('div');row.className='settings-row';const label=document.createElement('span');label.textContent=`${user.username} · ${user.is_admin?'管理员':'普通用户'}`;const actions=document.createElement('span');const edit=document.createElement('button');edit.className='button';edit.type='button';edit.textContent='编辑';edit.addEventListener('click',()=>adminUserForm(user));const del=document.createElement('button');del.className='button';del.type='button';del.textContent='删除';del.addEventListener('click',()=>{if(confirm(`删除账号 ${user.username} 及其同步资料？`))post({action:'admin-user-delete',user_id:user.id});});actions.append(edit,del);row.append(label,actions);root.append(row);}$('admin-users-dialog').showModal();}
 function adminUserForm(user=null){showForm(user?'编辑同步账号':'添加同步账号',[{key:'username',label:'用户名'},{key:'password',label:'密码（编辑时留空以保留）',type:'password'},{key:'is_admin',label:'管理员',type:'checkbox'}],user,(v)=>{if(!/^[a-z0-9_.-]{3,64}$/i.test(v.username))return '用户名需为 3–64 位字母、数字、点、下划线或连字符。';if(!user&&v.password.length<8)return '密码至少 8 个字符。';post({action:'admin-user-save',user_id:user?.id,username:v.username,password:v.password,is_admin:v.is_admin});return '';});}
 function requestBrowse(path){const requestId=$('browse-path').dataset.requestId;post({action:'browse-directories',request_id:requestId,host:currentHost(),path:path||'~'});}
@@ -659,7 +655,6 @@ $('settings-save').addEventListener('click',(event)=>{event.preventDefault();con
 $('sync-login').addEventListener('click',()=>{const username=prompt('同步账号',config.sync_username||'');if(!username)return;const password=prompt('同步密码');if(password===null)return;post({action:'sync-auth',mode:'login',username:username.trim(),password});});
 $('sync-logout').addEventListener('click',()=>post({action:'sync-auth',mode:'logout'}));
 $('sync-now').addEventListener('click',()=>post({action:'sync-now'}));
-$('shared-sessions').addEventListener('click',()=>{const host=currentHost();if(!host)return showError('请先选择主机。');post({action:'get-shared-sessions',host_id:host.id,host});});
 $('mcp-guide').addEventListener('click',()=>post({action:'mcp-info'}));
 $('sync-admin-users').addEventListener('click',()=>post({action:'admin-users'}));
 $('admin-user-add').addEventListener('click',()=>adminUserForm());
