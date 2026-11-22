@@ -26,6 +26,11 @@ const emptyState = $('empty-state');
 const formDialog = $('form-dialog');
 const form = formDialog.querySelector('form');
 const browseDialog = $('browse-dialog');
+const imageDialog = $('image-dialog');
+let imageTargetSession = null;
+let selectedImage = null;
+let imageUploadBusy = false;
+let clipboardReadPending = false;
 let config = { hosts: [], agents: [], tiled: true, ui_scale: 100 };
 let activeHost = '';
 let activeSession = '';
@@ -545,6 +550,7 @@ function updateRunningHeaders() {
   for (const session of sessions.values()) {
     const running = session.lastOutputAt > 0 && now - session.lastOutputAt < 2500;
     session.card?.querySelector('.terminal-head')?.classList.toggle('running', running);
+    session.instanceButton?.classList.toggle('running', running);
   }
 }
 
@@ -687,7 +693,7 @@ function renderSessions({ focus = true } = {}) {
     card.className='terminal-card';
     card.classList.toggle('active', s.id === activeSession);
     card.classList.toggle('inactive', !row && !s.floating);
-    card.innerHTML=`<div class="terminal-head"><svg class="terminal-running-outline" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><rect x=".5" y=".5" width="99" height="99" rx="2"></rect></svg><span class="terminal-card-title agent-label" title="双击重命名"><span class="terminal-card-name">${escapeHtml(s.title)}</span></span><span class="terminal-quota quota-batteries" hidden></span><span class="terminal-tools"><button class="terminal-close rename-session" title="重命名">✎</button><button class="terminal-close image-session" title="发送图片">▧</button><button class="terminal-close minimize-session" title="最小化">−</button><button class="terminal-close float-session" title="${s.floating ? '还原到工作区' : '浮动窗口'}">□</button><button class="terminal-close reconnect" title="重新连接">↻</button><button class="terminal-close close-session" title="关闭终端">×</button></span></div><div class="terminal-body"></div>`;
+    card.innerHTML=`<div class="terminal-head"><svg class="terminal-running-outline" aria-hidden="true"><rect x="2.5" y="2.5" width="calc(100% - 5px)" height="calc(100% - 5px)" rx="2"></rect></svg><span class="terminal-card-title agent-label" title="双击重命名"><span class="terminal-card-name">${escapeHtml(s.title)}</span></span><span class="terminal-quota quota-batteries" hidden></span><span class="terminal-tools"><button class="terminal-close rename-session" title="重命名">✎</button><button class="terminal-close image-session" title="发送图片">▧</button><button class="terminal-close minimize-session" title="最小化">−</button><button class="terminal-close float-session" title="${s.floating ? '还原到工作区' : '浮动窗口'}">□</button><button class="terminal-close reconnect" title="重新连接">↻</button><button class="terminal-close close-session" title="关闭终端">×</button></span></div><div class="terminal-body"></div>`;
     const head = card.querySelector('.terminal-head');
     const title = card.querySelector('.terminal-card-title');
     const icon = sessionAgentIcon(s);
@@ -774,6 +780,7 @@ function render() { renderSessions(); updateEditing(); }
 function renderInstances() {
   const section = $('instances-section'), root = $('instances-list');
   root.replaceChildren();
+  for (const session of sessions.values()) session.instanceButton = null;
   const items = [...sessions.values()].filter(session => viewMode === 'grid'
     ? session.minimized
     : !session.floating);
@@ -784,8 +791,18 @@ function renderInstances() {
     row.className = 'flat-list-row';
     const button = document.createElement('button');
     button.type = 'button';
-    button.className = `flat-list-button${session.id === activeSession ? ' selected' : ''}`;
+    button.className = `flat-list-button instance-session-button${session.id === activeSession ? ' selected' : ''}`;
     button.title = session.minimized ? '点击恢复已最小化终端' : '切换到终端';
+    const outline = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    outline.classList.add('terminal-running-outline');
+    outline.setAttribute('aria-hidden', 'true');
+    const outlineRect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    outlineRect.setAttribute('x', '2.5');
+    outlineRect.setAttribute('y', '2.5');
+    outlineRect.setAttribute('width', 'calc(100% - 5px)');
+    outlineRect.setAttribute('height', 'calc(100% - 5px)');
+    outlineRect.setAttribute('rx', '2');
+    outline.append(outlineRect);
     const label = document.createElement('span');
     label.className = 'agent-label';
     const icon = sessionAgentIcon(session);
@@ -794,7 +811,9 @@ function renderInstances() {
     name.className = 'flat-list-name';
     name.textContent = session.title;
     label.append(name);
-    button.append(label);
+    button.append(outline, label);
+    session.instanceButton = button;
+    button.classList.toggle('running', session.lastOutputAt > 0 && performance.now() - session.lastOutputAt < 2500);
     button.addEventListener('click', () => {
       if (session.minimized) {
         restoreSession(session.id);
@@ -857,7 +876,7 @@ function toggleFloat(session){
 function minimizeSession(session){session.minimized=true;session.floating=false;renderSessions();}
 function restoreSession(id){const session=sessions.get(id);if(!session)return;session.minimized=false;activeSession=id;renderSessions();session.term.focus();}
 function renderMinimized(){const bar=$('minimized-sessions');if(!bar)return;bar.replaceChildren();bar.style.display=viewMode==='grid'?'none':'flex';if(viewMode==='grid')return;for(const s of sessions.values()){if(!s.minimized)continue;const b=document.createElement('button');b.className='button quiet';b.textContent=`● ${s.title}`;b.title='恢复终端';b.addEventListener('click',()=>restoreSession(s.id));bar.append(b);}}
-function chooseImage(session){const input=$('image-file');input.dataset.sessionId=session.id;input.value='';input.click();}
+function chooseImage(session){openImageDialog(session);}
 
 function showForm(title, fields, initial, onSave, onDelete=null) {
   $('form-title').textContent=title; $('form-error').textContent='';
@@ -1187,6 +1206,29 @@ function handleNativeMessage(event) {
   if(msg.type==='mcp-info'){showError(msg.message);return;}
   if(msg.type==='mcp-tool'){void executeMcpRequest(msg);return;}
   if(msg.type==='mcp-image-result'||msg.type==='mcp-public-key'){const pending=pendingMcp.get(msg.request_id);if(pending){pendingMcp.delete(msg.request_id);msg.error?pending.reject(new Error(msg.error)):pending.resolve(msg.result);}return;}
+  if(msg.type==='clipboard-image'){
+    if(msg.id!==imageTargetSession?.id)return;
+    clipboardReadPending=false;
+    setImageDialogControlsDisabled(false);
+    if(!msg.success){clearSelectedImage();setImageStatus(msg.message||'剪贴板中没有可用图片。',true);return;}
+    const raw=atob(msg.data),bytes=Uint8Array.from(raw,char=>char.charCodeAt(0));
+    void selectImageFile(new File([bytes],'clipboard.png',{type:'image/png'}),'剪贴板图片');
+    return;
+  }
+  if(msg.type==='image-uploaded'&&msg.id===imageTargetSession?.id){
+    const session=imageTargetSession;
+    imageUploadBusy=false;
+    imageDialog.close();
+    session?.term.focus();
+    return;
+  }
+  if(msg.type==='error'&&imageUploadBusy&&msg.id===imageTargetSession?.id){
+    imageUploadBusy=false;
+    setImageDialogControlsDisabled(false);
+    setImageStatus(`上传失败：${msg.message}`,true);
+    $('image-send').disabled=!selectedImage;
+    return;
+  }
   const session=sessions.get(msg.id);
   if(msg.type==='output'&&session){session.lastOutputAt=performance.now();session.card?.querySelector('.terminal-head')?.classList.add('running');const raw=atob(msg.data);const bytes=Uint8Array.from(raw,c=>c.charCodeAt(0));session.term.write(bytes,()=>watchAutoEnter(session));}
   else if(msg.type==='endpoint-selected'&&session){const address=String(msg.address||'').replace(/[\x00-\x1f\x7f]/g,'');session.term.writeln(`\r\n\x1b[90m连接目标 ${address}:${Number(msg.port)||22} …\x1b[0m`);}
@@ -1362,11 +1404,128 @@ $('browse-select').addEventListener('click',()=>{
 browseDialog.addEventListener('close',()=>{
   if (!browseDialog.open) directoryBrowser = null;
 });
-$('image-file').addEventListener('change',async event=>{const input=event.target,file=input.files?.[0],session=sessions.get(input.dataset.sessionId);input.dataset.sessionId='';input.value='';await uploadImageFile(file,session);});
-async function uploadImageFile(file,session){if(!file||!session)return;try{const data=await imageData(file);post({action:'upload-image',id:session.id,data});}catch(error){showError(error.message);}}
-document.querySelector('#image-file').addEventListener('cancel',event=>{event.target.dataset.sessionId='';});
-async function imageData(file){let img=new Image();img.src=URL.createObjectURL(file);await img.decode();let width=img.naturalWidth,height=img.naturalHeight,scale=Math.min(1,4096/Math.max(width,height));width=Math.max(1,Math.round(width*scale));height=Math.max(1,Math.round(height*scale));const canvas=document.createElement('canvas');canvas.width=width;canvas.height=height;canvas.getContext('2d').drawImage(img,0,0,width,height);URL.revokeObjectURL(img.src);let quality=.92;let blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/jpeg',quality));if(!blob)throw new Error('无法转换此图片格式');while(blob.size>20*1024*1024&&quality>.35){quality-=.1;blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/jpeg',quality));if(!blob)throw new Error('无法转换此图片格式');}if(blob.size>20*1024*1024)throw new Error('图片转换后仍超过 20 MB');return await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result).split(',')[1]);reader.onerror=()=>reject(reader.error);reader.readAsDataURL(blob);});}
-document.addEventListener('paste',event=>{const clipboard=event.clipboardData;const item=[...(clipboard?.items||[])].find(x=>x.kind==='file'&&x.type.startsWith('image/'));const file=item?.getAsFile()||[...(clipboard?.files||[])].find(x=>x.type.startsWith('image/'));const imageInput=$('image-file');const session=sessions.get(imageInput.dataset.sessionId||activeSession);if(!file||!session)return;event.preventDefault();imageInput.dataset.sessionId='';void uploadImageFile(file,session);},true);
+$('image-file').addEventListener('change',event=>{
+  const input=event.target,file=input.files?.[0];
+  input.value='';
+  if(file)void selectImageFile(file,file.name||'本地图片');
+});
+$('image-choose').addEventListener('click',()=>{$('image-file').value='';$('image-file').click();});
+$('image-paste').addEventListener('click',readClipboardImage);
+$('image-send').addEventListener('click',()=>{
+  if(imageUploadBusy||!imageTargetSession||!selectedImage)return;
+  if(!imageTargetSession.connected){setImageStatus('终端已断开，请重新连接后再发送。',true);return;}
+  imageUploadBusy=true;
+  setImageDialogControlsDisabled(true);
+  setImageStatus('正在上传图片…');
+  post({action:'upload-image',id:imageTargetSession.id,data:selectedImage.data});
+});
+imageDialog.addEventListener('keydown',event=>{
+  if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='v'){
+    event.preventDefault();
+    event.stopPropagation();
+    readClipboardImage();
+  }
+});
+imageDialog.addEventListener('paste',event=>{event.preventDefault();readClipboardImage();});
+imageDialog.addEventListener('cancel',event=>{if(imageUploadBusy)event.preventDefault();});
+imageDialog.addEventListener('close',()=>{
+  imageTargetSession=null;
+  selectedImage=null;
+  imageUploadBusy=false;
+  clipboardReadPending=false;
+  clearSelectedImage();
+  setImageStatus('尚未选择图片');
+  setImageDialogControlsDisabled(false);
+});
+function openImageDialog(session){
+  if(!session.connected){showError('请先等待该终端连接成功。');return;}
+  imageTargetSession=session;
+  selectedImage=null;
+  imageUploadBusy=false;
+  clipboardReadPending=false;
+  clearSelectedImage();
+  setImageStatus('尚未选择图片');
+  setImageDialogControlsDisabled(false);
+  imageDialog.showModal();
+  $('image-paste').focus();
+}
+function clearSelectedImage(){
+  selectedImage=null;
+  $('image-preview').removeAttribute('src');
+  $('image-preview').hidden=true;
+  document.querySelector('.image-preview-frame').classList.remove('visible');
+  $('image-send').disabled=true;
+}
+function setImageStatus(text,error=false){
+  const status=$('image-status');
+  status.textContent=text;
+  status.classList.toggle('error',error);
+}
+function setImageDialogControlsDisabled(disabled){
+  $('image-choose').disabled=disabled||clipboardReadPending;
+  $('image-paste').disabled=disabled||clipboardReadPending;
+  for(const button of imageDialog.querySelectorAll('[data-close-dialog]'))button.disabled=disabled;
+  $('image-send').disabled=disabled||!selectedImage;
+}
+function readClipboardImage(){
+  if(!imageDialog.open||!imageTargetSession||imageUploadBusy||clipboardReadPending)return;
+  clipboardReadPending=true;
+  $('image-choose').disabled=true;
+  $('image-paste').disabled=true;
+  setImageStatus('正在读取剪贴板图片…');
+  post({action:'read-clipboard-image',id:imageTargetSession.id});
+}
+async function selectImageFile(file,description){
+  if(!imageDialog.open||!imageTargetSession||imageUploadBusy)return;
+  clearSelectedImage();
+  setImageStatus('正在读取图片…');
+  try{
+    const prepared=await imageData(file);
+    if(!imageDialog.open||!imageTargetSession)return;
+    selectedImage={...prepared,description};
+    $('image-preview').src=`data:image/jpeg;base64,${prepared.data}`;
+    $('image-preview').hidden=false;
+    document.querySelector('.image-preview-frame').classList.add('visible');
+    setImageStatus(`${description} · ${prepared.width} × ${prepared.height}`);
+    $('image-send').disabled=false;
+  }catch(error){
+    clearSelectedImage();
+    setImageStatus(error.message,true);
+  }
+}
+async function imageData(file){
+  const objectUrl=URL.createObjectURL(file);
+  try{
+    const img=new Image();
+    img.src=objectUrl;
+    await img.decode();
+    const sourceWidth=img.naturalWidth,sourceHeight=img.naturalHeight;
+    if(sourceWidth*sourceHeight>40_000_000)throw new Error('图片尺寸过大（最多 4000 万像素）');
+    const scale=Math.min(1,4096/Math.max(sourceWidth,sourceHeight));
+    const width=Math.max(1,Math.round(sourceWidth*scale)),height=Math.max(1,Math.round(sourceHeight*scale));
+    const canvas=document.createElement('canvas');
+    canvas.width=width;canvas.height=height;
+    const context=canvas.getContext('2d');
+    if(!context)throw new Error('无法读取图片内容');
+    context.drawImage(img,0,0,width,height);
+    let quality=.92;
+    let blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/jpeg',quality));
+    if(!blob)throw new Error('无法转换此图片格式');
+    while(blob.size>20*1024*1024&&quality>.35){
+      quality-=.1;
+      blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/jpeg',quality));
+      if(!blob)throw new Error('无法转换此图片格式');
+    }
+    if(blob.size>20*1024*1024)throw new Error('图片转换后仍超过 20 MB');
+    const data=await new Promise((resolve,reject)=>{
+      const reader=new FileReader();
+      reader.onload=()=>resolve(String(reader.result).split(',')[1]);
+      reader.onerror=()=>reject(reader.error);
+      reader.readAsDataURL(blob);
+    });
+    return {data,width:sourceWidth,height:sourceHeight};
+  }finally{URL.revokeObjectURL(objectUrl);}
+}
 window.chrome?.webview?.addEventListener('message',handleNativeMessage);
 window.addEventListener('resize',()=>{
   const stageRect = stage.getBoundingClientRect();

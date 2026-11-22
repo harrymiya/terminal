@@ -13,6 +13,7 @@ using System.Globalization;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.Windows;
+using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 
 namespace RemoteDevTerminal;
@@ -90,6 +91,7 @@ public partial class MainWindow : Window
                 case "close": CloseSession(Text(message, "id"), terminateRemote: !message.TryGetProperty("terminate_remote", out var terminateProp) || terminateProp.ValueKind != JsonValueKind.False); break;
                 case "clear-host-password": ClearHostPassword(message); break;
                 case "upload-image": _ = UploadImageAsync(message); break;
+                case "read-clipboard-image": ReadClipboardImage(message); break;
                 case "upload-image-path": _ = UploadImagePathAsync(message); break;
                 case "get-ssh-public-key": _ = GetSshPublicKeyAsync(message); break;
                 case "sync-auth": _ = SyncAuthAsync(message); break;
@@ -1268,10 +1270,40 @@ public partial class MainWindow : Window
             var bytes = Convert.FromBase64String(encoded);
             if (bytes.Length > 20 * 1024 * 1024) throw new InvalidDataException("图片超过 20 MB。");
             var path = await UploadImageBytesAsync(host, bytes, "jpg").ConfigureAwait(false);
-            session.Write(QuoteShell(path) + " ");
+            session.Write("请查看这张图片：" + path + "\r");
             Dispatcher.BeginInvoke(() => Send(new { type = "image-uploaded", id, path }));
         }
         catch (Exception ex) { Dispatcher.BeginInvoke(() => Send(new { type = "error", id, message = ex.Message })); }
+    }
+
+    private void ReadClipboardImage(JsonElement message)
+    {
+        var id = Text(message, "id");
+        try
+        {
+            if (!_sessions.ContainsKey(id)) throw new InvalidOperationException("终端会话已关闭。");
+            if (!Clipboard.ContainsImage()) throw new InvalidOperationException("剪贴板中没有图片，请先复制一张图片。");
+            var image = Clipboard.GetImage() ?? throw new InvalidOperationException("无法读取剪贴板图片。");
+            if ((long)image.PixelWidth * image.PixelHeight > 40_000_000) throw new InvalidDataException("图片尺寸过大（最多 4000 万像素）。");
+            var encoder = new PngBitmapEncoder();
+            encoder.Frames.Add(BitmapFrame.Create(image));
+            using var stream = new MemoryStream();
+            encoder.Save(stream);
+            if (stream.Length > 20 * 1024 * 1024) throw new InvalidDataException("剪贴板图片超过 20 MB。");
+            Send(new
+            {
+                type = "clipboard-image",
+                id,
+                success = true,
+                data = Convert.ToBase64String(stream.ToArray()),
+                width = image.PixelWidth,
+                height = image.PixelHeight
+            });
+        }
+        catch (Exception ex)
+        {
+            Send(new { type = "clipboard-image", id, success = false, message = ex.Message });
+        }
     }
 
     private async Task<string> UploadImageBytesAsync(JsonObject host, byte[] bytes, string extension)
