@@ -6,6 +6,7 @@
   <title>Remote Dev Terminal</title>
   <link rel="stylesheet" href="app.css">
   <link rel="stylesheet" href="layout.css">
+  <link rel="stylesheet" href="scale.css">
   <link rel="stylesheet" href="xterm.css">
   <script defer src="app.js"></script>
 </head>
@@ -72,7 +73,7 @@
   <dialog id="form-dialog" class="dialog"><form method="dialog"><div class="dialog-heading"><h2 id="form-title"></h2><button class="icon-button" type="button" data-close-dialog aria-label="关闭">×</button></div><div id="form-fields" class="form-fields"></div><div id="form-error" class="form-error"></div><div class="dialog-actions"><button class="button" type="button" data-close-dialog>取消</button><button id="form-browse" class="button" type="button" hidden>浏览远端目录…</button><button id="form-save" class="button primary" type="submit" value="save">保存</button></div></form></dialog>
   <dialog id="settings-dialog" class="dialog settings-dialog"><form method="dialog"><div class="dialog-heading"><h2>系统设置</h2><button class="icon-button" type="button" data-close-dialog aria-label="关闭">×</button></div><div class="form-fields">
     <label>界面主题<select id="theme-select" class="select"></select></label>
-    <label class="check-row"><input id="auto-enter" type="checkbox">自动确认 Agent 明确显示的 Enter 确认提示</label>
+    <label class="check-row" title="每条肯定提示单独等待设定延迟；出现下一条提示后继续处理。"><input id="auto-enter" type="checkbox">自动连续确认 Agent 的肯定提示</label>
     <label>自动回车延迟（50–30000 ms）<input id="auto-enter-delay" class="input" type="number" min="50" max="30000" step="50"></label>
     <label>开发者额度刷新周期（15–300 秒）<input id="quota-interval" class="input" type="number" min="15" max="300" step="5"></label>
     <label>主机资源刷新周期（5–300 秒）<input id="metrics-interval" class="input" type="number" min="5" max="300" step="1"></label>

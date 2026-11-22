@@ -14,7 +14,7 @@ def load_core(platform):
 
 class DesktopAutoConfirmTest(unittest.TestCase):
     def test_prompt_detection_and_negative_selections(self):
-        for platform in ('omarchy', 'ubuntu', 'windows'):
+        for platform in ('omarchy', 'ubuntu'):
             with self.subTest(platform=platform):
                 detect = load_core(platform).auto_enter_signature
                 for text in (
@@ -35,7 +35,7 @@ class DesktopAutoConfirmTest(unittest.TestCase):
                     self.assertIsNone(detect(text), text)
 
     def test_each_prompt_is_delayed_once_and_manual_action_cancels(self):
-        for platform in ('omarchy', 'ubuntu', 'windows'):
+        for platform in ('omarchy', 'ubuntu'):
             with self.subTest(platform=platform):
                 controller = load_core(platform).AutoEnterController()
                 self.assertFalse(controller.observe('first', 0, 3))
@@ -54,7 +54,7 @@ class DesktopAutoConfirmTest(unittest.TestCase):
                 self.assertTrue(controller.observe('first', 25, 3))
 
     def test_auto_enter_subsecond_delay_support(self):
-        for platform in ('omarchy', 'ubuntu', 'windows'):
+        for platform in ('omarchy', 'ubuntu'):
             with self.subTest(platform=platform):
                 controller = load_core(platform).AutoEnterController()
                 # 500ms delay (0.5s)
@@ -85,7 +85,7 @@ class DesktopAutoConfirmTest(unittest.TestCase):
             app.destroy()
 
     def test_prompt_change_restarts_countdown_and_sessions_are_independent(self):
-        for platform in ('omarchy', 'ubuntu', 'windows'):
+        for platform in ('omarchy', 'ubuntu'):
             core = load_core(platform)
             a, b = core.AutoEnterController(), core.AutoEnterController()
             self.assertFalse(a.observe('A', 0, 3))
@@ -114,7 +114,7 @@ class DesktopAutoConfirmTest(unittest.TestCase):
         GLib.timeout_add(100, lambda: (loop.quit(), False)[1])
         loop.run()
         screen = terminal.get_text_format(Vte.Format.TEXT)
-        for platform in ('omarchy', 'ubuntu', 'windows'):
+        for platform in ('omarchy', 'ubuntu'):
             self.assertIsNotNone(load_core(platform).auto_enter_signature(screen))
         window.destroy()
 
@@ -127,7 +127,7 @@ class DesktopAutoConfirmTest(unittest.TestCase):
             f"{long_diff}\n❯ 1. Yes, proceed\n  2. No",
             f"Continue with deployment? [Y/n]\n{long_footer[:200]}",
         )
-        for platform in ('omarchy', 'ubuntu', 'windows'):
+        for platform in ('omarchy', 'ubuntu'):
             with self.subTest(platform=platform):
                 detect = load_core(platform).auto_enter_signature
                 for text in cases:
@@ -144,7 +144,7 @@ class DesktopAutoConfirmTest(unittest.TestCase):
             "Press enter to\n"
             "confirm or esc to cancel"
         )
-        for platform in ("omarchy", "ubuntu", "windows"):
+        for platform in ("omarchy", "ubuntu"):
             with self.subTest(platform=platform):
                 core = load_core(platform)
                 prompt = body + "\n" + approval
@@ -163,7 +163,7 @@ class DesktopAutoConfirmTest(unittest.TestCase):
 
     def test_pending_status_includes_a_selected_rejection_without_approving_it(self):
         prompt = "Would you like to run this command?\n  1. Yes\n› 2. No"
-        for platform in ("omarchy", "ubuntu", "windows"):
+        for platform in ("omarchy", "ubuntu"):
             with self.subTest(platform=platform):
                 core = load_core(platform)
                 self.assertTrue(core.confirmation_pending(prompt))

@@ -2,6 +2,7 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import THEMES from './themes.json';
 import AGENT_ICONS from '../../../../assets/agent-icons/catalog.json';
+import { createAutoConfirmState, observeAutoConfirm, resetAutoConfirm } from './auto-confirm.js';
 
 const $ = (id) => document.getElementById(id);
 const hostList = $('host-list');
@@ -160,11 +161,9 @@ function autoEnterSignature(term) {
   return normalize([...clean.slice(Math.max(0,selected-2),selected),label].join('\n'));
 }
 function watchAutoEnter(session) {
-  if(!config.auto_enter||!session.connected||session.autoState.sent)return;
+  if(!config.auto_enter||!session.connected||sessions.get(session.id)!==session){resetAutoConfirm(session.autoState);return;}
   const signature=autoEnterSignature(session.term);
-  if(!signature){session.autoState.signature='';session.autoState.since=0;return;}
-  if(signature!==session.autoState.signature){session.autoState.signature=signature;session.autoState.since=Date.now();return;}
-  if(Date.now()-session.autoState.since>=Math.max(50,Number(config.auto_enter_delay)||1000)){session.autoState.sent=true;post({action:'input',id:session.id,data:'\r'});}
+  if(observeAutoConfirm(session.autoState,signature,Date.now(),config.auto_enter_delay))post({action:'input',id:session.id,data:'\r'});
 }
 function updateEditing() {
   document.body.classList.toggle('editing', editing);
@@ -662,8 +661,8 @@ function openSession(workspaceIndex) {
   const term=new Terminal({cursorBlink:true,fontFamily:'Cascadia Code,Consolas,monospace',fontSize:terminalFontSize(),scrollback:5000,convertEol:false,allowProposedApi:true,theme:terminalTheme()});
   const fit=new FitAddon();term.loadAddon(fit);
   const session={id,title,term,fit,host:{...host},workspace:{...workspace},agent:{...agent},connected:false,opened:false};
-  session.autoState={signature:'',since:0,sent:false};
-  term.onData(data=>{session.autoState.signature='';session.autoState.since=0;session.autoState.sent=false;post({action:'input',id,data});});
+  session.autoState=createAutoConfirmState();
+  term.onData(data=>{resetAutoConfirm(session.autoState);post({action:'input',id,data});});
   term.onResize(({cols,rows})=>post({action:'resize',id,cols,rows}));
   session.autoTimer=setInterval(()=>watchAutoEnter(session),250);
   sessions.set(id,session);activeSession=id;renderSessions();term.writeln('\x1b[90m正在连接 SSH…\x1b[0m');
@@ -704,7 +703,7 @@ function handleNativeMessage(event) {
   if(msg.type==='mcp-tool'){void executeMcpRequest(msg);return;}
   if(msg.type==='mcp-image-result'||msg.type==='mcp-public-key'){const pending=pendingMcp.get(msg.request_id);if(pending){pendingMcp.delete(msg.request_id);msg.error?pending.reject(new Error(msg.error)):pending.resolve(msg.result);}return;}
   const session=sessions.get(msg.id);
-  if(msg.type==='output'&&session){const raw=atob(msg.data);const bytes=Uint8Array.from(raw,c=>c.charCodeAt(0));session.term.write(bytes);}
+  if(msg.type==='output'&&session){const raw=atob(msg.data);const bytes=Uint8Array.from(raw,c=>c.charCodeAt(0));session.term.write(bytes,()=>watchAutoEnter(session));}
   else if(msg.type==='endpoint-selected'&&session){const address=String(msg.address||'').replace(/[\x00-\x1f\x7f]/g,'');session.term.writeln(`\r\n\x1b[90m连接目标 ${address}:${Number(msg.port)||22} …\x1b[0m`);}
   else if(msg.type==='connected'&&session){session.connected=true;setBusy(false);session.term.focus();}
   else if(msg.type==='closed'&&session){session.connected=false;setBusy([...sessions.values()].some(s=>s.connected));const exitCode=(Number(msg.code)>>>0).toString(16).toUpperCase().padStart(8,'0');session.term.writeln(`\r\n\x1b[90m[SSH 已断开，退出码 0x${exitCode}；点击右上角 ↻ 重新连接]\x1b[0m`);}

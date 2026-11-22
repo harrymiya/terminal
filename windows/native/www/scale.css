@@ -1,0 +1,107 @@
+:root {
+  --ui-scale: 1;
+}
+
+.sidebar {
+  padding: calc(12px * var(--ui-scale)) calc(11px * var(--ui-scale)) calc(9px * var(--ui-scale));
+  gap: calc(15px * var(--ui-scale));
+}
+
+.sidebar-section {
+  gap: calc(7px * var(--ui-scale));
+}
+
+.section-heading {
+  font-size: calc(12px * var(--ui-scale));
+  letter-spacing: calc(.25px * var(--ui-scale));
+  padding-inline: calc(2px * var(--ui-scale));
+}
+
+.sidebar-brand {
+  gap: calc(8px * var(--ui-scale));
+  min-height: calc(32px * var(--ui-scale));
+}
+
+.sidebar-brand .brand {
+  font-size: clamp(calc(15px * var(--ui-scale)), 14cqi, calc(24px * var(--ui-scale)));
+}
+
+.sidebar-brand-actions {
+  gap: calc(2px * var(--ui-scale));
+}
+
+.sidebar-brand-actions .icon-button {
+  width: calc(26px * var(--ui-scale));
+  height: calc(26px * var(--ui-scale));
+}
+
+.toolbar {
+  height: calc(43px * var(--ui-scale));
+  flex-basis: calc(43px * var(--ui-scale));
+  gap: calc(7px * var(--ui-scale));
+  padding-inline: calc(12px * var(--ui-scale));
+}
+
+.toolbar-left {
+  gap: calc(10px * var(--ui-scale));
+}
+
+.toolbar-right {
+  gap: calc(14px * var(--ui-scale));
+}
+
+.toolbar .small {
+  font-size: calc(11px * var(--ui-scale));
+}
+
+.toolbar .button {
+  min-height: calc(27px * var(--ui-scale));
+  padding: calc(3px * var(--ui-scale)) calc(10px * var(--ui-scale));
+  border-radius: calc(6px * var(--ui-scale));
+  font-size: calc(13px * var(--ui-scale));
+}
+
+.toolbar .icon-button {
+  width: calc(28px * var(--ui-scale));
+  height: calc(28px * var(--ui-scale));
+  font-size: calc(17px * var(--ui-scale));
+}
+
+.toolbar .layout-button {
+  font-size: calc(16px * var(--ui-scale));
+}
+
+.scale-control {
+  gap: calc(4px * var(--ui-scale));
+}
+
+.scale-control output {
+  font-size: calc(12px * var(--ui-scale));
+}
+
+.scale-control .scale-step {
+  width: calc(26px * var(--ui-scale));
+  font-size: calc(16px * var(--ui-scale));
+}
+
+.session-tabs {
+  gap: calc(4px * var(--ui-scale));
+  padding: calc(5px * var(--ui-scale)) calc(8px * var(--ui-scale)) 0;
+}
+
+.session-tab {
+  gap: calc(6px * var(--ui-scale));
+  max-width: calc(210px * var(--ui-scale));
+  padding: calc(5px * var(--ui-scale)) calc(7px * var(--ui-scale)) calc(5px * var(--ui-scale)) calc(9px * var(--ui-scale));
+}
+
+.terminal-head {
+  height: calc(29px * var(--ui-scale));
+  flex-basis: calc(29px * var(--ui-scale));
+  padding: 0 calc(7px * var(--ui-scale)) 0 calc(10px * var(--ui-scale));
+  font-size: calc(11px * var(--ui-scale));
+}
+
+.terminal-close {
+  font-size: calc(15px * var(--ui-scale));
+}

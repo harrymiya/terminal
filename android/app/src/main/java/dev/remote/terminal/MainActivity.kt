@@ -3067,7 +3067,7 @@ private fun PadSidebar(
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(8.dp))
                             .background(PanelRaised)
-                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                            .padding(horizontal = 10.dp, vertical = 4.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(host.name, color = White, fontSize = 13.sp, modifier = Modifier.weight(1f), maxLines = 1)
@@ -3121,7 +3121,7 @@ private fun PadSidebar(
                         border = BorderStroke(1.dp, if (isSelected) Mint else Edge)
                     ) {
                         Row(
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Box(
@@ -3185,7 +3185,7 @@ private fun PadSidebar(
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(8.dp))
                             .background(PanelRaised)
-                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                            .padding(horizontal = 10.dp, vertical = 4.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         AgentMark(agent.icon, 17.dp)
@@ -3364,6 +3364,7 @@ private fun PadWorkspaceMain(
             // Capsule Mode Switcher: [ 平铺模式 | 标签模式 ]
             Row(
                 modifier = Modifier
+                    .width(148.dp)
                     .clip(RoundedCornerShape(16.dp))
                     .background(PanelRaised)
                     .border(1.dp, Edge, RoundedCornerShape(16.dp))
@@ -3373,6 +3374,7 @@ private fun PadWorkspaceMain(
                 // Tiled Mode Pill
                 Row(
                     modifier = Modifier
+                        .weight(1f)
                         .clip(RoundedCornerShape(14.dp))
                         .background(if (tiled) Mint else Color.Transparent)
                         .clickable { onToggleTiled(true) }
@@ -3386,6 +3388,7 @@ private fun PadWorkspaceMain(
                 // Tab Mode Pill
                 Row(
                     modifier = Modifier
+                        .weight(1f)
                         .clip(RoundedCornerShape(14.dp))
                         .background(if (!tiled) Mint else Color.Transparent)
                         .clickable { onToggleTiled(false) }
