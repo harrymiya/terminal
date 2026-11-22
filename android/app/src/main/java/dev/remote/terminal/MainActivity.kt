@@ -280,6 +280,7 @@ private class TerminalSessionState(
     private val quotaFor: (TerminalTask) -> List<QuotaWindow>?,
 ) : AutoConfirmEngine.SessionCallback {
     var task by mutableStateOf(task)
+    var isMinimized by mutableStateOf(false)
     val buffer = TerminalBuffer()
     var status by mutableStateOf("等待连接")
     var unread by mutableStateOf(false)
@@ -1320,7 +1321,10 @@ private fun RemoteTerminalApp(store: LocalStore) {
                         },
                         onSelectSession = { index ->
                             activePage = index
-                            sessions.getOrNull(index)?.let { it.unread = false }
+                            sessions.getOrNull(index)?.let {
+                                it.isMinimized = false
+                                it.unread = false
+                            }
                         },
                         onStartTask = { host, dir, agent -> openTask(host, dir, agent) },
                         onCloseSession = { session -> closingSession = session },
@@ -2099,27 +2103,25 @@ private fun TerminalWorkspace(
                 .padding(horizontal = 10.dp, vertical = 6.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            sessions.chunked(2).forEach { rowSessions ->
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    rowSessions.forEach { session ->
-                        val originalIndex = sessions.indexOf(session).coerceAtLeast(0)
-                        val selected = originalIndex == pager.currentPage
-                        SessionTab(
-                            session = session,
-                            selected = selected,
-                            onClick = { scope.launch { pager.animateScrollToPage(originalIndex) } },
-                            onRename = { onRenameTask(session) },
-                            onClose = { onCloseTask(originalIndex) },
-                            modifier = Modifier.weight(1f),
-                        )
-                    }
-                    if (rowSessions.size == 1) {
-                        Spacer(Modifier.weight(1f))
-                    }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(44.dp)
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                sessions.forEachIndexed { originalIndex, session ->
+                    val selected = originalIndex == pager.currentPage
+                    SessionTab(
+                        session = session,
+                        selected = selected,
+                        onClick = { scope.launch { pager.animateScrollToPage(originalIndex) } },
+                        onRename = { onRenameTask(session) },
+                        onClose = { onCloseTask(originalIndex) },
+                        modifier = Modifier.widthIn(min = 145.dp, max = 220.dp),
+                    )
                 }
             }
         }
@@ -2870,6 +2872,7 @@ private fun TerminalTileCard(
     onSelect: () -> Unit,
     onRename: () -> Unit,
     onClose: () -> Unit,
+    onMinimize: () -> Unit,
     onMaximize: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -2911,6 +2914,9 @@ private fun TerminalTileCard(
             }
             Spacer(Modifier.width(4.dp))
             HourlyQuotaLabel(quota = session.quota)
+            IconButton(onClick = onMinimize, modifier = Modifier.size(26.dp)) {
+                Icon(Icons.Default.KeyboardArrowDown, contentDescription = "最小化到左侧实例列表", tint = Muted, modifier = Modifier.size(16.dp))
+            }
             Spacer(Modifier.weight(1f))
             IconButton(onClick = onMaximize, modifier = Modifier.size(26.dp)) {
                 Icon(Icons.Default.Fullscreen, contentDescription = "最大化标签模式", tint = Muted, modifier = Modifier.size(16.dp))
@@ -2942,6 +2948,7 @@ private fun PadSidebar(
     hosts: List<HostProfile>,
     agents: List<AgentPreset>,
     sessions: List<TerminalSessionState>,
+    tiled: Boolean,
     selectedHost: HostProfile?,
     selectedAgent: AgentPreset?,
     activePage: Int,
@@ -3108,11 +3115,14 @@ private fun PadSidebar(
         }
 
         // Section: 工作实例 (if sessions exist)
-        if (sessions.isNotEmpty()) {
-            SectionTitle(title = "工作实例", trailing = "${sessions.size} 个")
+        val instanceItems = sessions.withIndex().filter { (_, session) ->
+            !tiled || session.isMinimized
+        }
+        if (instanceItems.isNotEmpty()) {
+            SectionTitle(title = "工作实例", trailing = "${instanceItems.size} 个")
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                sessions.forEachIndexed { index, session ->
-                    val isSelected = index == activePage
+                instanceItems.forEach { (index, session) ->
+                    val isSelected = !session.isMinimized && index == activePage
                     Surface(
                         onClick = { onSelectSession(index) },
                         modifier = Modifier.fillMaxWidth(),
@@ -3133,15 +3143,19 @@ private fun PadSidebar(
                             Spacer(Modifier.width(8.dp))
                             AgentMark(session.task.agent.icon, 16.dp)
                             Spacer(Modifier.width(5.dp))
-                            Text(
-                                text = sessionDisplayLabel(session.task),
-                                color = White,
-                                fontSize = 12.sp,
-                                fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f)
-                            )
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    text = sessionDisplayLabel(session.task),
+                                    color = White,
+                                    fontSize = 12.sp,
+                                    fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                if (session.isMinimized) {
+                                    Text("已最小化 · 点击恢复", color = Muted, fontSize = 10.sp, maxLines = 1)
+                                }
+                            }
                             IconButton(onClick = { onRenameSession(session) }, modifier = Modifier.size(26.dp)) {
                                 Icon(Icons.Default.Edit, contentDescription = "修改名称", tint = Muted, modifier = Modifier.size(14.dp))
                             }
@@ -3328,12 +3342,17 @@ private fun PadWorkspaceMain(
     onToggleSidebar: () -> Unit,
     onToggleTiled: (Boolean) -> Unit,
     onSelectSession: (Int) -> Unit,
+    onMinimizeSession: (TerminalSessionState) -> Unit,
     onCloseSession: (TerminalSessionState) -> Unit,
     onRenameSession: (TerminalSessionState) -> Unit,
     selectedHost: HostProfile?,
     selectedAgent: AgentPreset?,
     onStartTask: (HostProfile, ProjectDirectory, AgentPreset) -> Unit,
 ) {
+    val visibleSessionEntries = sessions.withIndex().filterNot { it.value.isMinimized }
+    val visibleSessions = visibleSessionEntries.map { it.value }
+    val originalSessionIndex: (Int) -> Int = { visibleIndex -> visibleSessionEntries[visibleIndex].index }
+    val activeVisibleIndex = visibleSessionEntries.indexOfFirst { it.index == activePage }.coerceAtLeast(0)
     Column(modifier = modifier.background(Ink)) {
         // Toolbar
         Row(
@@ -3404,7 +3423,7 @@ private fun PadWorkspaceMain(
         Divider(color = Edge)
 
         // Body Content
-        if (sessions.isEmpty()) {
+        if (visibleSessions.isEmpty()) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -3416,9 +3435,15 @@ private fun PadWorkspaceMain(
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     Icon(Icons.Default.Terminal, contentDescription = null, tint = Edge, modifier = Modifier.size(64.dp))
-                    Text("暂无活动终端", color = White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
                     Text(
-                        "从左侧工作区列表中点击项目目录，即可直接启动远程终端并连接 AI Agent。",
+                        if (sessions.isEmpty()) "暂无活动终端" else "所有终端都已最小化",
+                        color = White,
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        if (sessions.isEmpty()) "从左侧工作区列表中点击项目目录，即可直接启动远程终端并连接 AI Agent。"
+                        else "从左侧工作实例列表中点击实例，即可恢复终端。",
                         color = Muted,
                         fontSize = 13.sp,
                         textAlign = androidx.compose.ui.text.style.TextAlign.Center,
@@ -3447,8 +3472,9 @@ private fun PadWorkspaceMain(
             }
         } else if (!tiled) {
             // Tab Mode
-            val currentIndex = activePage.coerceIn(0, sessions.lastIndex)
-            val currentSession = sessions[currentIndex]
+            val currentIndex = activeVisibleIndex.coerceIn(0, visibleSessions.lastIndex)
+            val currentSession = visibleSessions[currentIndex]
+            val currentSessionIndex = originalSessionIndex(currentIndex)
             // Tabs Row
             Row(
                 modifier = Modifier
@@ -3459,14 +3485,16 @@ private fun PadWorkspaceMain(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                sessions.forEachIndexed { index, session ->
-                    val selected = index == currentIndex
+                visibleSessions.forEachIndexed { index, session ->
+                    val sessionIndex = originalSessionIndex(index)
+                    val selected = sessionIndex == currentSessionIndex
                     SessionTab(
                         session = session,
                         selected = selected,
-                        onClick = { onSelectSession(index) },
+                        onClick = { onSelectSession(sessionIndex) },
                         onRename = { onRenameSession(session) },
-                        onClose = { onCloseSession(session) }
+                        onClose = { onCloseSession(session) },
+                        modifier = Modifier.widthIn(min = 145.dp, max = 220.dp),
                     )
                 }
             }
@@ -3492,102 +3520,111 @@ private fun PadWorkspaceMain(
             val isLandscape = configuration.screenWidthDp > configuration.screenHeightDp
             Box(Modifier.weight(1f).fillMaxWidth().padding(6.dp)) {
                 when {
-                    sessions.size == 1 -> {
+                    visibleSessions.size == 1 -> {
                         TerminalTileCard(
-                            session = sessions[0],
+                            session = visibleSessions[0],
                             isCurrent = true,
-                            onSelect = { onSelectSession(0) },
-                            onRename = { onRenameSession(sessions[0]) },
-                            onClose = { onCloseSession(sessions[0]) },
-                            onMaximize = { onSelectSession(0); onToggleTiled(false) },
+                            onSelect = { onSelectSession(originalSessionIndex(0)) },
+                            onRename = { onRenameSession(visibleSessions[0]) },
+                            onMinimize = { onMinimizeSession(visibleSessions[0]) },
+                            onClose = { onCloseSession(visibleSessions[0]) },
+                            onMaximize = { onSelectSession(originalSessionIndex(0)); onToggleTiled(false) },
                             modifier = Modifier.fillMaxSize()
                         )
                     }
-                    sessions.size == 2 -> {
+                    visibleSessions.size == 2 -> {
                         if (isLandscape) {
                             Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                 TerminalTileCard(
-                                    session = sessions[0],
-                                    isCurrent = (activePage == 0),
-                                    onSelect = { onSelectSession(0) },
-                                    onRename = { onRenameSession(sessions[0]) },
-                                    onClose = { onCloseSession(sessions[0]) },
-                                    onMaximize = { onSelectSession(0); onToggleTiled(false) },
+                                    session = visibleSessions[0],
+                                    isCurrent = (activePage == originalSessionIndex(0)),
+                                    onSelect = { onSelectSession(originalSessionIndex(0)) },
+                                    onRename = { onRenameSession(visibleSessions[0]) },
+                                    onMinimize = { onMinimizeSession(visibleSessions[0]) },
+                                    onClose = { onCloseSession(visibleSessions[0]) },
+                                    onMaximize = { onSelectSession(originalSessionIndex(0)); onToggleTiled(false) },
                                     modifier = Modifier.weight(1f).fillMaxHeight()
                                 )
                                 TerminalTileCard(
-                                    session = sessions[1],
-                                    isCurrent = (activePage == 1),
-                                    onSelect = { onSelectSession(1) },
-                                    onRename = { onRenameSession(sessions[1]) },
-                                    onClose = { onCloseSession(sessions[1]) },
-                                    onMaximize = { onSelectSession(1); onToggleTiled(false) },
+                                    session = visibleSessions[1],
+                                    isCurrent = (activePage == originalSessionIndex(1)),
+                                    onSelect = { onSelectSession(originalSessionIndex(1)) },
+                                    onRename = { onRenameSession(visibleSessions[1]) },
+                                    onMinimize = { onMinimizeSession(visibleSessions[1]) },
+                                    onClose = { onCloseSession(visibleSessions[1]) },
+                                    onMaximize = { onSelectSession(originalSessionIndex(1)); onToggleTiled(false) },
                                     modifier = Modifier.weight(1f).fillMaxHeight()
                                 )
                             }
                         } else {
                             Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                 TerminalTileCard(
-                                    session = sessions[0],
-                                    isCurrent = (activePage == 0),
-                                    onSelect = { onSelectSession(0) },
-                                    onRename = { onRenameSession(sessions[0]) },
-                                    onClose = { onCloseSession(sessions[0]) },
-                                    onMaximize = { onSelectSession(0); onToggleTiled(false) },
+                                    session = visibleSessions[0],
+                                    isCurrent = (activePage == originalSessionIndex(0)),
+                                    onSelect = { onSelectSession(originalSessionIndex(0)) },
+                                    onRename = { onRenameSession(visibleSessions[0]) },
+                                    onMinimize = { onMinimizeSession(visibleSessions[0]) },
+                                    onClose = { onCloseSession(visibleSessions[0]) },
+                                    onMaximize = { onSelectSession(originalSessionIndex(0)); onToggleTiled(false) },
                                     modifier = Modifier.weight(1f).fillMaxWidth()
                                 )
                                 TerminalTileCard(
-                                    session = sessions[1],
-                                    isCurrent = (activePage == 1),
-                                    onSelect = { onSelectSession(1) },
-                                    onRename = { onRenameSession(sessions[1]) },
-                                    onClose = { onCloseSession(sessions[1]) },
-                                    onMaximize = { onSelectSession(1); onToggleTiled(false) },
+                                    session = visibleSessions[1],
+                                    isCurrent = (activePage == originalSessionIndex(1)),
+                                    onSelect = { onSelectSession(originalSessionIndex(1)) },
+                                    onRename = { onRenameSession(visibleSessions[1]) },
+                                    onMinimize = { onMinimizeSession(visibleSessions[1]) },
+                                    onClose = { onCloseSession(visibleSessions[1]) },
+                                    onMaximize = { onSelectSession(originalSessionIndex(1)); onToggleTiled(false) },
                                     modifier = Modifier.weight(1f).fillMaxWidth()
                                 )
                             }
                         }
                     }
-                    sessions.size in 3..4 -> {
+                    visibleSessions.size in 3..4 -> {
                         Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             Row(Modifier.weight(1f).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                 TerminalTileCard(
-                                    session = sessions[0],
-                                    isCurrent = (activePage == 0),
-                                    onSelect = { onSelectSession(0) },
-                                    onRename = { onRenameSession(sessions[0]) },
-                                    onClose = { onCloseSession(sessions[0]) },
-                                    onMaximize = { onSelectSession(0); onToggleTiled(false) },
+                                    session = visibleSessions[0],
+                                    isCurrent = (activePage == originalSessionIndex(0)),
+                                    onSelect = { onSelectSession(originalSessionIndex(0)) },
+                                    onRename = { onRenameSession(visibleSessions[0]) },
+                                    onMinimize = { onMinimizeSession(visibleSessions[0]) },
+                                    onClose = { onCloseSession(visibleSessions[0]) },
+                                    onMaximize = { onSelectSession(originalSessionIndex(0)); onToggleTiled(false) },
                                     modifier = Modifier.weight(1f).fillMaxHeight()
                                 )
                                 TerminalTileCard(
-                                    session = sessions[1],
-                                    isCurrent = (activePage == 1),
-                                    onSelect = { onSelectSession(1) },
-                                    onRename = { onRenameSession(sessions[1]) },
-                                    onClose = { onCloseSession(sessions[1]) },
-                                    onMaximize = { onSelectSession(1); onToggleTiled(false) },
+                                    session = visibleSessions[1],
+                                    isCurrent = (activePage == originalSessionIndex(1)),
+                                    onSelect = { onSelectSession(originalSessionIndex(1)) },
+                                    onRename = { onRenameSession(visibleSessions[1]) },
+                                    onMinimize = { onMinimizeSession(visibleSessions[1]) },
+                                    onClose = { onCloseSession(visibleSessions[1]) },
+                                    onMaximize = { onSelectSession(originalSessionIndex(1)); onToggleTiled(false) },
                                     modifier = Modifier.weight(1f).fillMaxHeight()
                                 )
                             }
                             Row(Modifier.weight(1f).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                 TerminalTileCard(
-                                    session = sessions[2],
-                                    isCurrent = (activePage == 2),
-                                    onSelect = { onSelectSession(2) },
-                                    onRename = { onRenameSession(sessions[2]) },
-                                    onClose = { onCloseSession(sessions[2]) },
-                                    onMaximize = { onSelectSession(2); onToggleTiled(false) },
+                                    session = visibleSessions[2],
+                                    isCurrent = (activePage == originalSessionIndex(2)),
+                                    onSelect = { onSelectSession(originalSessionIndex(2)) },
+                                    onRename = { onRenameSession(visibleSessions[2]) },
+                                    onMinimize = { onMinimizeSession(visibleSessions[2]) },
+                                    onClose = { onCloseSession(visibleSessions[2]) },
+                                    onMaximize = { onSelectSession(originalSessionIndex(2)); onToggleTiled(false) },
                                     modifier = Modifier.weight(1f).fillMaxHeight()
                                 )
-                                if (sessions.size > 3) {
+                                if (visibleSessions.size > 3) {
                                     TerminalTileCard(
-                                        session = sessions[3],
-                                        isCurrent = (activePage == 3),
-                                        onSelect = { onSelectSession(3) },
-                                        onRename = { onRenameSession(sessions[3]) },
-                                        onClose = { onCloseSession(sessions[3]) },
-                                        onMaximize = { onSelectSession(3); onToggleTiled(false) },
+                                        session = visibleSessions[3],
+                                        isCurrent = (activePage == originalSessionIndex(3)),
+                                        onSelect = { onSelectSession(originalSessionIndex(3)) },
+                                        onRename = { onRenameSession(visibleSessions[3]) },
+                                        onMinimize = { onMinimizeSession(visibleSessions[3]) },
+                                        onClose = { onCloseSession(visibleSessions[3]) },
+                                        onMaximize = { onSelectSession(originalSessionIndex(3)); onToggleTiled(false) },
                                         modifier = Modifier.weight(1f).fillMaxHeight()
                                     )
                                 } else {
@@ -3603,14 +3640,15 @@ private fun PadWorkspaceMain(
                             horizontalArrangement = Arrangement.spacedBy(6.dp),
                             verticalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
-                            itemsIndexed(sessions, key = { _, s -> s.task.id }) { idx, session ->
+                            itemsIndexed(visibleSessions, key = { _, s -> s.task.id }) { idx, session ->
                                 TerminalTileCard(
                                     session = session,
-                                    isCurrent = (activePage == idx),
-                                    onSelect = { onSelectSession(idx) },
+                                    isCurrent = (activePage == originalSessionIndex(idx)),
+                                    onSelect = { onSelectSession(originalSessionIndex(idx)) },
                                     onRename = { onRenameSession(session) },
+                                    onMinimize = { onMinimizeSession(session) },
                                     onClose = { onCloseSession(session) },
-                                    onMaximize = { onSelectSession(idx); onToggleTiled(false) },
+                                    onMaximize = { onSelectSession(originalSessionIndex(idx)); onToggleTiled(false) },
                                     modifier = Modifier.height(340.dp).fillMaxWidth()
                                 )
                             }
@@ -3658,6 +3696,12 @@ private fun PadWorkspace(
     onMoveAgent: (Int, Int) -> Unit,
 ) {
     var sidebarVisible by rememberSaveable { mutableStateOf(true) }
+    val minimizeSession: (TerminalSessionState) -> Unit = { session ->
+        session.isMinimized = true
+        if (sessions.getOrNull(activePage)?.task?.id == session.task.id) {
+            sessions.indexOfFirst { !it.isMinimized }.takeIf { it >= 0 }?.let(onSelectSession)
+        }
+    }
     Row(Modifier.fillMaxSize()) {
         AnimatedVisibility(
             visible = sidebarVisible,
@@ -3670,6 +3714,7 @@ private fun PadWorkspace(
                     hosts = hosts,
                     agents = agents,
                     sessions = sessions,
+                    tiled = tiled,
                     selectedHost = selectedHost,
                     selectedAgent = selectedAgent,
                     activePage = activePage,
@@ -3713,6 +3758,7 @@ private fun PadWorkspace(
             onToggleSidebar = { sidebarVisible = !sidebarVisible },
             onToggleTiled = onToggleTiled,
             onSelectSession = onSelectSession,
+            onMinimizeSession = minimizeSession,
             onCloseSession = onCloseSession,
             onRenameSession = onRenameSession,
             selectedHost = selectedHost,

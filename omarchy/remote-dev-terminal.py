@@ -1743,7 +1743,7 @@ class App(Gtk.Window):
             window.destroy()
 
     def update_minimized_scroller(self):
-        self.minimized_scroller.set_visible(bool(self.minimized_buttons.get_children()))
+        self.minimized_scroller.set_visible(bool(self.minimized_buttons.get_children()) and not self.tiled)
 
     def minimize_session(self, session):
         if session.get("minimized_button") is not None:
@@ -2043,6 +2043,7 @@ class App(Gtk.Window):
         for child in self.grid.get_children():
             self.grid.remove(child)
         self.count_label.set_text(f"{len(self.sessions)} / 8")
+        self.update_minimized_scroller()
         self.layout_button.set_visible(self.tiled)
         self.layout_button.set_sensitive(len(docked) >= 2)
         if not docked:
@@ -2088,7 +2089,9 @@ class App(Gtk.Window):
             update_agent_icon(self.tab_header_icon, self.session_icon_value(session))
 
     def rebuild_instances_sidebar(self, docked=None):
-        if docked is None:
+        if self.tiled:
+            docked = [s for s in self.sessions if s.get("minimized_button") is not None]
+        elif docked is None:
             docked = [
                 s for s in self.sessions
                 if s.get("floating_window") is None and s.get("minimized_button") is None
@@ -2096,7 +2099,7 @@ class App(Gtk.Window):
         self.instance_buttons = []
         for child in self.instances_list.get_children():
             self.instances_list.remove(child)
-        if self.tiled:
+        if self.tiled and not docked:
             self.instances_section.hide()
             return
         self.instances_heading.show()
@@ -2197,7 +2200,14 @@ class App(Gtk.Window):
             button.connect("button-press-event", on_tab_button_press)
 
             button.add(btn_content)
-            button.connect("clicked", self.activate_instance_tab, terminal)
+            button.connect(
+                "clicked",
+                lambda btn, s=session: (
+                    self.restore_minimized_session(s)
+                    if s.get("minimized_button") is not None
+                    else self.activate_instance_tab(btn, s["terminal"])
+                ),
+            )
             button._running_active = False
             button.connect_after("draw", self.draw_tab_running_outline)
             terminal._running_tab_button = button

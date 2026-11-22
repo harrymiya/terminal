@@ -646,8 +646,10 @@ function render() { renderSessions(); updateEditing(); }
 function renderInstances() {
   const section = $('instances-section'), root = $('instances-list');
   root.replaceChildren();
-  const items = [...sessions.values()].filter(session => !session.minimized && !session.floating);
-  section.hidden = viewMode === 'grid' || !items.length;
+  const items = [...sessions.values()].filter(session => viewMode === 'grid'
+    ? session.minimized
+    : !session.minimized && !session.floating);
+  section.hidden = !items.length;
   if (section.hidden) return;
   for (const session of items) {
     const row = document.createElement('div');
@@ -655,6 +657,7 @@ function renderInstances() {
     const button = document.createElement('button');
     button.type = 'button';
     button.className = `flat-list-button${session.id === activeSession ? ' selected' : ''}`;
+    button.title = session.minimized ? '点击恢复已最小化终端' : '切换到终端';
     const label = document.createElement('span');
     label.className = 'agent-label';
     const icon = sessionAgentIcon(session);
@@ -665,6 +668,10 @@ function renderInstances() {
     label.append(name);
     button.append(label);
     button.addEventListener('click', () => {
+      if (session.minimized) {
+        restoreSession(session.id);
+        return;
+      }
       activeSession = session.id;
       renderSessions();
       session.term.focus();
@@ -721,7 +728,7 @@ function toggleFloat(session){
 }
 function minimizeSession(session){session.minimized=true;session.floating=false;renderSessions();}
 function restoreSession(id){const session=sessions.get(id);if(!session)return;session.minimized=false;activeSession=id;renderSessions();session.term.focus();}
-function renderMinimized(){const bar=$('minimized-sessions');if(!bar)return;bar.replaceChildren();for(const s of sessions.values()){if(!s.minimized)continue;const b=document.createElement('button');b.className='button quiet';b.textContent=`● ${s.title}`;b.title='恢复终端';b.addEventListener('click',()=>restoreSession(s.id));bar.append(b);}}
+function renderMinimized(){const bar=$('minimized-sessions');if(!bar)return;bar.replaceChildren();bar.style.display=viewMode==='grid'?'none':'flex';if(viewMode==='grid')return;for(const s of sessions.values()){if(!s.minimized)continue;const b=document.createElement('button');b.className='button quiet';b.textContent=`● ${s.title}`;b.title='恢复终端';b.addEventListener('click',()=>restoreSession(s.id));bar.append(b);}}
 function chooseImage(session){$('image-file').dataset.sessionId=session.id;$('image-file').value='';$('image-file').click();}
 
 function showForm(title, fields, initial, onSave, onDelete=null) {
