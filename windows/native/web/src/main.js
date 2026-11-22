@@ -11,6 +11,7 @@ const terminalGrid = $('terminal-grid');
 const emptyState = $('empty-state');
 const formDialog = $('form-dialog');
 const form = formDialog.querySelector('form');
+const browseDialog = $('browse-dialog');
 let config = { hosts: [], agents: [], tiled: true, ui_scale: 100 };
 let activeHost = '';
 let activeSession = '';
@@ -18,7 +19,7 @@ let viewMode = 'tabs';
 let tileLayout = 'grid';
 let editing = false;
 let lastConfigSnapshot = '';
-let browseTargetInput = null;
+let directoryBrowser = null;
 const pendingMcp = new Map();
 const sessions = new Map();
 const metricsByHost = new Map();
@@ -460,7 +461,7 @@ function showForm(title, fields, initial, onSave, onDelete=null) {
   if (onDelete) { const del=document.createElement('button'); del.type='button'; del.className='button danger-button delete-form'; del.textContent='删除'; del.addEventListener('click',()=>{formDialog.close('delete');onDelete();}); actions.prepend(del); }
   form.onsubmit=(event)=>{
     event.preventDefault();
-    const values=Object.fromEntries(Object.entries(inputs).map(([k,v])=>[k,v.type==='checkbox'?v.checked:v.type==='password'?v.value:v.value.trim()]));
+    const values=Object.fromEntries(Object.entries(inputs).map(([k,v])=>[k,v.type==='checkbox'?v.checked:k==='path'||v.type==='password'?v.value:v.value.trim()]));
     const error=onSave(values);
     if (error) { $('form-error').textContent=error; return; }
     formDialog.close('save');
@@ -512,7 +513,8 @@ function editWorkspace(index=-1) {
     if(old)host.directories[index]=v;else host.directories.push(v);
     sendConfig();render();return '';
   },old?()=>deleteWorkspace(index):null);
-  browseTargetInput=controls.path;$('form-browse').hidden=false;$('form-browse').onclick=()=>{const requestId=makeId();$('browse-path').value=controls.path.value||'~';$('browse-path').dataset.requestId=requestId;$('browse-list').replaceChildren();$('browse-dialog').showModal();post({action:'browse-directories',request_id:requestId,host,path:$('browse-path').value});};
+  $('form-browse').hidden=false;
+  $('form-browse').onclick=()=>openDirectoryBrowser(host,controls.path);
 }
 function deleteWorkspace(index){const host=currentHost(), item=host?.directories[index];if(!item||!confirm(`删除工作区“${item.name}”？`))return;host.directories.splice(index,1);sendConfig();render();}
 function moveWorkspace(index,offset){const host=currentHost(),items=host?.directories;if(!items||index<0||index+offset<0||index+offset>=items.length)return;[items[index],items[index+offset]]=[items[index+offset],items[index]];sendConfig();render();}
@@ -579,8 +581,66 @@ function handleNativeMessage(event) {
 
 function renderAdminUsers(users){const root=$('admin-users-list');root.replaceChildren();for(const user of users){const row=document.createElement('div');row.className='settings-row';const label=document.createElement('span');label.textContent=`${user.username} · ${user.is_admin?'管理员':'普通用户'}`;const actions=document.createElement('span');const edit=document.createElement('button');edit.className='button';edit.type='button';edit.textContent='编辑';edit.addEventListener('click',()=>adminUserForm(user));const del=document.createElement('button');del.className='button';del.type='button';del.textContent='删除';del.addEventListener('click',()=>{if(confirm(`删除账号 ${user.username} 及其同步资料？`))post({action:'admin-user-delete',user_id:user.id});});actions.append(edit,del);row.append(label,actions);root.append(row);}$('admin-users-dialog').showModal();}
 function adminUserForm(user=null){showForm(user?'编辑同步账号':'添加同步账号',[{key:'username',label:'用户名'},{key:'password',label:'密码（编辑时留空以保留）',type:'password'},{key:'is_admin',label:'管理员',type:'checkbox'}],user,(v)=>{if(!/^[a-z0-9_.-]{3,64}$/i.test(v.username))return '用户名需为 3–64 位字母、数字、点、下划线或连字符。';if(!user&&v.password.length<8)return '密码至少 8 个字符。';post({action:'admin-user-save',user_id:user?.id,username:v.username,password:v.password,is_admin:v.is_admin});return '';});}
-function requestBrowse(path){const requestId=$('browse-path').dataset.requestId;post({action:'browse-directories',request_id:requestId,host:currentHost(),path:path||'~'});}
-function renderBrowse(msg){const pending=pendingMcp.get(msg.request_id);if(pending){pendingMcp.delete(msg.request_id);msg.error?pending.reject(new Error(msg.error)):pending.resolve({path:msg.current,directories:msg.directories||[]});return;}if(msg.request_id!==$('browse-path').dataset.requestId)return;const root=$('browse-list');root.replaceChildren();if(msg.error){const p=document.createElement('p');p.className='form-error';p.textContent=msg.error;root.append(p);return;}$('browse-path').value=msg.current||'/';for(const entry of msg.directories||[]){const b=document.createElement('button');b.type='button';b.className='button';b.textContent=`📁 ${entry.name}`;b.title=entry.path;b.addEventListener('click',()=>{ $('browse-path').value=entry.path;requestBrowse(entry.path);});root.append(b);}}
+function openDirectoryBrowser(host, target) {
+  directoryBrowser = {host, target, current:null, requested:null, requestId:null};
+  browseDialog.showModal();
+  requestBrowse(target.value);
+}
+
+function updateBrowseControls() {
+  const current = directoryBrowser?.current;
+  $('browse-up').disabled = !current || current === '/';
+  $('browse-select').disabled = !current || $('browse-path').value !== current;
+}
+
+function setBrowseStatus(text, error = false) {
+  const status = $('browse-status');
+  status.textContent = text;
+  status.classList.toggle('form-error', error);
+}
+
+function requestBrowse(path) {
+  if (!directoryBrowser || !browseDialog.open) return;
+  const requestId = makeId();
+  const requested = path || '~';
+  Object.assign(directoryBrowser,{requestId, requested, current:null});
+  $('browse-path').value = requested;
+  $('browse-list').replaceChildren();
+  setBrowseStatus('正在读取远端目录…');
+  updateBrowseControls();
+  post({action:'browse-directories',request_id:requestId,host:directoryBrowser.host,path:requested});
+}
+
+function renderBrowse(msg) {
+  const pending = pendingMcp.get(msg.request_id);
+  if (pending) {
+    pendingMcp.delete(msg.request_id);
+    if (msg.error) pending.reject(new Error(msg.error));
+    else pending.resolve({path:msg.current,directories:msg.directories||[]});
+    return;
+  }
+  if (!browseDialog.open || directoryBrowser?.requestId !== msg.request_id) return;
+  directoryBrowser.requestId = null;
+  if (msg.error) {
+    setBrowseStatus(msg.error,true);
+    return;
+  }
+  directoryBrowser.current = msg.current;
+  if ($('browse-path').value === directoryBrowser.requested) $('browse-path').value = msg.current;
+  updateBrowseControls();
+  const entries = msg.directories || [];
+  setBrowseStatus(entries.length ? `${entries.length} 个子目录` : '当前目录没有子目录');
+  const list = $('browse-list');
+  for (const entry of entries) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'button';
+    button.textContent = `📁 ${entry.name}`;
+    button.title = entry.path;
+    button.addEventListener('click',()=>requestBrowse(entry.path));
+    list.append(button);
+  }
+}
 
 async function executeMcpRequest(message){try{const result=await executeMcpTool(message.name,message.arguments||{});post({action:'mcp-result',id:message.id,result});}catch(error){post({action:'mcp-result',id:message.id,error:String(error?.message||error)});}}
 function argText(a,key,fallback=''){return a[key]===undefined||a[key]===null?fallback:String(a[key]);}
@@ -659,11 +719,25 @@ $('sync-now').addEventListener('click',()=>post({action:'sync-now'}));
 $('mcp-guide').addEventListener('click',()=>post({action:'mcp-info'}));
 $('sync-admin-users').addEventListener('click',()=>post({action:'admin-users'}));
 $('admin-user-add').addEventListener('click',()=>adminUserForm());
-$('browse-dialog').querySelector('form').addEventListener('submit',event=>{
+browseDialog.querySelector('form').addEventListener('submit',event=>{
   event.preventDefault();
-  requestBrowse($('browse-path').value.trim()||'~');
+  requestBrowse($('browse-path').value);
 });
-$('browse-select').addEventListener('click',()=>{if(browseTargetInput)browseTargetInput.value=$('browse-path').value.trim();$('browse-dialog').close();});
+$('browse-path').addEventListener('input',updateBrowseControls);
+$('browse-home').addEventListener('click',()=>requestBrowse('~'));
+$('browse-up').addEventListener('click',()=>{
+  const current = directoryBrowser?.current;
+  if (current && current !== '/') requestBrowse(current.slice(0,current.lastIndexOf('/')) || '/');
+});
+$('browse-select').addEventListener('click',()=>{
+  const current = directoryBrowser?.current;
+  if (!current || $('browse-path').value !== current) return;
+  directoryBrowser.target.value = current;
+  browseDialog.close('select');
+});
+browseDialog.addEventListener('close',()=>{
+  if (!browseDialog.open) directoryBrowser = null;
+});
 $('image-file').addEventListener('change',async event=>{const file=event.target.files?.[0],session=sessions.get(event.target.dataset.sessionId);if(!file||!session)return;try{const data=await imageData(file);post({action:'upload-image',id:session.id,data});}catch(error){showError(error.message);}});
 async function imageData(file){let img=new Image();img.src=URL.createObjectURL(file);await img.decode();let width=img.naturalWidth,height=img.naturalHeight,scale=Math.min(1,4096/Math.max(width,height));width=Math.max(1,Math.round(width*scale));height=Math.max(1,Math.round(height*scale));const canvas=document.createElement('canvas');canvas.width=width;canvas.height=height;canvas.getContext('2d').drawImage(img,0,0,width,height);URL.revokeObjectURL(img.src);let quality=.92;let blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/jpeg',quality));if(!blob)throw new Error('无法转换此图片格式');while(blob.size>20*1024*1024&&quality>.35){quality-=.1;blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/jpeg',quality));if(!blob)throw new Error('无法转换此图片格式');}if(blob.size>20*1024*1024)throw new Error('图片转换后仍超过 20 MB');return await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result).split(',')[1]);reader.onerror=()=>reject(reader.error);reader.readAsDataURL(blob);});}
 document.addEventListener('paste',event=>{const item=[...(event.clipboardData?.items||[])].find(x=>x.type.startsWith('image/'));if(!item||!activeSession)return;const file=item.getAsFile();if(!file)return;event.preventDefault();imageData(file).then(data=>post({action:'upload-image',id:activeSession,data})).catch(error=>showError(error.message));});

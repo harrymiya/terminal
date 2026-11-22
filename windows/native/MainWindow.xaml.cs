@@ -1009,29 +1009,61 @@ public partial class MainWindow : Window
     private async Task BrowseDirectoriesAsync(JsonElement message)
     {
         var requestId = Text(message, "request_id");
+        var requested = Text(message, "path");
+        if (requested.Length == 0) requested = "~";
+        object reply;
         try
         {
             var host = JsonNode.Parse(message.GetProperty("host").GetRawText()) as JsonObject ?? throw new InvalidDataException("主机配置无效。");
-            var requested = Text(message, "path"); if (requested.Length == 0) requested = "~";
-            var remote = "dir=" + QuoteShell(requested) + "; case \"$dir\" in '~') dir=\"$HOME\";; '~/'*) dir=\"$HOME/${dir#~/}\";; esac; " +
-                         "[ -d \"$dir\" ] || { echo 'RDT_ERROR 目录不存在或无法访问'; exit 2; }; printf 'RDT_CURRENT %s\\n' \"$(cd -- \"$dir\" && pwd)\"; " +
-                         "find \"$dir\" -mindepth 1 -maxdepth 1 -type d -printf 'RDT_DIR %f\\t%p\\n' 2>/dev/null | sort";
-            var result = await RunSshCommandAsync(host, remote, null, 25_000).ConfigureAwait(false);
-            if (result.ExitCode != 0) throw new InvalidOperationException(result.Error.Trim().Length > 0 ? result.Error.Trim() : "读取远端目录失败。");
-            var entries = new JsonArray(); var current = requested;
-            foreach (var line in result.Output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+            const string listingScript = """
+                dir=$1
+                case "$dir" in
+                    '~') dir=$HOME ;;
+                    '~/'*) dir="$HOME/${dir#??}" ;;
+                    -*) dir="./$dir" ;;
+                esac
+                unset CDPATH
+                if ! cd "$dir" 2>/dev/null || [ ! -r . ] || [ ! -x . ]; then
+                    printf '%s\n' '目录不存在或没有读取权限。' >&2
+                    exit 2
+                fi
+                printf '\000RDT_DIRECTORY_LIST\000%s\000' "$PWD"
+                for entry in ./* ./.[!.]* ./..?*; do
+                    if [ -d "$entry" ]; then
+                        printf '%s\000' "${entry#./}"
+                    fi
+                done
+                """;
+            var remote = "sh -c " + QuoteShell(listingScript.Replace("\r\n", "\n")) + " rdt-browse " + QuoteShell(requested);
+            var result = await Task.Run(() => RunSshCommandAsync(host, remote, null, 25_000)).ConfigureAwait(false);
+            if (result.ExitCode != 0)
             {
-                if (line.StartsWith("RDT_CURRENT ", StringComparison.Ordinal)) current = line.Substring(12).Trim();
-                else if (line.StartsWith("RDT_DIR ", StringComparison.Ordinal))
-                {
-                    var parts = line.Substring(8).Split(new[] { '\t' }, 2);
-                    if (parts.Length == 2 && parts[1].StartsWith("/", StringComparison.Ordinal)) entries.Add(new JsonObject { ["name"] = parts[0], ["path"] = parts[1] });
-                }
-                else if (line.StartsWith("RDT_ERROR ", StringComparison.Ordinal)) throw new InvalidOperationException(line.Substring(10));
+                var error = result.Error.Trim();
+                if (error.IndexOf("Host key verification failed", StringComparison.OrdinalIgnoreCase) >= 0)
+                    error = "SSH 主机指纹未确认或已变更。请先核对主机指纹，再浏览远端目录。";
+                throw new InvalidOperationException(error.Length > 0 ? error : "读取远端目录失败。");
             }
-            Send(new { type = "browse-result", request_id = requestId, current, directories = entries });
+
+            const string marker = "\0RDT_DIRECTORY_LIST\0";
+            var start = result.Output.IndexOf(marker, StringComparison.Ordinal);
+            if (start < 0 || !result.Output.EndsWith("\0", StringComparison.Ordinal))
+                throw new InvalidDataException("远端未返回有效的目录列表。");
+            var fields = result.Output.Substring(start + marker.Length).Split('\0');
+            var current = fields[0];
+            if (!current.StartsWith("/", StringComparison.Ordinal))
+                throw new InvalidDataException("远端未返回有效的绝对路径。");
+            var prefix = current.TrimEnd('/') + "/";
+            var entries = fields.Skip(1)
+                .Where(name => name.Length > 0 && name.IndexOf('/') < 0 && name != "." && name != "..")
+                .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
+                .Select(name => new { name, path = prefix + name }).ToArray();
+            reply = new { type = "browse-result", request_id = requestId, current, directories = entries };
         }
-        catch (Exception ex) { Send(new { type = "browse-result", request_id = requestId, error = ex.Message, current = Text(message, "path"), directories = new JsonArray() }); }
+        catch (Exception ex)
+        {
+            reply = new { type = "browse-result", request_id = requestId, error = ex.Message, current = requested, directories = new JsonArray() };
+        }
+        await Dispatcher.InvokeAsync(() => Send(reply)).Task.ConfigureAwait(false);
     }
 
     private async Task<(int ExitCode, string Output, string Error)> RunSshCommandAsync(JsonObject host, string remote, byte[]? input, int timeoutMs)

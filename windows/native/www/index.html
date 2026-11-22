@@ -69,6 +69,27 @@
   </div><div class="dialog-actions"><button class="button" type="button" data-close-dialog>取消</button><button id="settings-save" class="button primary" type="submit" value="save">保存</button></div></form></dialog>
   <input id="image-file" type="file" accept="image/*" hidden>
   <dialog id="admin-users-dialog" class="dialog"><form method="dialog"><div class="dialog-heading"><h2>同步用户维护</h2><button class="icon-button" type="button" data-close-dialog aria-label="关闭">×</button></div><div id="admin-users-list" class="form-fields"></div><div class="dialog-actions"><button id="admin-user-add" class="button" type="button">添加用户</button><button class="button" type="button" data-close-dialog>关闭</button></div></form></dialog>
-  <dialog id="browse-dialog" class="dialog"><form method="dialog"><div class="dialog-heading"><h2>浏览远端目录</h2><button class="icon-button" type="button" data-close-dialog aria-label="关闭">×</button></div><div class="settings-row"><input id="browse-path" class="input" value="~"><button id="browse-go" class="button" type="submit">打开</button></div><div id="browse-list" class="form-fields browse-list"></div><div class="dialog-actions"><button class="button" type="button" data-close-dialog>取消</button><button id="browse-select" class="button primary" type="button">选择当前目录</button></div></form></dialog>
+  <dialog id="browse-dialog" class="dialog" aria-labelledby="browse-title">
+    <form method="dialog">
+      <div class="dialog-heading">
+        <h2 id="browse-title">浏览远端目录</h2>
+        <button class="icon-button" type="button" data-close-dialog aria-label="关闭">×</button>
+      </div>
+      <div class="browse-toolbar">
+        <button id="browse-up" class="button" type="button" disabled>上一级</button>
+        <button id="browse-home" class="button" type="button">主目录</button>
+      </div>
+      <div class="browse-toolbar">
+        <input id="browse-path" class="input" value="~" aria-label="远端目录路径" autofocus>
+        <button id="browse-go" class="button" type="submit">打开</button>
+      </div>
+      <div id="browse-status" class="muted small" role="status"></div>
+      <div id="browse-list" class="form-fields browse-list"></div>
+      <div class="dialog-actions">
+        <button class="button" type="button" data-close-dialog>取消</button>
+        <button id="browse-select" class="button primary" type="button" disabled>选择当前目录</button>
+      </div>
+    </form>
+  </dialog>
 </body>
 </html>

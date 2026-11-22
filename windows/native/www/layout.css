@@ -413,6 +413,41 @@
   touch-action: none;
 }
 
+#browse-dialog {
+  width: min(560px, calc(100% - 24px));
+}
+
+.browse-toolbar {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.browse-toolbar .input {
+  flex: 1;
+  min-width: 0;
+}
+
+.browse-toolbar .button {
+  flex-shrink: 0;
+}
+
+#browse-status {
+  min-height: 1.4em;
+  overflow-wrap: anywhere;
+}
+
+#browse-list {
+  gap: 4px;
+  margin-top: 5px;
+}
+
+#browse-list .button {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .sidebar-resizer:hover,
 body.resizing-sidebar .sidebar-resizer {
   background: var(--accent);
