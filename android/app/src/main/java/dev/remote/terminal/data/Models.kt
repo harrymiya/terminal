@@ -393,7 +393,7 @@ class LocalStore(context: Context) {
                 AgentPreset("codex", "Codex", "codex", "✳"),
                 AgentPreset("opencode", "OpenCode", "opencode", "⌘"),
                 AgentPreset("antigravity", "Antigravity", "agy", "🚀"),
-                AgentPreset("shell", "Shell", "bash -l", "\$_"),
+                AgentPreset("shell", "Shell", "bash -l", "brand:shell"),
             )
         }
         val addAntigravity = !preferences.getBoolean("antigravity_preset_migrated", false)

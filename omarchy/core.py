@@ -20,7 +20,7 @@ DEFAULT_AGENTS = [
     {"name": "Codex", "command": "codex"},
     {"name": "OpenCode", "command": "opencode"},
     {"name": "Antigravity", "command": "agy"},
-    {"name": "Shell", "command": "bash -l"},
+    {"name": "Shell", "command": "bash -l", "icon": "brand:shell"},
 ]
 
 MAX_IMAGE_BYTES = 20 * 1024 * 1024

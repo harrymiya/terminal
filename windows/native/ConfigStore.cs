@@ -29,7 +29,7 @@ internal static class ConfigStore
             new JsonObject { ["name"] = "Codex", ["command"] = "codex" },
             new JsonObject { ["name"] = "OpenCode", ["command"] = "opencode" },
             new JsonObject { ["name"] = "Antigravity", ["command"] = "agy" },
-            new JsonObject { ["name"] = "Shell", ["command"] = "bash -l" });
+            new JsonObject { ["name"] = "Shell", ["command"] = "bash -l", ["icon"] = "brand:shell" });
         config["sync_url"] ??= "";
         config["sync_token"] ??= "";
         config["sync_username"] ??= "";

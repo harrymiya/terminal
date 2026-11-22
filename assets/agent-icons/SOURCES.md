@@ -4,6 +4,7 @@
 
 | 图标 | 来源 |
 | --- | --- |
+| Shell | Remote Dev Terminal 原创终端图标 |
 | OpenCode | [OpenCode 品牌资源](https://opencode.ai/brand) |
 | Codex | [OpenAI Codex 应用图标](https://images.ctfassets.net/kftzwdyauwt9/YgXvGzKvVcDvpJGOFyroe/777616dd860276400c9c955688dce373/codex-app.png.png) |
 | Antigravity | [Google Antigravity 媒体资源](https://antigravity.google/press) |

@@ -178,7 +178,7 @@ function normalizeConfig(raw) {
   config = raw && typeof raw === 'object' ? raw : { hosts: [], agents: [] };
   if (!Array.isArray(config.hosts)) config.hosts=[];
   if (!Array.isArray(config.agents)) config.agents=[];
-  if (!config.agents.length) config.agents=[{name:'Codex',command:'codex'},{name:'OpenCode',command:'opencode'},{name:'Antigravity',command:'agy'},{name:'Shell',command:'bash -l'}];
+  if (!config.agents.length) config.agents=[{name:'Codex',command:'codex'},{name:'OpenCode',command:'opencode'},{name:'Antigravity',command:'agy'},{name:'Shell',command:'bash -l',icon:'brand:shell'}];
   for (const [i,host] of config.hosts.entries()) {
     host.id ||= makeId();
     host.directories ||= [];
