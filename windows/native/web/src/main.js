@@ -27,6 +27,7 @@ const quotaByAgent = new Map();
 const sshEndpoints = new Map();
 const encoder = new TextEncoder();
 const tileLayouts = {grid:'⊞ 网格', columns:'⬓ 左右', rows:'⬒ 上下'};
+const uiScale = {min:50, max:200, step:5};
 
 function post(message) {
   if (window.chrome?.webview) window.chrome.webview.postMessage(message);
@@ -65,20 +66,23 @@ function terminalTheme(t=currentTheme()) {
   const palette=t.term_palette||['#182230','#b91c1c','#15803d','#a16207','#1d4ed8','#7e22ce','#0e7490','#475569','#64748b','#dc2626','#16a34a','#ca8a04','#2563eb','#9333ea','#0284c7','#0f172a'];
   return {background:t.term_bg,foreground:t.term_fg,cursor:t.cursor_color||t.accent,selectionBackground:t.highlight_bg||t.accent_bg,selectionForeground:t.highlight_fg||t.accent_fg,black:palette[0],red:palette[1],green:palette[2],yellow:palette[3],blue:palette[4],magenta:palette[5],cyan:palette[6],white:palette[7],brightBlack:palette[8],brightRed:palette[9],brightGreen:palette[10],brightYellow:palette[11],brightBlue:palette[12],brightMagenta:palette[13],brightCyan:palette[14],brightWhite:palette[15]};
 }
-function terminalFontSize(scale=Number($('scale').value)) {
+function terminalFontSize(scale=config.ui_scale) {
   const factor=scale>=100?scale/100:Math.max(.88,1-(1-scale/100)*.24);
   return 13*factor;
 }
-function sidebarMinimumWidth(scale=Number($('scale').value)) {
+function sidebarMinimumWidth(scale=config.ui_scale) {
   const target=scale>=100?Math.round(250*scale/100):Math.max(210,Math.round(250*scale/100));
   return target+32;
 }
-function applyUiScale(scale=Number($('scale').value)) {
-  const value=Math.max(50,Math.min(200,Number(scale)||100));
-  $('scale').value=String(value);
+function applyUiScale(scale=config.ui_scale) {
+  const value=Math.max(uiScale.min,Math.min(uiScale.max,Math.round(Number(scale) || 100)));
+  config.ui_scale=value;
+  $('scale-value').value=value + '%';
+  $('scale-down').disabled=value === uiScale.min;
+  $('scale-up').disabled=value === uiScale.max;
   document.documentElement.style.setProperty('--ui-scale',String(value/100));
   const minimum=sidebarMinimumWidth(value);
-  config.sidebar_width=Math.max(minimum,Number(config.sidebar_width)||294);
+  config.sidebar_width=Math.min(2000,Math.max(minimum,Number(config.sidebar_width)||294));
   document.querySelector('.sidebar').style.width=`${config.sidebar_width}px`;
   for(const session of sessions.values()) {
     session.term.options.fontSize=terminalFontSize(value);
@@ -102,7 +106,6 @@ function sendConfig(sshPasswordChange) {
   if(JSON.stringify(previous.agents||[])!==JSON.stringify(config.agents||[]))config.agents_dirty=true;
   config.current_host_id = activeHost;
   config.tiled = viewMode === 'grid';
-  config.ui_scale = Number($('scale').value);
   config.tile_layout = tileLayout;
   lastConfigSnapshot=JSON.stringify(config);
   post({ action: 'save-config', config, ...(sshPasswordChange ? {ssh_password_change:sshPasswordChange} : {}) });
@@ -187,14 +190,11 @@ function normalizeConfig(raw) {
   activeHost = config.hosts.some(host=>host.id===config.current_host_id) ? config.current_host_id : config.hosts[0]?.id || '';
   viewMode = config.tiled ? 'grid' : 'tabs';
   tileLayout=Object.hasOwn(tileLayouts,config.tile_layout)?config.tile_layout:'grid';
-  $('scale').value = Math.min(200, Math.max(50, Number(config.ui_scale)||100));
-  config.sidebar_width=Math.min(2000,Math.max(sidebarMinimumWidth(Number($('scale').value)),Number(config.sidebar_width)||294));
-  document.querySelector('.sidebar').style.width=`${config.sidebar_width}px`;
   document.body.classList.toggle('sidebar-hidden',Boolean(config.sidebar_hidden));
   $('sync-account').textContent=config.sync_username||'未登录';
   $('sync-admin-users').hidden=!config.sync_is_admin;
   applyTheme();
-  applyUiScale(Number($('scale').value));
+  applyUiScale();
   lastConfigSnapshot=JSON.stringify(config);
   render();
 }
@@ -671,7 +671,7 @@ function resolveMcpWorkspace(host,a){const list=host.directories||[];let index=a
 function resolveMcpSession(a){const list=[...sessions.values()];let index=a.session_id?list.findIndex(s=>s.id===a.session_id):a.session_index!==undefined?Number(a.session_index):list.findIndex(s=>s.id===activeSession);if(index<0||index>=list.length)throw new Error('未找到指定终端会话');return [index,list[index]];}
 function sessionState(s,index){return {index,session_id:s.id,display_name:s.title,host_id:s.host.id,host_name:s.host.name,directory_name:s.workspace.name,directory_path:s.workspace.path,agent_name:s.agent.name,agent_command:s.agent.command,connected:s.connected,view_mode:viewMode,minimized:Boolean(s.minimized),floating:Boolean(s.floating)};}
 async function executeMcpTool(name,a){
-  if(name==='get_app_state')return {platform:'windows',version:'1.0.0',tiled:viewMode==='grid',tile_layout:tileLayout,ui_scale:Number($('scale').value),sidebar_visible:!document.body.classList.contains('sidebar-hidden'),sidebar_width:document.querySelector('.sidebar').getBoundingClientRect().width,edit_mode:editing,auto_enter:Boolean(config.auto_enter),auto_enter_delay:Number(config.auto_enter_delay)||1000,auto_sync_enabled:Boolean(config.auto_sync_enabled),sync_interval_seconds:Number(config.sync_interval_seconds)||5,sync_url:config.sync_url||'',sync_username:config.sync_username||'',current_host_index:config.hosts.findIndex(h=>h.id===activeHost),current_agent_index:currentHost()?.selected_agent||0,hosts:config.hosts.map((h,index)=>({index,id:h.id,name:h.name,username:h.username,lan_address:h.lan_address||'',lan_port:h.lan_port,external_address:h.external_address||'',external_port:h.external_port,port:h.port,sync_id:h.sync_id||'',has_credential:Boolean(h.credential_id),selected_agent:h.selected_agent||0,directories:(h.directories||[]).map((w,index)=>({index,name:w.name,path:w.path})),agents:agentsForHost(h).map((agent,index)=>({index,name:agent.name,command:agent.command}))})),sessions:[...sessions.values()].map(sessionState)};
+  if(name==='get_app_state')return {platform:'windows',version:'1.0.0',tiled:viewMode==='grid',tile_layout:tileLayout,ui_scale:config.ui_scale,sidebar_visible:!document.body.classList.contains('sidebar-hidden'),sidebar_width:document.querySelector('.sidebar').getBoundingClientRect().width,edit_mode:editing,auto_enter:Boolean(config.auto_enter),auto_enter_delay:Number(config.auto_enter_delay)||1000,auto_sync_enabled:Boolean(config.auto_sync_enabled),sync_interval_seconds:Number(config.sync_interval_seconds)||5,sync_url:config.sync_url||'',sync_username:config.sync_username||'',current_host_index:config.hosts.findIndex(h=>h.id===activeHost),current_agent_index:currentHost()?.selected_agent||0,hosts:config.hosts.map((h,index)=>({index,id:h.id,name:h.name,username:h.username,lan_address:h.lan_address||'',lan_port:h.lan_port,external_address:h.external_address||'',external_port:h.external_port,port:h.port,sync_id:h.sync_id||'',has_credential:Boolean(h.credential_id),selected_agent:h.selected_agent||0,directories:(h.directories||[]).map((w,index)=>({index,name:w.name,path:w.path})),agents:agentsForHost(h).map((agent,index)=>({index,name:agent.name,command:agent.command}))})),sessions:[...sessions.values()].map(sessionState)};
   if(name==='select_host'){const [index,host]=resolveMcpHost(a);activeHost=host.id;sendConfig();render();return {selected_host_index:index,host:{id:host.id,name:host.name,username:host.username}};}
   if(['add_host','edit_host','delete_host'].includes(name)){
     if(name==='delete_host'){const [index,host]=resolveMcpHost(a);if(host.credential_id)post({action:'clear-host-password',credential_id:host.credential_id});post({action:'delete-host-profile',host_id:host.id});config.hosts.splice(index,1);activeHost=config.hosts[0]?.id||'';sendConfig();render();return {deleted_host_id:host.id,deleted_host_name:host.name};}
@@ -700,7 +700,7 @@ async function executeMcpTool(name,a){
   if(name==='set_view_mode'){viewMode=a.tiled?'grid':'tabs';config.tiled=Boolean(a.tiled);sendConfig();renderSessions();return {tiled:Boolean(a.tiled)};}
   if(name==='set_tile_layout'){if(!Object.hasOwn(tileLayouts,a.layout))throw new Error('layout 必须为 grid、columns 或 rows');tileLayout=a.layout;sendConfig();renderSessions();return {tile_layout:tileLayout};}
   if(name==='toggle_sidebar'){if(a.visible!==undefined){config.sidebar_hidden=!a.visible;document.body.classList.toggle('sidebar-hidden',!a.visible);fitSessions();sendConfig();}if(a.width!==undefined){config.sidebar_width=Math.max(sidebarMinimumWidth(),Math.min(2000,Number(a.width)));document.querySelector('.sidebar').style.width=`${config.sidebar_width}px`;fitSessions();sendConfig();}if(a.edit_mode!==undefined){editing=Boolean(a.edit_mode);updateEditing();}return {sidebar_visible:!document.body.classList.contains('sidebar-hidden'),sidebar_width:document.querySelector('.sidebar').getBoundingClientRect().width,edit_mode:editing};}
-  if(name==='set_ui_scale'){const scale=Number(a.scale);if(!Number.isInteger(scale)||scale<50||scale>200)throw new Error('scale 必须在 50 到 200 之间');applyUiScale(scale);sendConfig();return {ui_scale:scale};}
+  if(name==='set_ui_scale'){const scale=Number(a.scale);if(!Number.isInteger(scale)||scale<uiScale.min||scale>uiScale.max)throw new Error('scale 必须在 50 到 200 之间');applyUiScale(scale);sendConfig();return {ui_scale:scale};}
   if(name==='update_settings'){for(const key of ['auto_enter','auto_sync_enabled'])if(a[key]!==undefined)config[key]=Boolean(a[key]);for(const key of ['auto_enter_delay','sync_interval_seconds'])if(a[key]!==undefined)config[key]=Number(a[key]);if(a.sync_url!==undefined&&config.sync_url!==a.sync_url){config.sync_url=String(a.sync_url).trim().replace(/\/$/,'');config.sync_token='';}sendConfig();return {auto_enter:Boolean(config.auto_enter),auto_enter_delay:Number(config.auto_enter_delay)||1000,auto_sync_enabled:Boolean(config.auto_sync_enabled),sync_interval_seconds:Number(config.sync_interval_seconds)||5,sync_url:config.sync_url||''};}
   if(name==='trigger_sync'){post({action:'sync-now'});return {triggered:true};}
   if(name==='get_ssh_public_key'){return await new Promise((resolve,reject)=>{const request_id=makeId();pendingMcp.set(request_id,{resolve,reject});post({action:'get-ssh-public-key',request_id,generate_if_missing:Boolean(a.generate_if_missing)});});}
@@ -725,8 +725,14 @@ $('layout-grid').addEventListener('click',()=>{
   sendConfig();
   renderSessions();
 });
-$('scale').addEventListener('input',()=>applyUiScale());
-$('scale').addEventListener('change',()=>sendConfig());
+$('scale-down').addEventListener('click',()=>{
+  applyUiScale(config.ui_scale-uiScale.step);
+  sendConfig();
+});
+$('scale-up').addEventListener('click',()=>{
+  applyUiScale(config.ui_scale+uiScale.step);
+  sendConfig();
+});
 for(const [id,theme] of Object.entries(THEMES)) $('theme-select').add(new Option(theme.label,id));
 for (const button of document.querySelectorAll('button[data-close-dialog]')) {
   button.addEventListener('click', () => button.closest('dialog').close('cancel'));

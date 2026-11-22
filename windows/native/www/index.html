@@ -49,7 +49,17 @@
       <main class="main-pane">
         <div class="toolbar">
           <div class="toolbar-left"><button id="sidebar-toggle" class="button" title="显示或隐藏侧边栏">☰ 菜单</button><span class="workspace-title">工作区</span></div>
-          <div id="minimized-sessions" class="minimized-sessions"></div><div class="toolbar-right"><span id="session-count" class="muted small">0 / 8</span><button id="view-mode" class="button" title="切换标签视图和平铺视图">标签模式</button><button id="layout-grid" class="button layout-button" title="切换平铺布局（网格 / 左右 / 上下）">⊞ 网格</button><label class="scale-control" title="界面缩放">缩放 <input id="scale" type="range" min="50" max="200" step="1" value="100"></label></div>
+          <div id="minimized-sessions" class="minimized-sessions"></div>
+          <div class="toolbar-right">
+            <span id="session-count" class="muted small">0 / 8</span>
+            <button id="view-mode" class="button" title="切换标签视图和平铺视图">标签模式</button>
+            <button id="layout-grid" class="button layout-button" title="切换平铺布局（网格 / 左右 / 上下）">⊞ 网格</button>
+            <div class="scale-control" role="group" aria-label="界面缩放">
+              <button id="scale-down" class="button scale-step" type="button" title="缩小界面" aria-label="缩小界面">−</button>
+              <output id="scale-value" aria-label="当前缩放比例">100%</output>
+              <button id="scale-up" class="button scale-step" type="button" title="放大界面" aria-label="放大界面">+</button>
+            </div>
+          </div>
         </div>
         <div id="session-stage" class="session-stage">
           <div id="empty-state" class="empty-state"><div class="empty-icon">⌁</div><h2>连接到开发主机</h2><p>从侧边栏选择工作区开始，或先添加主机和工作区。</p><button id="empty-add-host" class="button primary">添加主机</button></div>

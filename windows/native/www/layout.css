@@ -82,6 +82,32 @@
   white-space: nowrap;
 }
 
+.scale-control {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.scale-control output {
+  min-width: 5ch;
+  text-align: center;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.scale-step {
+  width: 26px;
+  padding: 0;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.scale-step:disabled {
+  opacity: .45;
+  cursor: default;
+}
+
 .flat-list {
   display: flex;
   flex-direction: column;
