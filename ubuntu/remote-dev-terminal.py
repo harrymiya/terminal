@@ -948,6 +948,10 @@ def build_theme_css(theme_name):
 class App(Gtk.Window):
     def __init__(self):
         super().__init__(title="Remote Dev Terminal")
+        try:
+            self.set_icon_from_file(str(Path(__file__).with_name("remote-dev-terminal.svg")))
+        except GLib.Error:
+            self.set_icon_name("remote-dev-terminal")
         self.set_default_size(1200, 760)
         self.set_size_request(700, 450)
         self.sessions = []
@@ -4365,5 +4369,6 @@ class App(Gtk.Window):
 
 
 if __name__ == "__main__":
+    GLib.set_prgname("remote-dev-terminal")
     App().show_all()
     Gtk.main()

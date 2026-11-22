@@ -7,7 +7,10 @@ fi
 data_dir="${XDG_DATA_HOME:-$HOME/.local/share}"
 install_dir="$data_dir/remote-dev-terminal"
 bin_dir="$HOME/.local/bin"
-mkdir -p "$install_dir" "$data_dir/applications" "$bin_dir"
+icon_dir="$data_dir/icons/hicolor/scalable/apps"
+mkdir -p "$install_dir" "$data_dir/applications" "$bin_dir" "$icon_dir"
+install -m 644 "$source_dir/remote-dev-terminal.svg" "$install_dir/remote-dev-terminal.svg"
+install -m 644 "$source_dir/remote-dev-terminal.svg" "$icon_dir/remote-dev-terminal.svg"
 install -m 644 "$source_dir/core.py" "$install_dir/core.py"
 install -m 644 "$source_dir/host_metrics.py" "$install_dir/host_metrics.py"
 install -m 644 "$source_dir/version.py" "$install_dir/version.py"
@@ -28,7 +31,7 @@ Type=Application
 Name=Remote Dev Terminal
 Comment=Remote development terminal
 Exec="$escaped/remote-dev-terminal.py"
-Icon=utilities-terminal
+Icon=remote-dev-terminal
 Terminal=false
 Categories=Development;TerminalEmulator;Network;
 EOF

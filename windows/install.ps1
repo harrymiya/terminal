@@ -31,6 +31,7 @@ $programs = [Environment]::GetFolderPath('Programs')
 $shortcutPath = Join-Path $programs 'Remote Dev Terminal.lnk'
 $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcutPath)
 $shortcut.TargetPath = Join-Path $installDir 'RemoteDevTerminal.exe'
+$shortcut.IconLocation = "$($shortcut.TargetPath),0"
 $shortcut.WorkingDirectory = $installDir
 $shortcut.Description = 'Windows 原生 SSH 开发终端'
 $shortcut.Save()
