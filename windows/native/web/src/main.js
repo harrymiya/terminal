@@ -314,6 +314,7 @@ function renderAgents() {
       renderQuotaBatteries(detail,quota,{showReset:true});
       if (!quota?.windows?.length) detail.title=quota?.error||'正在获取额度…';
     } else {
+      button.classList.add('with-command');
       detail.className='flat-list-detail';
       detail.textContent=agent.command;
     }

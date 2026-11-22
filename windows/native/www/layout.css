@@ -121,6 +121,18 @@
   container-type: inline-size;
 }
 
+.flat-list-button.with-command {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.with-command .flat-list-detail {
+  max-width: 55%;
+  text-align: right;
+}
+
 .host-label {
   display: flex;
   flex-direction: column;
