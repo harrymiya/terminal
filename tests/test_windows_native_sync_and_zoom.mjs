@@ -219,6 +219,7 @@ assert.match(windowsUi, /for \(const group of groupSessionsByDeveloper\(items\)\
 assert.match(windowsUi, /name\.textContent = grouped \? sessionWorkspaceLabel\(session\) : session\.title/);
 assert.match(layoutCss, /body\.view-tabs \.terminal-quota:not\(\[hidden\]\)\s*\{[^}]*display:\s*inline-flex;/s);
 assert.match(layoutCss, /\.instance-developer-children\s*\{[^}]*border-left:\s*1px dotted/s);
+assert.match(layoutCss, /\.instance-developer-children\s*\{[^}]*gap:\s*4px;/s);
 
 // 7. Floating header drag & geometry clamping checks
 const firstFloat = defaultFloatingRect(1000, 700, 0);

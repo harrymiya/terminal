@@ -214,6 +214,9 @@
 }
 
 .instance-developer-children {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
   margin-left: 12px;
   padding-left: 8px;
   border-left: 1px dotted var(--line);

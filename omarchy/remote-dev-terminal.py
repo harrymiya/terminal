@@ -2243,7 +2243,7 @@ class App(Gtk.Window):
                     developer_name = (agent.get("name") or item.get("agent_name") or
                                       agent.get("command") or item.get("agent_command") or "开发者")
                     heading.pack_start(Gtk.Label(label=developer_name, xalign=0), True, True, 0)
-                    target_rows = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+                    target_rows = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
                     target_rows.get_style_context().add_class("instance-developer-children")
                     group.pack_start(heading, False, False, 0)
                     group.pack_start(target_rows, False, False, 0)

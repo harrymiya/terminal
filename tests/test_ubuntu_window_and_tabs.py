@@ -201,6 +201,7 @@ class UbuntuWindowAndTabsTest(unittest.TestCase):
         self.assertEqual(len(group_children), 2)
         heading, instance_rows = group_children
         self.assertEqual(heading.get_children()[-1].get_text(), "Codex")
+        self.assertEqual(instance_rows.get_spacing(), 4)
         rows = instance_rows.get_children()
         self.assertEqual(len(rows), 2)
         first_connector, first_button = rows[0].get_children()
