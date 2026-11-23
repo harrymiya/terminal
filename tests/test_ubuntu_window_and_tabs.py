@@ -352,6 +352,7 @@ class UbuntuWindowAndTabsTest(unittest.TestCase):
 
     def test_sidebar_width_clamps_and_restores_after_hiding(self):
         Gtk = app_module.Gtk
+        self.assertEqual(self.app.sidebar.get_margin_start(), self.app.sidebar.get_margin_end())
         self.app.show_all()
         while Gtk.events_pending():
             Gtk.main_iteration()

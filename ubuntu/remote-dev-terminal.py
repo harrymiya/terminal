@@ -1115,7 +1115,7 @@ class App(Gtk.Window):
         sidebar_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         sidebar_frame.pack_start(sidebar_scroll, True, True, 0)
         sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=16)
-        sidebar.set_margin_end(4)
+        sidebar.set_margin_end(16)
         self.sidebar = sidebar
         sidebar.set_size_request(self.sidebar_target_width(), -1)
         sidebar_scroll.add(sidebar)
