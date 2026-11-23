@@ -184,6 +184,37 @@ class UbuntuWindowAndTabsTest(unittest.TestCase):
         self.assertIn(("close", "sess_a"), clicked)
         self.assertEqual(self.app.tabs.get_current_page(), 1)
 
+    def test_repeated_developer_instances_form_a_tree_with_workspace_labels(self):
+        Gtk = app_module.Gtk
+        first, _ = self.make_session("project-a")
+        second, _ = self.make_session("project-b")
+        for session in (first, second):
+            session["agent"] = {"name": "Codex", "command": "codex"}
+        first["item"].update({"agent_name": "Codex", "agent_command": "codex", "display_name": "Codex · project-a"})
+        second["item"].update({"agent_name": "Codex", "agent_command": "codex", "display_name": "Renamed docs"})
+        self.app.tiled = False
+        self.app.rebuild_view()
+
+        groups = self.app.instances_list.get_children()
+        self.assertEqual(len(groups), 1)
+        group_children = groups[0].get_children()
+        self.assertEqual(len(group_children), 2)
+        heading, instance_rows = group_children
+        self.assertEqual(heading.get_children()[-1].get_text(), "Codex")
+        rows = instance_rows.get_children()
+        self.assertEqual(len(rows), 2)
+        first_connector, first_button = rows[0].get_children()
+        second_connector, second_button = rows[1].get_children()
+        self.assertTrue(first_connector.get_style_context().has_class("instance-tree-connector"))
+        self.assertTrue(second_connector.get_style_context().has_class("instance-tree-connector"))
+        self.assertEqual(first_connector.get_text(), "├┄")
+        self.assertEqual(second_connector.get_text(), "└┄")
+        first_button_children = first_button.get_child().get_children()
+        second_button_children = second_button.get_child().get_children()
+        self.assertEqual(first_button_children[0].get_text(), "project-a")
+        self.assertEqual(second_button_children[0].get_text(), "Renamed docs")
+        self.assertFalse(any(isinstance(child, Gtk.Image) for child in first_button_children))
+
     def make_session(self, name):
         Gtk, Vte = app_module.Gtk, app_module.Vte
         terminal = Vte.Terminal()

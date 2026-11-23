@@ -87,6 +87,19 @@ def session_display_name(item, agent=None):
     return f"{agent_name} · {workspace_name}" if not current or current == legacy_default else current
 
 
+def session_workspace_label(item, agent=None):
+    item = item or {}
+    agent = agent or {}
+    workspace_name = item.get("directory_name") or item.get("directory_path") or "终端"
+    agent_name = agent.get("name") or item.get("agent_name") or item.get("agent_command")
+    current = item.get("display_name")
+    if not agent_name:
+        return current or workspace_name
+    if current in (None, "", f"{agent_name} · {workspace_name}", f"{workspace_name} · {agent_name}"):
+        return workspace_name
+    return current
+
+
 def agent_icon_picker(selected):
     _, catalog = agent_icon_catalog()
     model = Gtk.ListStore(str, str, GdkPixbuf.Pixbuf)
@@ -986,6 +999,9 @@ def build_theme_css(theme_name):
         }}
         .host-button:hover, .host-button.agent-selected {{ background-image: none; background-color: {t["control_hover"]}; border-color: {t["accent"]}; color: {t["fg"]}; }}
         .host-selected {{ background-image: none; background-color: {t["accent_bg"]}; border-color: {t["accent"]}; color: {t["accent_fg"]}; font-weight: bold; }}
+        .instance-developer-heading {{ margin-top: 3px; padding: 2px 4px; color: {t["tab_fg"]}; font-size: 11px; font-weight: bold; }}
+        .instance-developer-children {{ margin-left: 4px; }}
+        .instance-tree-connector {{ color: {t["border_subtle"]}; font-family: monospace; font-size: 14px; }}
         .project-button {{
             background-image: none;
             background-color: {t["control_bg"]};
@@ -2194,12 +2210,59 @@ class App(Gtk.Window):
         active_terminal = self.tabs.get_nth_page(current_page) if current_page >= 0 else None
         if active_terminal is None and getattr(self, "active_terminal", None) in [s["terminal"] for s in docked]:
             active_terminal = self.active_terminal
+        sessions_by_agent = {}
+        agent_keys = {}
+        for session in docked:
+            item = session.get("item") or {}
+            agent = session.get("agent") or {}
+            developer_name = agent.get("name") or item.get("agent_name") or ""
+            developer_command = agent.get("command") or item.get("agent_command") or ""
+            key = (str(developer_name), str(developer_command)) if developer_name or developer_command else ("session", id(session))
+            agent_keys[id(session)] = key
+            sessions_by_agent.setdefault(key, []).append(session)
+        grouped_rows = {}
+
         for session in docked:
             terminal = session["terminal"]
             item = session.get("item") or {}
-            display_name = session_display_name(item, session.get("agent"))
-            row = Gtk.Box(spacing=4)
+            agent = session.get("agent") or {}
+            key = agent_keys[id(session)]
+            developer_sessions = sessions_by_agent[key]
+            grouped = len(developer_sessions) > 1
+            if grouped:
+                target_rows = grouped_rows.get(key)
+                if target_rows is None:
+                    group = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+                    heading = Gtk.Box(spacing=4)
+                    heading.get_style_context().add_class("instance-developer-heading")
+                    icon_value = self.session_icon_value(session)
+                    icon = agent_icon_widget(icon_value)
+                    if icon is None:
+                        icon = Gtk.Label(label=icon_value or "✳")
+                    heading.pack_start(icon, False, False, 0)
+                    developer_name = (agent.get("name") or item.get("agent_name") or
+                                      agent.get("command") or item.get("agent_command") or "开发者")
+                    heading.pack_start(Gtk.Label(label=developer_name, xalign=0), True, True, 0)
+                    target_rows = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+                    target_rows.get_style_context().add_class("instance-developer-children")
+                    group.pack_start(heading, False, False, 0)
+                    group.pack_start(target_rows, False, False, 0)
+                    self.instances_list.pack_start(group, False, False, 0)
+                    grouped_rows[key] = target_rows
+                display_name = session_workspace_label(item, agent)
+            else:
+                target_rows = self.instances_list
+                display_name = session_display_name(item, agent)
+            row = Gtk.Box(spacing=0 if grouped else 4)
             row.set_hexpand(True)
+            if grouped:
+                row.get_style_context().add_class("instance-developer-row")
+                connector = Gtk.Label(label="└┄" if session is developer_sessions[-1] else "├┄")
+                connector.set_size_request(18, -1)
+                connector.set_xalign(0.5)
+                connector.set_valign(Gtk.Align.CENTER)
+                connector.get_style_context().add_class("instance-tree-connector")
+                row.pack_start(connector, False, True, 0)
             button = Gtk.Button()
             button.set_hexpand(True)
             button.get_style_context().add_class("host-button")
@@ -2208,9 +2271,10 @@ class App(Gtk.Window):
             button.set_tooltip_text(display_name)
             btn_content = Gtk.Box(spacing=4)
             btn_content.set_hexpand(True)
-            icon = agent_icon_widget(self.session_icon_value(session))
-            if icon is not None:
-                btn_content.pack_start(icon, False, False, 0)
+            if not grouped:
+                icon = agent_icon_widget(self.session_icon_value(session))
+                if icon is not None:
+                    btn_content.pack_start(icon, False, False, 0)
             title = Gtk.Label(label=display_name, xalign=0)
             title.set_single_line_mode(True)
             title.set_ellipsize(Pango.EllipsizeMode.END)
@@ -2286,7 +2350,7 @@ class App(Gtk.Window):
             terminal._running_tab_button = button
             row.pack_start(button, True, True, 0)
             self.instance_buttons.append((button, terminal))
-            self.instances_list.pack_start(row, False, False, 0)
+            target_rows.pack_start(row, False, False, 0)
             self.scale_layout(row)
         self.instances_list.show_all()
 
@@ -2338,7 +2402,7 @@ class App(Gtk.Window):
 
         if not self.tiled:
             self.update_tab_header(self.tabs.get_nth_page(self.tabs.get_current_page()))
-            self.rebuild_instances_sidebar()
+        self.rebuild_instances_sidebar()
 
         if sync and session.get("host") and session.get("id"):
             key = self.shared_host_key(self.canonical_session_host(session["host"]))

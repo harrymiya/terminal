@@ -6,10 +6,12 @@ import {
   buildSessionSyncItem,
   findExistingSession,
   formatSessionTitle,
+  groupSessionsByDeveloper,
   isValidSessionId,
   mergeSessionSyncItems,
   normalizeSessionId,
   planSyncedSessionChanges,
+  sessionWorkspaceLabel,
 } from '../windows/native/web/src/session-sync.js';
 import {
   clampFloatingRect,
@@ -48,6 +50,15 @@ assert.equal(formatSessionTitle({
   agent: { name: 'Codex', command: 'codex' },
   title: 'My custom session',
 }), 'My custom session');
+const codexSessions = [
+  { id: 'c1', title: 'Codex · project', workspace: { name: 'project' }, agent: { name: 'Codex', command: 'codex' } },
+  { id: 'c2', title: 'another · Codex', workspace: { name: 'another' }, agent: { name: 'Codex', command: 'codex' } },
+  { id: 'a1', title: 'Antigravity · docs', workspace: { name: 'docs' }, agent: { name: 'Antigravity', command: 'agy' } },
+];
+assert.deepEqual(groupSessionsByDeveloper(codexSessions).map(group => group.sessions.length), [2, 1]);
+assert.equal(sessionWorkspaceLabel(codexSessions[0]), 'project');
+assert.equal(sessionWorkspaceLabel(codexSessions[1]), 'another');
+assert.equal(sessionWorkspaceLabel({ ...codexSessions[0], title: 'My custom session' }), 'My custom session');
 
 // 2. Merge remote items with pending PUT/DELETE mutations and deduplicate by workspace
 const id1 = '1'.repeat(32);
@@ -204,7 +215,10 @@ assert.match(windowsUi, /formatSessionTitle\(\{workspace,agent\}\)/);
 assert.match(windowsUi, /card\.querySelector\('\.terminal-close\.minimize-session'\)\.hidden = viewMode === 'tabs'/);
 assert.match(windowsUi, /if \(viewMode === 'grid'\) actionItems\.push\(\['✎', '编辑实例名称'/);
 assert.match(windowsUi, /actionItems\.push\(\['×', '关闭终端'/);
+assert.match(windowsUi, /for \(const group of groupSessionsByDeveloper\(items\)\)/);
+assert.match(windowsUi, /name\.textContent = grouped \? sessionWorkspaceLabel\(session\) : session\.title/);
 assert.match(layoutCss, /body\.view-tabs \.terminal-quota:not\(\[hidden\]\)\s*\{[^}]*display:\s*inline-flex;/s);
+assert.match(layoutCss, /\.instance-developer-children\s*\{[^}]*border-left:\s*1px dotted/s);
 
 // 7. Floating header drag & geometry clamping checks
 const firstFloat = defaultFloatingRect(1000, 700, 0);

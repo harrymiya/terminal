@@ -21,6 +21,30 @@ export function formatSessionTitle({ workspace, agent, title }) {
   return !current || current === legacyDefault ? `${agentName} · ${workspaceName}` : current;
 }
 
+export function sessionWorkspaceLabel(session) {
+  const workspaceName = String(session?.workspace?.name || session?.workspace?.path || '');
+  const agentName = String(session?.agent?.name || session?.agent?.command || '');
+  const title = formatSessionTitle({
+    workspace: session?.workspace,
+    agent: session?.agent,
+    title: session?.title,
+  });
+  return title === `${agentName} · ${workspaceName}` ? workspaceName : title || workspaceName;
+}
+
+export function groupSessionsByDeveloper(sessions) {
+  const groups = new Map();
+  for (const session of sessions) {
+    const agentName = String(session?.agent?.name || '');
+    const command = String(session?.agent?.command || '');
+    const key = agentName || command ? `${agentName}\0${command}` : String(session?.id || '');
+    const group = groups.get(key) ?? [];
+    group.push(session);
+    groups.set(key, group);
+  }
+  return [...groups].map(([key, groupedSessions]) => ({ key, sessions: groupedSessions }));
+}
+
 export function buildSessionSyncItem({ id, workspace, agent, title }) {
   const normalizedId = normalizeSessionId(id);
   const directoryPath = String(workspace?.path ?? '');

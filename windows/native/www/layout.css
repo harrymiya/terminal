@@ -199,6 +199,39 @@
   position: relative;
 }
 
+.instance-developer-group {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.instance-developer-heading {
+  min-height: 26px;
+  padding: 2px 8px;
+  color: var(--tab-fg);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.instance-developer-children {
+  margin-left: 12px;
+  padding-left: 8px;
+  border-left: 1px dotted var(--line);
+}
+
+.instance-developer-row::before {
+  position: absolute;
+  content: "";
+  top: 50%;
+  left: -8px;
+  width: 8px;
+  border-top: 1px dotted var(--line);
+}
+
+.instance-developer-row .instance-session-button {
+  padding-left: 4px;
+}
+
 .flat-list-actions.instance-actions {
   position: absolute;
   top: 50%;

@@ -386,6 +386,14 @@ class DesktopThemeBuildTest(unittest.TestCase):
                 mod.session_display_name({"directory_name": "proj", "agent_name": "Codex", "display_name": "Custom"}),
                 "Custom",
             )
+            self.assertEqual(
+                mod.session_workspace_label({"directory_name": "proj", "agent_name": "Codex", "display_name": "Codex · proj"}),
+                "proj",
+            )
+            self.assertEqual(
+                mod.session_workspace_label({"directory_name": "proj", "agent_name": "Codex", "display_name": "Custom"}),
+                "Custom",
+            )
 
             app = mod.App()
             try:

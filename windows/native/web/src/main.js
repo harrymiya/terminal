@@ -7,9 +7,11 @@ import {
   buildSessionSyncItem,
   findExistingSession,
   formatSessionTitle,
+  groupSessionsByDeveloper,
   isValidSessionId,
   normalizeSessionId,
   planSyncedSessionChanges,
+  sessionWorkspaceLabel,
 } from './session-sync.js';
 import {
   clampFloatingRect,
@@ -790,9 +792,9 @@ function renderInstances() {
     : !session.floating);
   section.hidden = !items.length;
   if (section.hidden) return;
-  for (const session of items) {
+  const renderInstanceRow = (session, container, grouped = false) => {
     const row = document.createElement('div');
-    row.className = 'flat-list-row instance-row';
+    row.className = `flat-list-row instance-row${grouped ? ' instance-developer-row' : ''}`;
     const button = document.createElement('button');
     button.type = 'button';
     button.className = `flat-list-button instance-session-button${session.id === activeSession ? ' selected' : ''}`;
@@ -809,11 +811,13 @@ function renderInstances() {
     outline.append(outlineRect);
     const label = document.createElement('span');
     label.className = 'agent-label';
-    const icon = sessionAgentIcon(session);
-    if (icon) label.append(icon);
+    if (!grouped) {
+      const icon = sessionAgentIcon(session);
+      if (icon) label.append(icon);
+    }
     const name = document.createElement('span');
     name.className = 'flat-list-name';
-    name.textContent = session.title;
+    name.textContent = grouped ? sessionWorkspaceLabel(session) : session.title;
     label.append(name);
     button.append(outline, label);
     session.instanceButton = button;
@@ -842,7 +846,35 @@ function renderInstances() {
       actions.append(control);
     }
     row.append(button, actions);
-    root.append(row);
+    container.append(row);
+  };
+  for (const group of groupSessionsByDeveloper(items)) {
+    if (group.sessions.length < 2) {
+      renderInstanceRow(group.sessions[0], root);
+      continue;
+    }
+    const groupRoot = document.createElement('div');
+    groupRoot.className = 'instance-developer-group';
+    const heading = document.createElement('div');
+    heading.className = 'agent-label instance-developer-heading';
+    const icon = sessionAgentIcon(group.sessions[0]);
+    if (icon) heading.append(icon);
+    else {
+      const fallback = document.createElement('span');
+      fallback.className = 'agent-icon';
+      fallback.textContent = '✳';
+      fallback.setAttribute('aria-hidden', 'true');
+      heading.append(fallback);
+    }
+    const developerName = document.createElement('span');
+    developerName.className = 'flat-list-name';
+    developerName.textContent = group.sessions[0].agent?.name || group.sessions[0].agent?.command || '开发者';
+    heading.append(developerName);
+    const children = document.createElement('div');
+    children.className = 'instance-developer-children';
+    for (const session of group.sessions) renderInstanceRow(session, children, true);
+    groupRoot.append(heading, children);
+    root.append(groupRoot);
   }
 }
 
