@@ -39,6 +39,31 @@ def load_module(rel_path, name):
 class PcSessionAutoSyncDuplicationTest(unittest.TestCase):
     """Regression tests verifying session deduplication across PC clients."""
 
+    def test_omarchy_sync_omission_does_not_close_live_or_reconnecting_session(self):
+        core = load_module("omarchy/core.py", "core_omarchy_missing_session")
+        should_close = core.should_close_missing_shared_session
+        missing_ids = set()
+
+        self.assertFalse(should_close({
+            "id": "live", "started_at": 0, "state": {"connected": True},
+        }, missing_ids, now=60))
+        self.assertFalse(should_close({
+            "id": "retrying", "started_at": 0, "state": {"retry_source": 42},
+        }, missing_ids, now=60))
+        self.assertFalse(should_close({
+            "id": "manual-reconnect", "started_at": 0,
+            "reconnect_button": MagicMock(**{"get_visible.return_value": True}),
+        }, missing_ids, now=60))
+        self.assertFalse(should_close({
+            "id": "new", "started_at": 50, "state": {"connected": False},
+        }, missing_ids, now=60))
+        self.assertTrue(should_close({
+            "id": "stale", "started_at": 0, "state": {"connected": False},
+        }, missing_ids, now=60))
+        self.assertFalse(should_close({
+            "id": "present", "started_at": 0, "state": {"connected": False},
+        }, {"present"}, now=60))
+
     def test_merge_session_sync_items_deduplicates_by_workspace(self):
         """Test that merge_session_sync_items retains only the latest session per workspace."""
         for platform in ("ubuntu", "omarchy", "windows"):

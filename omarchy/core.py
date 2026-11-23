@@ -350,6 +350,26 @@ def close_remote_session_command(session_id):
     )
 
 
+def should_close_missing_shared_session(session, remote_ids, now=None):
+    """Only auto-close a shared session after it is absent and locally disconnected."""
+    if session.get("id") in remote_ids:
+        return False
+    current_time = time.monotonic() if now is None else now
+    if current_time - session.get("started_at", 0) <= 15:
+        return False
+    state = session.get("state")
+    if isinstance(state, dict) and (state.get("connected") or state.get("retry_source")):
+        return False
+    reconnect_button = session.get("reconnect_button")
+    if reconnect_button is not None:
+        try:
+            if reconnect_button.get_visible():
+                return False
+        except (AttributeError, RuntimeError):
+            pass
+    return True
+
+
 def _normalize_signature(sig):
     if not sig:
         return ""
