@@ -11,13 +11,23 @@ export function isValidSessionId(id) {
   return /^[0-9a-f]{32}$/.test(normalizeSessionId(id));
 }
 
+export function formatSessionTitle({ workspace, agent, title }) {
+  const workspaceName = String(workspace?.name || workspace?.path || '');
+  const agentName = String(agent?.name || agent?.command || '');
+  const current = String(title || '');
+  if (!workspaceName) return current || agentName;
+  if (!agentName) return current || workspaceName;
+  const legacyDefault = `${workspaceName} · ${agentName}`;
+  return !current || current === legacyDefault ? `${agentName} · ${workspaceName}` : current;
+}
+
 export function buildSessionSyncItem({ id, workspace, agent, title }) {
   const normalizedId = normalizeSessionId(id);
   const directoryPath = String(workspace?.path ?? '');
   const directoryName = String(workspace?.name || directoryPath);
   const agentCommand = String(agent?.command ?? '');
   const agentName = String(agent?.name || agentCommand);
-  const displayName = String(title || `${directoryName} · ${agentName}`);
+  const displayName = formatSessionTitle({ workspace, agent, title });
   return {
     id: normalizedId,
     directory_path: directoryPath,
@@ -139,7 +149,11 @@ export function planSyncedSessionChanges({
 
     if (matched) {
       const nextRemoteId = normalizeSessionId(matched.id) || sessionRemoteId;
-      const nextTitle = matched.display_name || session.title;
+      const nextTitle = formatSessionTitle({
+        workspace: session.workspace,
+        agent: session.agent,
+        title: matched.display_name || session.title,
+      });
       if (nextRemoteId !== sessionRemoteId || (matched.display_name && matched.display_name !== session.title)) {
         renames.push({ sessionId: session.id, remoteId: nextRemoteId, title: nextTitle });
       }

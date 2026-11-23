@@ -75,6 +75,18 @@ def update_agent_icon(box, value):
     return True
 
 
+def session_display_name(item, agent=None):
+    item = item or {}
+    agent = agent or {}
+    workspace_name = item.get("directory_name") or item.get("directory_path") or "终端"
+    agent_name = agent.get("name") or item.get("agent_name") or item.get("agent_command")
+    current = item.get("display_name")
+    if not agent_name:
+        return current or workspace_name
+    legacy_default = f"{workspace_name} · {agent_name}"
+    return f"{agent_name} · {workspace_name}" if not current or current == legacy_default else current
+
+
 def agent_icon_picker(selected):
     _, catalog = agent_icon_catalog()
     model = Gtk.ListStore(str, str, GdkPixbuf.Pixbuf)
@@ -1252,11 +1264,51 @@ class App(Gtk.Window):
         tab_header = Gtk.EventBox()
         tab_header.get_style_context().add_class("tile-header")
         tab_header.set_size_request(-1, 25)
-        tab_heading = Gtk.Box(spacing=4)
+        tab_heading = Gtk.Box(spacing=6)
+        self.tab_header_title_box = Gtk.Box(spacing=4)
         self.tab_header_icon = Gtk.Box()
         self.tab_header_title = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END, single_line_mode=True)
-        tab_heading.pack_start(self.tab_header_icon, False, False, 0)
-        tab_heading.pack_start(self.tab_header_title, True, True, 0)
+        self.tab_header_title_box.pack_start(self.tab_header_icon, False, False, 0)
+        self.tab_header_title_box.pack_start(self.tab_header_title, True, True, 0)
+        self.tab_header_edit_button = Gtk.Button.new_from_icon_name("document-edit-symbolic", Gtk.IconSize.MENU)
+        self.tab_header_edit_button.set_relief(Gtk.ReliefStyle.NONE)
+        self.tab_header_edit_button.get_style_context().add_class("session-header-action")
+        self.tab_header_edit_button.set_tooltip_text("编辑实例名称")
+        self.tab_header_edit_button.set_no_show_all(True)
+        self.tab_header_edit_button.connect("clicked", lambda *_: self._click_tab_header_action("edit_button"))
+        self.tab_header_title_box.pack_start(self.tab_header_edit_button, False, False, 0)
+        self.tab_header_title_box.set_hexpand(True)
+        tab_heading.pack_start(self.tab_header_title_box, True, True, 0)
+
+        self.tab_header_actions = Gtk.Box(spacing=5)
+        self.tab_header_quota_box = Gtk.Box(spacing=8)
+        self.tab_header_hourly, self.update_tab_header_hourly = make_quota_indicator()
+        self.tab_header_weekly, self.update_tab_header_weekly = make_quota_indicator()
+        self.tab_header_hourly.show_all()
+        self.tab_header_weekly.show_all()
+        self.tab_header_quota_box.pack_start(self.tab_header_hourly, False, False, 0)
+        self.tab_header_quota_box.pack_start(self.tab_header_weekly, False, False, 0)
+        self.tab_header_quota_box.show_all()
+        self.tab_header_quota_box.set_no_show_all(True)
+        self.tab_header_quota_box.hide()
+        self.tab_header_actions.pack_start(self.tab_header_quota_box, False, False, 0)
+
+        self.tab_header_image_button = Gtk.Button.new_from_icon_name("image-x-generic-symbolic", Gtk.IconSize.MENU)
+        self.tab_header_image_button.set_relief(Gtk.ReliefStyle.NONE)
+        self.tab_header_image_button.get_style_context().add_class("session-header-action")
+        self.tab_header_image_button.set_tooltip_text("发送图片给此终端的 Agent")
+        self.tab_header_image_button.set_no_show_all(True)
+        self.tab_header_image_button.connect("clicked", lambda *_: self._click_tab_header_action("image_button"))
+        self.tab_header_actions.pack_start(self.tab_header_image_button, False, False, 0)
+
+        self.tab_header_close_button = Gtk.Button.new_from_icon_name("window-close-symbolic", Gtk.IconSize.MENU)
+        self.tab_header_close_button.set_relief(Gtk.ReliefStyle.NONE)
+        self.tab_header_close_button.get_style_context().add_class("session-header-action")
+        self.tab_header_close_button.set_tooltip_text("关闭终端")
+        self.tab_header_close_button.set_no_show_all(True)
+        self.tab_header_close_button.connect("clicked", lambda *_: self._click_tab_header_action("close_button"))
+        self.tab_header_actions.pack_start(self.tab_header_close_button, False, False, 0)
+        tab_heading.pack_start(self.tab_header_actions, False, False, 0)
         tab_header.add(tab_heading)
         tab_view.pack_start(tab_header, False, False, 0)
         tab_view.pack_start(self.tabs, True, True, 0)
@@ -1752,7 +1804,7 @@ class App(Gtk.Window):
             self.active_terminal = None
         self.remove_floating_window(session)
         self.update_float_button(session)
-        name = (session.get("item") or {}).get("display_name") or session.get("item", {}).get("directory_name", "终端")
+        name = session_display_name(session.get("item"), session.get("agent"))
         button = Gtk.Button()
         content = Gtk.Box(spacing=5)
         dot = Gtk.Box(valign=Gtk.Align.CENTER)
@@ -2004,7 +2056,7 @@ class App(Gtk.Window):
                         context.remove_class(previous)
                     context.add_class(status)
                     session["minimized_status"] = status
-                    name = session["item"]["directory_name"]
+                    name = session_display_name(session.get("item"), session.get("agent"))
                     status_name = {"waiting": "待确认", "running": "运行中", "idle": "空闲"}[status]
                     session["minimized_button"].set_tooltip_text(f"{name} · {status_name}\n单击恢复到平铺")
                 dimmed = status == "running" and now % 1.0 >= 0.55
@@ -2083,10 +2135,37 @@ class App(Gtk.Window):
 
     def update_tab_header(self, terminal):
         session = next((session for session in self.sessions if session["terminal"] is terminal), None)
-        if session is not None:
-            item = session.get("item") or {}
-            self.tab_header_title.set_text(item.get("display_name") or item.get("directory_name") or "终端")
-            update_agent_icon(self.tab_header_icon, self.session_icon_value(session))
+        self.tab_header_session = session
+        if session is None:
+            self.tab_header_title.set_text("")
+            update_agent_icon(self.tab_header_icon, "✳")
+            self.tab_header_quota_box.hide()
+            self.tab_header_edit_button.hide()
+            self.tab_header_image_button.hide()
+            self.tab_header_close_button.hide()
+            return
+        item = session.get("item") or {}
+        self.tab_header_title.set_text(session_display_name(item, session.get("agent")))
+        update_agent_icon(self.tab_header_icon, self.session_icon_value(session))
+        self.tab_header_edit_button.set_visible(session.get("edit_button") is not None)
+        self.tab_header_close_button.set_visible(session.get("close_button") is not None)
+        self.tab_header_image_button.set_visible(session.get("image_button") is not None)
+        quota = session.get("quota_snapshot")
+        if quota is None:
+            quota = (None, None, None)
+        hourly, weekly, minutes = quota
+        self.update_tab_header_hourly(hourly)
+        self.update_tab_header_weekly(weekly)
+        period = f"{minutes // 60}小时" if minutes and minutes % 60 == 0 else f"{minutes}分钟" if minutes else "小时"
+        self.tab_header_hourly.set_tooltip_text(f"{period}剩余 {'--' if hourly is None else f'{round(hourly)}%'}")
+        self.tab_header_weekly.set_tooltip_text("周剩余 --" if weekly is None else f"周剩余 {round(weekly)}%")
+        self.tab_header_quota_box.set_visible(bool(session.get("quota_indicators")))
+
+    def _click_tab_header_action(self, action):
+        session = getattr(self, "tab_header_session", None)
+        button = session.get(action) if session is not None else None
+        if button is not None:
+            button.clicked()
 
     def rebuild_instances_sidebar(self, docked=None):
         if self.tiled:
@@ -2117,7 +2196,7 @@ class App(Gtk.Window):
         for session in docked:
             terminal = session["terminal"]
             item = session.get("item") or {}
-            display_name = item.get("display_name") or item.get("directory_name") or "终端"
+            display_name = session_display_name(item, session.get("agent"))
             row = Gtk.Box(spacing=4)
             row.set_hexpand(True)
             button = Gtk.Button()
@@ -2142,24 +2221,17 @@ class App(Gtk.Window):
             btn_content.get_single_line_mode = title.get_single_line_mode
             btn_content.get_line_wrap = title.get_line_wrap
 
-            edit_btn = Gtk.Button.new_from_icon_name("document-edit-symbolic", Gtk.IconSize.MENU)
-            edit_btn.set_relief(Gtk.ReliefStyle.NONE)
-            edit_btn.get_style_context().add_class("manage-button")
-            edit_btn.get_style_context().add_class("instance-action-button")
-            edit_btn.set_tooltip_text("编辑实例名称")
-            edit_btn.set_valign(Gtk.Align.CENTER)
-            edit_btn.connect("clicked", lambda *_, s=session: self.prompt_edit_session_name(s))
-            btn_content.pack_start(edit_btn, False, False, 0)
-
-            image_btn = Gtk.Button.new_from_icon_name("image-x-generic-symbolic", Gtk.IconSize.MENU)
-            image_btn.set_relief(Gtk.ReliefStyle.NONE)
-            image_btn.get_style_context().add_class("manage-button")
-            image_btn.get_style_context().add_class("instance-action-button")
-            image_btn.set_tooltip_text("发送图片给此终端的 Agent")
-            image_btn.set_valign(Gtk.Align.CENTER)
-            if session.get("image_button") is not None:
-                image_btn.connect("clicked", lambda *_, s=session: s["image_button"].clicked())
-            btn_content.pack_start(image_btn, False, False, 0)
+            actions = []
+            if self.tiled:
+                edit_btn = Gtk.Button.new_from_icon_name("document-edit-symbolic", Gtk.IconSize.MENU)
+                edit_btn.set_relief(Gtk.ReliefStyle.NONE)
+                edit_btn.get_style_context().add_class("manage-button")
+                edit_btn.get_style_context().add_class("instance-action-button")
+                edit_btn.set_tooltip_text("编辑实例名称")
+                edit_btn.set_valign(Gtk.Align.CENTER)
+                edit_btn.connect("clicked", lambda *_, s=session: self.prompt_edit_session_name(s))
+                btn_content.pack_start(edit_btn, False, False, 0)
+                actions.append(edit_btn)
 
             close_btn = Gtk.Button.new_from_icon_name("window-close-symbolic", Gtk.IconSize.MENU)
             close_btn.set_relief(Gtk.ReliefStyle.NONE)
@@ -2170,8 +2242,8 @@ class App(Gtk.Window):
             if session.get("close_button") is not None:
                 close_btn.connect("clicked", lambda *_, s=session: s["close_button"].clicked())
             btn_content.pack_start(close_btn, False, False, 0)
-
-            inner_actions = (edit_btn, image_btn, close_btn)
+            actions.append(close_btn)
+            inner_actions = tuple(actions)
 
             def raise_inner_actions(*_, actions=inner_actions):
                 for b in actions:
@@ -3554,7 +3626,7 @@ class App(Gtk.Window):
                                 matching_item = next((item for item in sessions if (session.get("id") and item.get("id") == session.get("id")) or (item.get("directory_path"), item.get("agent_command")) == ws), None)
                                 if matching_item and matching_item.get("id"):
                                     session["id"] = matching_item["id"]
-                                    remote_name = matching_item.get("display_name")
+                                    remote_name = session_display_name(matching_item, session.get("agent"))
                                     if remote_name and remote_name != (session.get("item") or {}).get("display_name"):
                                         self.set_session_name(session, remote_name, sync=False)
                                 elif session.get("id") not in remote_ids and time.monotonic() - session.get("started_at", 0) > 15:
@@ -4144,7 +4216,7 @@ class App(Gtk.Window):
                 if not items:
                     box.add(Gtk.Label(label="暂无共享会话"))
                 for item in items:
-                    name = item.get("display_name") or f"{item.get('directory_name')} · {item.get('agent_name')}"
+                    name = session_display_name(item)
                     button = Gtk.Button(label=name)
                     def selected(_button, selected_item=item):
                         dialog.destroy()
@@ -4194,7 +4266,7 @@ class App(Gtk.Window):
         socket_path = os.path.join(socket_dir, "ssh")
         session_id = shared_item["id"] if shared_item else uuid.uuid4().hex
         argv, _ = ssh_argv(host, directory["path"], agent["command"], session_id=session_id, control_path=socket_path, restore_only=shared_item is not None)
-        display_name = (shared_item.get("display_name") if shared_item else None) or f"{directory['name']} · {agent['name']}"
+        display_name = session_display_name(shared_item, agent) if shared_item else f"{agent['name']} · {directory['name']}"
         item = {"id": session_id, "directory_path": directory["path"], "directory_name": directory["name"],
                 "agent_name": agent["name"], "agent_command": agent["command"], "display_name": display_name}
         if not shared_item:
@@ -4274,6 +4346,7 @@ class App(Gtk.Window):
             minutes, percent, *_ = hourly_quota(result)
             weekly = next((window[1] for window in result if window[0] == 10080), None)
             current = (minutes, percent, weekly)
+            session["quota_snapshot"] = (percent, weekly, minutes)
             if current == shown_quota:
                 return
             shown_quota = current
@@ -4283,6 +4356,8 @@ class App(Gtk.Window):
             remaining = "--" if percent is None else f"{percent}%"
             hourly_img.set_tooltip_text(f"{period}剩余 {remaining}")
             weekly_img.set_tooltip_text("周剩余 --" if weekly is None else f"周剩余 {weekly}%")
+            if not self.tiled and self.tabs.get_nth_page(self.tabs.get_current_page()) is terminal:
+                self.update_tab_header(terminal)
 
         image_button = Gtk.Button.new_from_icon_name("image-x-generic-symbolic", Gtk.IconSize.MENU)
         image_button.set_tooltip_text("发送图片给此终端的 Agent")
@@ -4366,6 +4441,7 @@ class App(Gtk.Window):
                    "edit_button": edit_button, "session_title": session_title,
                    "started_at": time.monotonic(),
                    "quota_indicators": (hourly_img, weekly_img) if kind else (),
+                   "quota_snapshot": None,
                    "update_quota": update_quota_display}
         session["float_button"] = float_button
         update_agent_icon(title_icon, self.session_icon_value(session))

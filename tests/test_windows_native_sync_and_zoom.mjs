@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import {
   buildSessionSyncItem,
   findExistingSession,
+  formatSessionTitle,
   isValidSessionId,
   mergeSessionSyncItems,
   normalizeSessionId,
@@ -35,8 +36,18 @@ assert.deepEqual(syncItem, {
   directory_name: '/home/dev/app',
   agent_name: 'codex',
   agent_command: 'codex',
-  display_name: '/home/dev/app · codex',
+  display_name: 'codex · /home/dev/app',
 });
+assert.equal(formatSessionTitle({
+  workspace: { name: 'project', path: '/project' },
+  agent: { name: 'Codex', command: 'codex' },
+  title: 'project · Codex',
+}), 'Codex · project');
+assert.equal(formatSessionTitle({
+  workspace: { name: 'project', path: '/project' },
+  agent: { name: 'Codex', command: 'codex' },
+  title: 'My custom session',
+}), 'My custom session');
 
 // 2. Merge remote items with pending PUT/DELETE mutations and deduplicate by workspace
 const id1 = '1'.repeat(32);
@@ -182,10 +193,16 @@ assert.equal(capacityPlan.toOpen[0].item.id, '9'.repeat(32));
 
 // 6. CSS checks for top-right zoom step buttons and floating header drag cursor
 const layoutCss = fs.readFileSync(path.join(rootDir, 'windows/native/www/layout.css'), 'utf8');
+const windowsUi = fs.readFileSync(path.join(rootDir, 'windows/native/web/src/main.js'), 'utf8');
 const scaleCss = fs.readFileSync(path.join(rootDir, 'windows/native/www/scale.css'), 'utf8');
 assert.match(layoutCss, /\.scale-control\s+\.scale-step\s*\{[^}]*display:\s*inline-flex;[^}]*align-items:\s*center;[^}]*justify-content:\s*center;[^}]*padding:\s*0;/s);
 assert.match(scaleCss, /\.toolbar\s+\.scale-control\s+\.scale-step\s*\{[^}]*padding:\s*0;/s);
 assert.match(layoutCss, /\.terminal-card\.terminal-floating\s+\.terminal-head\s*\{[^}]*cursor:\s*move;/s);
+assert.match(windowsUi, /formatSessionTitle\(\{workspace,agent\}\)/);
+assert.match(windowsUi, /card\.querySelector\('\.terminal-close\.minimize-session'\)\.hidden = viewMode === 'tabs'/);
+assert.match(windowsUi, /if \(viewMode === 'grid'\) actionItems\.push\(\['✎', '编辑实例名称'/);
+assert.match(windowsUi, /actionItems\.push\(\['×', '关闭终端'/);
+assert.match(layoutCss, /body\.view-tabs \.terminal-quota:not\(\[hidden\]\)\s*\{[^}]*display:\s*inline-flex;/s);
 
 // 7. Floating header drag & geometry clamping checks
 const firstFloat = defaultFloatingRect(1000, 700, 0);

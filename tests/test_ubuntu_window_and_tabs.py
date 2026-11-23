@@ -71,7 +71,7 @@ class UbuntuWindowAndTabsTest(unittest.TestCase):
             else:
                 self.assertFalse(self.app.instances_section.get_visible())
 
-    def test_tab_mode_shows_instances_below_hosts_with_full_name_image_and_close(self):
+    def test_tab_mode_shows_close_only_in_instances_and_actions_in_header(self):
         Gtk, Pango = app_module.Gtk, app_module.Pango
         self.app.persist = lambda: None
         sidebar_children = self.app.sidebar.get_children()
@@ -87,6 +87,9 @@ class UbuntuWindowAndTabsTest(unittest.TestCase):
         second["item"]["display_name"] = "second-workspace · Antigravity"
         clicked = []
         for tag, s in (("first", first), ("second", second)):
+            edit_btn = Gtk.Button()
+            edit_btn.connect("clicked", lambda *_, t=tag: clicked.append(("edit", t)))
+            s["edit_button"] = edit_btn
             img_btn = Gtk.Button()
             img_btn.connect("clicked", lambda *_, t=tag: clicked.append(("image", t)))
             cls_btn = Gtk.Button()
@@ -107,13 +110,15 @@ class UbuntuWindowAndTabsTest(unittest.TestCase):
         self.assertEqual(len(row_children), 1)
         tab_btn = row_children[0]
         btn_children = tab_btn.get_child().get_children()
-        self.assertEqual(len(btn_children), 4)
-        title_lbl, edit_btn, img_btn, close_btn = btn_children
-        self.assertEqual(edit_btn.get_tooltip_text(), "编辑实例名称")
+        self.assertEqual(len(btn_children), 2)
+        title_lbl, close_btn = btn_children
         self.assertEqual(title_lbl.get_text(), "very-long-workspace-name-for-full-display · Codex")
         self.assertEqual(title_lbl.get_ellipsize(), Pango.EllipsizeMode.END)
         self.assertTrue(title_lbl.get_single_line_mode())
         self.assertFalse(title_lbl.get_line_wrap())
+        self.assertTrue(self.app.tab_header_edit_button.get_visible())
+        self.assertTrue(self.app.tab_header_image_button.get_visible())
+        self.assertTrue(self.app.tab_header_close_button.get_visible())
 
         # Clicking second tab switches active page and updates highlight
         second_btn = rows[1].get_children()[0]
@@ -122,9 +127,11 @@ class UbuntuWindowAndTabsTest(unittest.TestCase):
         self.assertTrue(second_btn.get_style_context().has_class("host-selected"))
         self.assertFalse(tab_btn.get_style_context().has_class("host-selected"))
 
-        img_btn.clicked()
+        self.app.tab_header_edit_button.clicked()
+        self.app.tab_header_image_button.clicked()
+        self.app.tab_header_close_button.clicked()
         close_btn.clicked()
-        self.assertEqual(clicked, [("image", "first"), ("close", "first")])
+        self.assertEqual(clicked, [("edit", "second"), ("image", "second"), ("close", "second"), ("close", "first")])
 
     def test_tab_mode_inner_action_buttons_handle_pointer_press(self):
         clicked = []
@@ -148,7 +155,7 @@ class UbuntuWindowAndTabsTest(unittest.TestCase):
         rows = self.app.instances_list.get_children()
         tab_btn = rows[0].get_children()[0]
         btn_children = tab_btn.get_child().get_children()
-        _title, _edit, _img, close_btn = btn_children
+        _title, close_btn = btn_children
 
         # Synthesize button press on tab_btn at close_btn coordinates
         alloc = close_btn.get_allocation()
@@ -220,6 +227,24 @@ class UbuntuWindowAndTabsTest(unittest.TestCase):
         self.assertIsNotNone(first["terminal"].get_parent())
         self.assertIsNone(second["terminal"].get_parent())
 
+    def test_tiled_minimized_instance_keeps_edit_and_close_only(self):
+        Gtk = app_module.Gtk
+        session, _ = self.make_session("project")
+        clicked = []
+        session["close_button"] = Gtk.Button()
+        session["close_button"].connect("clicked", lambda *_: clicked.append("close"))
+        self.app.tiled = True
+        self.app.minimize_session(session)
+        row = self.app.instances_list.get_children()[0]
+        controls = row.get_children()[0].get_child().get_children()
+        buttons = [child for child in controls if isinstance(child, Gtk.Button)]
+        self.assertEqual(len(buttons), 2)
+        edit, close = buttons
+        self.assertEqual(edit.get_tooltip_text(), "编辑实例名称")
+        self.assertEqual(close.get_tooltip_text(), "关闭终端")
+        close.clicked()
+        self.assertEqual(clicked, ["close"])
+
     def test_floating_card_resizes_overhangs_and_returns_to_the_tab(self):
         self.app.persist = lambda: None
         session, pty = self.make_session("project")
@@ -268,6 +293,7 @@ class UbuntuWindowAndTabsTest(unittest.TestCase):
             self.app.open_terminal(None, host, shared)
         session = self.app.sessions[0]
         try:
+            self.assertEqual(session["session_title"].get_text(), "Codex · project")
             hourly, weekly = session["quota_indicators"]
             session["update_quota"]([(300, 75, None), (10080, 40, "3d")])
             children = session["label"].get_children()
@@ -275,7 +301,13 @@ class UbuntuWindowAndTabsTest(unittest.TestCase):
             self.assertEqual(hourly.get_children()[1].get_text(), "75")
             self.assertEqual(weekly.get_children()[1].get_text(), "40")
             self.app.view_button.set_active(False)
+            self.assertEqual(self.app.tab_header_title.get_text(), "Codex · project")
             self.assertEqual(weekly.get_children()[1].get_text(), "40%")
+            self.assertTrue(self.app.tab_header_quota_box.get_visible())
+            self.assertEqual(self.app.tab_header_hourly.get_children()[1].get_text(), "75%")
+            self.assertEqual(self.app.tab_header_weekly.get_children()[1].get_text(), "40%")
+            self.assertTrue(self.app.tab_header_image_button.get_visible())
+            self.assertTrue(self.app.tab_header_close_button.get_visible())
             session["float_button"].clicked()
             self.assertEqual(weekly.get_children()[1].get_text(), "40")
             self.assertIs(weekly.get_toplevel(), session["floating_window"])

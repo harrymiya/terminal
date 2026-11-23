@@ -174,7 +174,11 @@
   flex-direction: row;
   align-items: center;
   min-height: 32px;
-  padding: 4px 78px 4px 8px;
+  padding: 4px 34px 4px 8px;
+}
+
+.flat-list-row.instance-row.actions-two .instance-session-button {
+  padding-right: 58px;
 }
 
 .flat-list-button.instance-session-button > :not(.terminal-running-outline) {
@@ -697,18 +701,31 @@ body.resizing-tiles-y * {
 }
 
 .terminal-card-title {
+  display: flex;
+  align-items: center;
+  gap: 5px;
   flex: 1 1 auto;
   min-width: 0;
 }
 
 .terminal-card-name {
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.terminal-card-title .rename-session {
+  flex: 0 0 auto;
+}
+
 .terminal-quota {
   flex: 0 0 auto;
+}
+
+body.view-tabs .terminal-quota:not([hidden]) {
+  display: inline-flex;
 }
 
 @container (max-width: 305px) {

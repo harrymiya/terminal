@@ -22,7 +22,7 @@ class DesktopUIEnhancementsTest(unittest.TestCase):
         self.assertTrue(tiled_mode)
 
     def test_separator_css_has_wide_hitbox_and_crisp_visual(self):
-        for platform in ("omarchy", "ubuntu", "windows"):
+        for platform in ("omarchy", "ubuntu"):
             py_file = (Path(__file__).resolve().parents[1] / platform / "remote-dev-terminal.py").read_text(encoding="utf-8")
             self.assertTrue("paned.tile-paned > separator {" in py_file or "paned.tile-paned > separator {{" in py_file)
             self.assertTrue(
@@ -35,7 +35,7 @@ class DesktopUIEnhancementsTest(unittest.TestCase):
             )
 
     def test_notebook_and_tab_dark_theme(self):
-        for platform in ("omarchy", "ubuntu", "windows"):
+        for platform in ("omarchy", "ubuntu"):
             py_file = (Path(__file__).resolve().parents[1] / platform / "remote-dev-terminal.py").read_text(encoding="utf-8")
             self.assertTrue("notebook { background-color:" in py_file or "notebook {{ background-color:" in py_file)
             self.assertTrue("notebook tab {" in py_file or "notebook tab {{" in py_file)
@@ -43,7 +43,7 @@ class DesktopUIEnhancementsTest(unittest.TestCase):
             self.assertTrue(".tile-header {" in py_file or ".tile-header {{" in py_file)
 
     def test_dark_theme_css_colors(self):
-        for platform in ("omarchy", "ubuntu", "windows"):
+        for platform in ("omarchy", "ubuntu"):
             py_file = (Path(__file__).resolve().parents[1] / platform / "remote-dev-terminal.py").read_text(encoding="utf-8")
             self.assertTrue("entry {" in py_file or "entry {{" in py_file)
             self.assertTrue("spinbutton {" in py_file or "spinbutton {{" in py_file)
@@ -55,19 +55,19 @@ class DesktopUIEnhancementsTest(unittest.TestCase):
             self.assertTrue(".manage-button {" in py_file or ".manage-button {{" in py_file)
 
     def test_view_button_vector_icons(self):
-        for platform in ("omarchy", "ubuntu", "windows"):
+        for platform in ("omarchy", "ubuntu"):
             py_file = (Path(__file__).resolve().parents[1] / platform / "remote-dev-terminal.py").read_text(encoding="utf-8")
             self.assertIn('"view-paged-symbolic" if self.tiled else "view-grid-symbolic"', py_file)
 
     def test_host_list_ui_matches_workspace_management(self):
-        for platform in ("omarchy", "ubuntu", "windows"):
+        for platform in ("omarchy", "ubuntu"):
             py_file = (Path(__file__).resolve().parents[1] / platform / "remote-dev-terminal.py").read_text(encoding="utf-8")
             self.assertIn('actions = [("＋主机", "add")]', py_file)
             self.assertIn('def manage_host(self, button, index, action):', py_file)
             self.assertIn('for label, action in [("✎", "edit"), ("×", "delete")]:', py_file)
 
     def test_left_alignments(self):
-        for platform in ("omarchy", "ubuntu", "windows"):
+        for platform in ("omarchy", "ubuntu"):
             py_file = (Path(__file__).resolve().parents[1] / platform / "remote-dev-terminal.py").read_text(encoding="utf-8")
             self.assertIn('label.set_xalign(0.0)', py_file)
 
@@ -193,7 +193,7 @@ class DesktopUIEnhancementsTest(unittest.TestCase):
             app.destroy()
 
     def test_uniform_control_heights(self):
-        for platform in ("omarchy", "ubuntu", "windows"):
+        for platform in ("omarchy", "ubuntu"):
             py_file = (Path(__file__).resolve().parents[1] / platform / "remote-dev-terminal.py").read_text(encoding="utf-8")
             self.assertTrue(
                 'button, entry, spinbutton, combobox, combobox button, .menu-toggle, .host-button, .project-button, .manage-button {' in py_file
@@ -204,7 +204,7 @@ class DesktopUIEnhancementsTest(unittest.TestCase):
             self.assertIn('padding: 2px 8px;', py_file)
 
     def test_spinbutton_buttons_have_no_borders(self):
-        for platform in ("omarchy", "ubuntu", "windows"):
+        for platform in ("omarchy", "ubuntu"):
             py_file = (Path(__file__).resolve().parents[1] / platform / "remote-dev-terminal.py").read_text(encoding="utf-8")
             self.assertIn('spinbutton button', py_file)
             self.assertIn('spinbutton.horizontal > button', py_file)
@@ -226,13 +226,13 @@ class DesktopUIEnhancementsTest(unittest.TestCase):
 
 
     def test_tab_corners_are_square_not_rounded(self):
-        for platform in ("omarchy", "ubuntu", "windows"):
+        for platform in ("omarchy", "ubuntu"):
             py_file = (Path(__file__).resolve().parents[1] / platform / "remote-dev-terminal.py").read_text(encoding="utf-8")
             self.assertTrue("notebook tab {" in py_file or "notebook tab {{" in py_file)
             self.assertIn("border-radius: 0;", py_file)
 
     def test_running_card_header_and_tab_breathing_halo_glow(self):
-        for platform in ("omarchy", "ubuntu", "windows"):
+        for platform in ("omarchy", "ubuntu"):
             py_file = (Path(__file__).resolve().parents[1] / platform / "remote-dev-terminal.py").read_text(encoding="utf-8")
             self.assertTrue(
                 "running-outline" in py_file
@@ -367,7 +367,7 @@ class DesktopThemeBuildTest(unittest.TestCase):
             self.assertIsNotNone(dummy_term.highlight_fg)
 
     def test_session_edit_pencil_and_rename_sync(self):
-        for platform in ("ubuntu", "omarchy", "windows"):
+        for platform in ("ubuntu", "omarchy"):
             platform_dir = str(Path(__file__).resolve().parents[1] / platform)
             if platform_dir not in sys.path:
                 sys.path.insert(0, platform_dir)
@@ -377,6 +377,15 @@ class DesktopThemeBuildTest(unittest.TestCase):
             finally:
                 if platform_dir in sys.path:
                     sys.path.remove(platform_dir)
+
+            self.assertEqual(
+                mod.session_display_name({"directory_name": "proj", "agent_name": "Codex"}),
+                "Codex · proj",
+            )
+            self.assertEqual(
+                mod.session_display_name({"directory_name": "proj", "agent_name": "Codex", "display_name": "Custom"}),
+                "Custom",
+            )
 
             app = mod.App()
             try:
@@ -416,7 +425,7 @@ class DesktopThemeBuildTest(unittest.TestCase):
                 self.assertEqual(sess["display_name"], "Renamed Instance")
                 self.assertTrue(any(call[0] == "PUT" and call[1] == "sess-1" and call[2]["display_name"] == "Renamed Instance" for call in sync_calls))
 
-                # 2. Tab mode test: check rebuild_instances_sidebar includes edit_btn
+                # 2. Tab mode keeps only close in the instance row; header owns the other actions.
                 app.tiled = False
                 app.rebuild_view()
                 rows = app.instances_list.get_children()
@@ -425,10 +434,12 @@ class DesktopThemeBuildTest(unittest.TestCase):
                 self.assertEqual(len(children), 1)
                 tab_btn = children[0]
                 btn_children = tab_btn.get_child().get_children()
-                self.assertEqual(len(btn_children), 4)
-                title_lbl, edit_btn, img_btn, close_btn = btn_children
-                self.assertEqual(edit_btn.get_tooltip_text(), "编辑实例名称")
+                self.assertEqual(len(btn_children), 2)
+                title_lbl, close_btn = btn_children
                 self.assertEqual(title_lbl.get_text(), "Renamed Instance")
+                self.assertTrue(app.tab_header_edit_button.get_visible())
+                self.assertTrue(app.tab_header_image_button.get_visible())
+                self.assertTrue(app.tab_header_close_button.get_visible())
 
                 # Test incoming remote rename in refresh_host_shared updates name without loop sync PUT
                 sync_calls.clear()

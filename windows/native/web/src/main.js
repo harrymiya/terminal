@@ -6,6 +6,7 @@ import { createAutoConfirmState, observeAutoConfirm, resetAutoConfirm } from './
 import {
   buildSessionSyncItem,
   findExistingSession,
+  formatSessionTitle,
   isValidSessionId,
   normalizeSessionId,
   planSyncedSessionChanges,
@@ -654,6 +655,7 @@ function renderSessions({ focus = true } = {}) {
   emptyState.classList.toggle('hidden', hasVisible);
   terminalGrid.classList.toggle('visible', hasVisible);
   $('view-mode').textContent = viewMode === 'tabs' ? '标签模式' : '平铺模式';
+  document.body.classList.toggle('view-tabs', viewMode === 'tabs');
   const layoutButton = $('layout-grid');
   layoutButton.textContent = tileLayouts[tileLayout];
   layoutButton.hidden = viewMode !== 'grid';
@@ -693,15 +695,18 @@ function renderSessions({ focus = true } = {}) {
     card.className='terminal-card';
     card.classList.toggle('active', s.id === activeSession);
     card.classList.toggle('inactive', !row && !s.floating);
-    card.innerHTML=`<div class="terminal-head"><svg class="terminal-running-outline" aria-hidden="true"><rect x="2.5" y="2.5" width="calc(100% - 5px)" height="calc(100% - 5px)" rx="2"></rect></svg><span class="terminal-card-title agent-label" title="双击重命名"><span class="terminal-card-name">${escapeHtml(s.title)}</span></span><span class="terminal-quota quota-batteries" hidden></span><span class="terminal-tools"><button class="terminal-close rename-session" title="重命名">✎</button><button class="terminal-close image-session" title="发送图片">▧</button><button class="terminal-close minimize-session" title="最小化">−</button><button class="terminal-close float-session" title="${s.floating ? '还原到工作区' : '浮动窗口'}">□</button><button class="terminal-close close-session" title="关闭终端">×</button></span></div><div class="terminal-body"></div>`;
+    card.innerHTML=`<div class="terminal-head"><svg class="terminal-running-outline" aria-hidden="true"><rect x="2.5" y="2.5" width="calc(100% - 5px)" height="calc(100% - 5px)" rx="2"></rect></svg><span class="terminal-card-title agent-label" title="双击重命名"><span class="terminal-card-name">${escapeHtml(s.title)}</span><button class="terminal-close rename-session" title="编辑实例名称">✎</button></span><span class="terminal-quota quota-batteries" hidden></span><span class="terminal-tools"><button class="terminal-close image-session" title="发送图片">▧</button><button class="terminal-close minimize-session" title="最小化">−</button><button class="terminal-close float-session" title="${s.floating ? '还原到工作区' : '浮动窗口'}">□</button><button class="terminal-close close-session" title="关闭终端">×</button></span></div><div class="terminal-body"></div>`;
     const head = card.querySelector('.terminal-head');
     const title = card.querySelector('.terminal-card-title');
     const icon = sessionAgentIcon(s);
     if (icon) title.prepend(icon);
     card.querySelector('.terminal-close.close-session').addEventListener('click',()=>closeSession(s.id));
-    card.querySelector('.terminal-close.rename-session').addEventListener('click',()=>renameSession(s));
+    card.querySelector('.terminal-close.rename-session').addEventListener('click',event=>{event.stopPropagation();renameSession(s);});
+    card.querySelector('.terminal-close.rename-session').addEventListener('dblclick',event=>event.stopPropagation());
     title.addEventListener('dblclick',()=>renameSession(s));
     card.querySelector('.terminal-close.image-session').addEventListener('click',()=>chooseImage(s));
+    card.querySelector('.terminal-close.minimize-session').hidden = viewMode === 'tabs';
+    card.querySelector('.terminal-close.float-session').hidden = viewMode === 'tabs';
     card.querySelector('.terminal-close.minimize-session').addEventListener('click',()=>minimizeSession(s));
     card.querySelector('.terminal-close.float-session').addEventListener('click',()=>toggleFloat(s));
     card.draggable = !s.floating;
@@ -824,11 +829,11 @@ function renderInstances() {
     });
     const actions = document.createElement('span');
     actions.className = 'flat-list-actions instance-actions';
-    for (const [symbol, tooltip, action] of [
-      ['✎', '编辑实例名称', () => renameSession(session)],
-      ['▧', '发送图片', () => chooseImage(session)],
-      ['×', '关闭终端', () => closeSession(session.id)],
-    ]) {
+    const actionItems = [];
+    if (viewMode === 'grid') actionItems.push(['✎', '编辑实例名称', () => renameSession(session)]);
+    actionItems.push(['×', '关闭终端', () => closeSession(session.id)]);
+    row.classList.add(actionItems.length === 1 ? 'actions-one' : 'actions-two');
+    for (const [symbol, tooltip, action] of actionItems) {
       const control = document.createElement('button');
       control.type = 'button';
       control.textContent = symbol;
@@ -1043,7 +1048,7 @@ function openSession(workspaceIndex) {
     return existing.id;
   }
   if(sessions.size>=8){showError('最多同时打开 8 个终端。');return '';}
-  const id=makeId(), title=`${workspace.name||workspace.path} · ${agent.name||agent.command}`;
+  const id=makeId(), title=formatSessionTitle({workspace,agent});
   const session=createTerminalSession({id,title,host,workspace,agent,restoreOnly:false,activate:true});
   renderSessions();
   session.term.writeln('\x1b[90m正在连接 SSH…\x1b[0m');
@@ -1071,7 +1076,7 @@ function openSyncedSession(host, item) {
     hostAgents.find((preset) => preset.command === item.agent_command && preset.name === item.agent_name) ||
     hostAgents.find((preset) => preset.command === item.agent_command) ||
     { name: item.agent_name || item.agent_command, command: item.agent_command };
-  const title = item.display_name || `${workspace.name || workspace.path} · ${agent.name || agent.command}`;
+  const title = formatSessionTitle({workspace,agent,title:item.display_name});
   return createTerminalSession({
     id,
     remoteId: id,
