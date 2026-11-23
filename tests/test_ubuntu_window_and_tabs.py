@@ -119,6 +119,10 @@ class UbuntuWindowAndTabsTest(unittest.TestCase):
         self.assertTrue(self.app.tab_header_edit_button.get_visible())
         self.assertTrue(self.app.tab_header_image_button.get_visible())
         self.assertTrue(self.app.tab_header_close_button.get_visible())
+        header_title_children = self.app.tab_header_title_box.get_children()
+        self.assertEqual(header_title_children.index(self.app.tab_header_edit_button),
+                         header_title_children.index(self.app.tab_header_title) + 1)
+        self.assertFalse(self.app.tab_header_title_box.get_hexpand())
 
         # Clicking second tab switches active page and updates highlight
         second_btn = rows[1].get_children()[0]

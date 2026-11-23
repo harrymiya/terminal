@@ -704,12 +704,15 @@ body.resizing-tiles-y * {
   display: flex;
   align-items: center;
   gap: 5px;
-  flex: 1 1 auto;
+  flex: 0 1 auto;
+  max-width: 45%;
   min-width: 0;
+  overflow: visible;
 }
 
 .terminal-card-name {
-  flex: 1 1 auto;
+  flex: 0 1 auto;
+  max-width: 36ch;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;

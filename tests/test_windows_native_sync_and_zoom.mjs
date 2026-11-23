@@ -198,6 +198,8 @@ const scaleCss = fs.readFileSync(path.join(rootDir, 'windows/native/www/scale.cs
 assert.match(layoutCss, /\.scale-control\s+\.scale-step\s*\{[^}]*display:\s*inline-flex;[^}]*align-items:\s*center;[^}]*justify-content:\s*center;[^}]*padding:\s*0;/s);
 assert.match(scaleCss, /\.toolbar\s+\.scale-control\s+\.scale-step\s*\{[^}]*padding:\s*0;/s);
 assert.match(layoutCss, /\.terminal-card\.terminal-floating\s+\.terminal-head\s*\{[^}]*cursor:\s*move;/s);
+assert.match(layoutCss, /\.terminal-card-title\s*\{[^}]*flex:\s*0 1 auto;[^}]*max-width:\s*45%;[^}]*overflow:\s*visible;/s);
+assert.match(layoutCss, /\.terminal-card-name\s*\{[^}]*max-width:\s*36ch;/s);
 assert.match(windowsUi, /formatSessionTitle\(\{workspace,agent\}\)/);
 assert.match(windowsUi, /card\.querySelector\('\.terminal-close\.minimize-session'\)\.hidden = viewMode === 'tabs'/);
 assert.match(windowsUi, /if \(viewMode === 'grid'\) actionItems\.push\(\['✎', '编辑实例名称'/);
