@@ -2560,7 +2560,7 @@ class App(Gtk.Window):
             pass_entry = Gtk.Entry()
             pass_entry.set_hexpand(True)
             pass_entry.set_visibility(False)
-            pass_entry.set_placeholder_text("留空保留当前密码" if selected else "至少 8 位")
+            pass_entry.set_placeholder_text("留空保留当前密码" if selected else "至少 6 位")
             admin_check = Gtk.CheckButton(label="管理员")
             admin_check.set_active(bool(selected and selected.get("is_admin")))
             grid.attach(Gtk.Label(label="账号", xalign=0), 0, 0, 1, 1); grid.attach(name_entry, 1, 0, 1, 1)
@@ -2587,7 +2587,13 @@ class App(Gtk.Window):
                         sync_data_request(self.data, "POST", "/v1/admin/users", payload)
                     reload_users()
                 except Exception as exc:
-                    status.set_text(str(exc))
+                    msg = str(exc)
+                    if hasattr(exc, "read"):
+                        try:
+                            msg = json.loads(exc.read().decode("utf-8", errors="replace")).get("error") or msg
+                        except Exception:
+                            pass
+                    status.set_text(msg)
             form.destroy()
         def delete_user(_button):
             selected = selected_user()
@@ -2602,7 +2608,13 @@ class App(Gtk.Window):
                     sync_data_request(self.data, "DELETE", "/v1/admin/users/" + str(selected["id"]))
                     reload_users()
                 except Exception as exc:
-                    status.set_text(str(exc))
+                    msg = str(exc)
+                    if hasattr(exc, "read"):
+                        try:
+                            msg = json.loads(exc.read().decode("utf-8", errors="replace")).get("error") or msg
+                        except Exception:
+                            pass
+                    status.set_text(msg)
         add_button.connect("clicked", edit_user, None)
         edit_button.connect("clicked", edit_user)
         delete_button.connect("clicked", delete_user)
