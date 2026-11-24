@@ -2514,7 +2514,7 @@ class App(Gtk.Window):
                 status.set_text(str(exc))
         def edit_user(_button, user=None):
             selected = None if _button is add_button else user if user is not None else selected_user()
-            if user is None and selected is None:
+            if _button is not add_button and selected is None:
                 status.set_text("请先选择一个用户。")
                 return
             form = Gtk.Dialog(title="添加用户" if selected is None else "编辑用户", transient_for=dialog, modal=True)
