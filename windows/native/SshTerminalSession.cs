@@ -69,7 +69,8 @@ internal sealed class SshTerminalSession : IDisposable
 
             var remote = BuildRemoteCommand(Id, directory, agent, restoreOnly);
             var commandLine = string.Join(" ", new[] {
-                QuoteArgument(ssh), "-tt", "-o", "ServerAliveInterval=20", "-o", "ServerAliveCountMax=6",
+                QuoteArgument(ssh), "-tt", "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=3",
+                "-o", "TCPKeepAlive=yes", "-o", "ConnectTimeout=10",
                 "-p", port.ToString(), "-l", QuoteArgument(username), "--", QuoteArgument(address), QuoteArgument(remote)
             });
             var startup = new StartupInfoEx

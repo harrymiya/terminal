@@ -1049,9 +1049,14 @@ function createTerminalSession({ id, remoteId = id, title, host, workspace, agen
     agent: { ...agent },
     restoreOnly: Boolean(restoreOnly),
     startedAt: Date.now(),
+    connectedAt: 0,
     lastOutputAt: 0,
+    hasOutput: false,
     connected: false,
     opened: false,
+    retry: 0,
+    retryTimer: null,
+    manualClosing: false,
   };
   session.autoState = createAutoConfirmState();
   term.onData((data) => { resetAutoConfirm(session.autoState); post({ action: 'input', id: normalizedId, data }); });
@@ -1122,7 +1127,15 @@ function openSyncedSession(host, item) {
   });
 }
 
-function connectSession(session) {
+function connectSession(session, { isRetry = false } = {}) {
+  if (!session || session.manualClosing) return;
+  if (session.retryTimer) { clearTimeout(session.retryTimer); session.retryTimer = null; }
+  if (!isRetry) {
+    session.retry = 0;
+    session.restoreOnly = false;
+  }
+  session.hasOutput = false;
+  session.connectedAt = 0;
   session.connected=false;setBusy(true);
   post({
     action:'connect',
@@ -1133,11 +1146,42 @@ function connectSession(session) {
     cols:session.term.cols,
     rows:session.term.rows,
     restore_only:Boolean(session.restoreOnly),
+    force_reprobe:Boolean(isRetry),
   });
+}
+
+function scheduleSessionReconnect(session, reasonLabel) {
+  if (!session || session.manualClosing || !sessions.has(session.id)) return;
+  if (session.retryTimer) { clearTimeout(session.retryTimer); session.retryTimer = null; }
+  if (session.hasOutput && session.connectedAt && (Date.now() - session.connectedAt >= 30000)) {
+    session.retry = 0;
+  }
+  session.retry += 1;
+  const seconds = Math.min(15, 2 ** Math.min(session.retry - 1, 4));
+  session.term.writeln(`\r\n\x1b[90m[${reasonLabel}，${seconds} 秒后自动重连并恢复会话…]\x1b[0m`);
+  session.retryTimer = setTimeout(() => {
+    session.retryTimer = null;
+    if (sessions.has(session.id) && !session.manualClosing) {
+      connectSession(session, { isRetry: true });
+    }
+  }, seconds * 1000);
+}
+
+function triggerImmediateReconnectForWaitingSessions() {
+  for (const session of sessions.values()) {
+    if (!session.connected && !session.manualClosing && session.retryTimer) {
+      clearTimeout(session.retryTimer);
+      session.retryTimer = null;
+      session.retry = 0;
+      connectSession(session, { isRetry: true });
+    }
+  }
 }
 
 function closeSession(id, { syncDeletion = true, terminateRemote = true, skipRender = false } = {}) {
   const session=sessions.get(id);if(!session)return;
+  session.manualClosing = true;
+  if (session.retryTimer) { clearTimeout(session.retryTimer); session.retryTimer = null; }
   if (syncDeletion) {
     post({action:'session-sync',method:'DELETE',host:session.host,id:session.remoteId||session.id});
   }
@@ -1268,11 +1312,25 @@ function handleNativeMessage(event) {
     return;
   }
   const session=sessions.get(msg.id);
-  if(msg.type==='output'&&session){session.lastOutputAt=performance.now();session.card?.querySelector('.terminal-head')?.classList.add('running');const raw=atob(msg.data);const bytes=Uint8Array.from(raw,c=>c.charCodeAt(0));session.term.write(bytes,()=>watchAutoEnter(session));}
+  if(msg.type==='network-resume'){triggerImmediateReconnectForWaitingSessions();return;}
+  if(msg.type==='output'&&session){session.hasOutput=true;if(!session.connectedAt)session.connectedAt=Date.now();session.lastOutputAt=performance.now();session.card?.querySelector('.terminal-head')?.classList.add('running');const raw=atob(msg.data);const bytes=Uint8Array.from(raw,c=>c.charCodeAt(0));session.term.write(bytes,()=>watchAutoEnter(session));}
   else if(msg.type==='endpoint-selected'&&session){const address=String(msg.address||'').replace(/[\x00-\x1f\x7f]/g,'');session.term.writeln(`\r\n\x1b[90m连接目标 ${address}:${Number(msg.port)||22} …\x1b[0m`);}
-  else if(msg.type==='connected'&&session){session.connected=true;setBusy(false);session.term.focus();}
-  else if(msg.type==='closed'&&session){session.connected=false;setBusy([...sessions.values()].some(s=>s.connected));const exitCode=(Number(msg.code)>>>0).toString(16).toUpperCase().padStart(8,'0');session.term.writeln(`\r\n\x1b[90m[SSH 已断开，退出码 0x${exitCode}；点击右上角 ↻ 重新连接]\x1b[0m`);}
-  else if(msg.type==='error'&&session){session.connected=false;setBusy(false);session.term.writeln(`\r\n\x1b[31m${msg.message}\x1b[0m`);}
+  else if(msg.type==='connected'&&session){session.connected=true;session.connectedAt=session.connectedAt||Date.now();setBusy(false);session.term.focus();}
+  else if(msg.type==='closed'&&session){
+    session.connected=false;
+    setBusy([...sessions.values()].some(s=>s.connected));
+    const exitCode=(Number(msg.code)>>>0).toString(16).toUpperCase().padStart(8,'0');
+    if (Number(msg.code) !== 0 && !session.manualClosing) {
+      scheduleSessionReconnect(session, `SSH 已断开，退出码 0x${exitCode}`);
+    } else {
+      session.term.writeln(`\r\n\x1b[90m[SSH 已退出，退出码 0x${exitCode}；点击右上角 ↻ 重新连接]\x1b[0m`);
+    }
+  }
+  else if(msg.type==='error'&&session){
+    session.connected=false;setBusy(false);
+    session.term.writeln(`\r\n\x1b[31m${msg.message}\x1b[0m`);
+    if (!session.manualClosing) scheduleSessionReconnect(session, '连接失败');
+  }
   else if(msg.type==='saved'){ $('connection-status').title='配置已保存'; }
   else if(msg.type==='notice')showError(msg.message);
 }
@@ -1718,6 +1776,7 @@ function restoreFromOperationLog(entry) {
 }
 
 window.chrome?.webview?.addEventListener('message',handleNativeMessage);
+window.addEventListener('online', triggerImmediateReconnectForWaitingSessions);
 window.addEventListener('resize',()=>{
   const stageRect = stage.getBoundingClientRect();
   for(const s of sessions.values()){

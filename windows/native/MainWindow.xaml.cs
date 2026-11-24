@@ -1,7 +1,9 @@
 using Microsoft.Web.WebView2.Core;
+using Microsoft.Win32;
 using System.IO;
 using System.Diagnostics;
 using System.Net;
+using System.Net.NetworkInformation;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Text.Json;
@@ -62,6 +64,8 @@ public partial class MainWindow : Window
                 ConfigureSyncTimer();
                 ConfigureRefreshTimers();
                 StartMcpServer();
+                SystemEvents.PowerModeChanged += OnPowerModeChanged;
+                NetworkChange.NetworkAddressChanged += OnNetworkAddressChanged;
             };
             Browser.Source = new Uri("https://rdt.local/index.html");
         }
@@ -205,6 +209,7 @@ public partial class MainWindow : Window
         CloseSession(id, terminateRemote: false);
 
         var restoreOnly = message.TryGetProperty("restore_only", out var restoreProp) && restoreProp.ValueKind == JsonValueKind.True;
+        var forceReprobe = message.TryGetProperty("force_reprobe", out var reprobeProp) && reprobeProp.ValueKind == JsonValueKind.True;
 
         var requestedHost = message.GetProperty("host");
         var currentHost = (ConfigStore.Load()["hosts"] as JsonArray)?.OfType<JsonObject>()
@@ -214,7 +219,7 @@ public partial class MainWindow : Window
         var workspace = message.GetProperty("workspace");
         var agent = message.GetProperty("agent");
         var username = Text(host, "username");
-        var (address, port) = ResolveSshEndpoint(host);
+        var (address, port) = ResolveSshEndpoint(host, forceReprobe);
         Send(new { type = "endpoint-selected", id, address, port });
 
         var session = new SshTerminalSession(id);
@@ -1666,7 +1671,7 @@ public partial class MainWindow : Window
     }
 
     private static string SshExecutable() => SshTerminalSession.ResolveSshExecutable();
-    private (string Address, int Port) ResolveSshEndpoint(JsonElement host)
+    private (string Address, int Port) ResolveSshEndpoint(JsonElement host, bool forceReprobe = false)
     {
         var lan = Text(host, "lan_address");
         var external = Text(host, "external_address");
@@ -1679,6 +1684,7 @@ public partial class MainWindow : Window
         if (candidates.Count == 0) throw new ArgumentException("请填写主机 SSH 地址。");
 
         var key = string.Join("\u001f", Text(host, "id"), Text(host, "username"), lan, lanPort.ToString(CultureInfo.InvariantCulture), external, externalPort.ToString(CultureInfo.InvariantCulture));
+        if (forceReprobe) _sshEndpointCache.TryRemove(key, out _);
         var resolution = _sshEndpointCache.GetOrAdd(key, _ => new Lazy<(string Address, int Port)>(
             () => ProbeSshEndpoint(candidates), LazyThreadSafetyMode.ExecutionAndPublication)).Value;
         // The lazy entry is shared by startup probing, terminal connects, and other SSH operations,
@@ -1820,9 +1826,25 @@ public partial class MainWindow : Window
         using var sha = SHA256.Create(); return BitConverter.ToString(sha.ComputeHash(Encoding.UTF8.GetBytes(value))).Replace("-", "").ToLowerInvariant().Substring(0, 32);
     }
 
+    private void OnPowerModeChanged(object? sender, PowerModeChangedEventArgs e)
+    {
+        if (e.Mode != PowerModes.Resume || _disposed) return;
+        _sshEndpointCache.Clear();
+        Dispatcher.BeginInvoke(() => { if (!_disposed) Send(new { type = "network-resume" }); });
+    }
+
+    private void OnNetworkAddressChanged(object? sender, EventArgs e)
+    {
+        if (_disposed) return;
+        _sshEndpointCache.Clear();
+        Dispatcher.BeginInvoke(() => { if (!_disposed) Send(new { type = "network-resume" }); });
+    }
+
     private void Window_Closed(object? sender, EventArgs e)
     {
         _disposed = true;
+        SystemEvents.PowerModeChanged -= OnPowerModeChanged;
+        NetworkChange.NetworkAddressChanged -= OnNetworkAddressChanged;
         _syncTimer.Stop(); _metricsTimer.Stop(); _quotaTimer.Stop();
         _mcpServer?.Dispose(); _mcpServer = null;
         foreach (var session in _sessions.Values.ToArray()) session.Dispose();
