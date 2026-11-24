@@ -67,6 +67,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
@@ -90,10 +91,12 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.GridView
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.MoreHoriz
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Search
@@ -176,6 +179,7 @@ import dev.remote.terminal.data.hasValidConfiguredPorts
 import dev.remote.terminal.data.SessionStore
 import dev.remote.terminal.data.SyncClient
 import dev.remote.terminal.data.LocalStore
+import dev.remote.terminal.data.OperationLogEntry
 import dev.remote.terminal.data.ProjectDirectory
 import dev.remote.terminal.data.QuotaWindow
 import dev.remote.terminal.data.quotaExecutable
@@ -377,7 +381,7 @@ private class TerminalSessionState(
     }
 }
 
-private enum class AppRoute { HOME, MANAGE, TERMINAL, AGENTS, SETTINGS, LOGIN }
+private enum class AppRoute { HOME, MANAGE, TERMINAL, AGENTS, LOGS, SETTINGS, LOGIN }
 
 @Composable
 private fun RemoteTerminalApp(store: LocalStore) {
@@ -389,6 +393,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
         val hosts = remember { mutableStateListOf<HostProfile>().apply { addAll(store.loadHosts()) } }
         val agents = remember { mutableStateListOf<AgentPreset>().apply { addAll(store.loadAgents()) } }
         val sessions = remember { mutableStateListOf<TerminalSessionState>() }
+        val operationLogs = remember { mutableStateListOf<OperationLogEntry>().apply { addAll(store.loadOperationLogs()) } }
         var selectedHostId by rememberSaveable { mutableStateOf(hosts.firstOrNull()?.id.orEmpty()) }
         var selectedAgentId by rememberSaveable { mutableStateOf(agents.firstOrNull()?.id.orEmpty()) }
         var route by rememberSaveable { mutableStateOf(if (!store.loadOfflineMode() && store.loadSyncUrl().isNotBlank() && store.loadSyncToken().isBlank()) AppRoute.LOGIN else AppRoute.HOME) }
@@ -826,22 +831,74 @@ private fun RemoteTerminalApp(store: LocalStore) {
             }
         }
 
-        fun openTask(host: HostProfile, directory: ProjectDirectory, agent: AgentPreset, restoredTask: TerminalTask? = null) {
+        fun recordOperationLog(task: TerminalTask, action: String = "open") {
+            val entry = OperationLogEntry(
+                id = UUID.randomUUID().toString().replace("-", ""),
+                createdAt = System.currentTimeMillis(),
+                hostId = task.host.id,
+                hostName = task.host.name,
+                sshUsername = task.host.username,
+                directoryId = task.directory.id,
+                directoryName = task.directory.name,
+                directoryPath = task.directory.path,
+                agentId = task.agent.id,
+                agentName = task.agent.name,
+                agentCommand = task.agent.command,
+                sessionId = task.id,
+                sessionName = task.displayName,
+                client = "android",
+                action = action,
+            )
+            val merged = store.appendOperationLog(entry)
+            operationLogs.clear()
+            operationLogs.addAll(merged)
+            if (!offlineMode && syncUrl.isNotBlank() && syncToken.isNotBlank()) {
+                scope.launch {
+                    runCatching {
+                        val remote = withContext(SyncClient.dispatcher) { SyncClient.pushOperationLogs(listOf(entry)) }
+                        val synced = store.mergeOperationLogs(remote)
+                        operationLogs.clear()
+                        operationLogs.addAll(synced)
+                    }
+                }
+            }
+        }
+
+        suspend fun syncOperationLogs() {
+            if (offlineMode || syncUrl.isBlank() || syncToken.isBlank()) return
+            val local = store.loadOperationLogs()
+            val remote = withContext(SyncClient.dispatcher) {
+                if (local.isNotEmpty()) SyncClient.pushOperationLogs(local.take(50))
+                else SyncClient.fetchOperationLogs(200)
+            }
+            val merged = store.mergeOperationLogs(remote)
+            operationLogs.clear()
+            operationLogs.addAll(merged)
+        }
+
+        fun openTask(
+            host: HostProfile,
+            directory: ProjectDirectory,
+            agent: AgentPreset,
+            restoredTask: TerminalTask? = null,
+            attachOrCreate: Boolean = false,
+        ) {
             runCatching { TerminalKeepAliveService.start(appContext) }
                 .onFailure { error -> scope.launch { snackbars.showSnackbar("后台 SSH 保活未能启动：${error.message ?: "系统拒绝启动服务"}") } }
             val same = sessions.count { it.task.host.id == host.id && it.task.directory.id == directory.id && it.task.agent.id == agent.id }
             val agentLabel = if (same == 0) agent.name else "${agent.name} ${same + 1}"
             val displayName = if (directory.name.isNotBlank()) "${directory.name} · $agentLabel" else agentLabel
             val task = restoredTask ?: TerminalTask(UUID.randomUUID().toString(), host, directory, agent, displayName)
-            if (restoredTask == null) {
+            if (restoredTask == null || attachOrCreate) {
                 sessionStore.save(task)
                 if (!offlineMode) store.enqueueSessionSync(task, "PUT", SyncClient.sessionItem(task))
+                if (restoredTask == null) recordOperationLog(task, "open")
             }
             val state = TerminalSessionState(task, mainHandler, appContext) { sessionTask ->
                 quotaKey(sessionTask.host, sessionTask.agent.command)?.let(quotas::get)
             }
             state.controller = SshTerminalController(
-                task = task, store = store, restoreOnly = restoredTask != null,
+                task = task, store = store, restoreOnly = restoredTask != null && !attachOrCreate,
                 onStatus = { value ->
                     state.isSessionConnected = value.startsWith("已连接")
                     mainHandler.post {
@@ -874,11 +931,47 @@ private fun RemoteTerminalApp(store: LocalStore) {
             TerminalConnectionRegistry.register(task.id, state.controller)
             AutoConfirmEngine.registerSession(task.id, state)
             sessions.add(state)
-            if (restoredTask == null) {
+            if (restoredTask == null || attachOrCreate) {
                 activePage = sessions.lastIndex
                 route = AppRoute.TERMINAL
             }
             state.controller.start()
+        }
+
+        fun restoreFromLog(entry: OperationLogEntry) {
+            val existingIndex = sessions.indexOfFirst {
+                it.task.id == entry.sessionId || it.task.id.replace("-", "") == entry.sessionId.replace("-", "")
+            }
+            if (existingIndex >= 0) {
+                activePage = existingIndex
+                sessions[existingIndex].unread = false
+                route = AppRoute.TERMINAL
+                return
+            }
+            val host = hosts.firstOrNull { it.id == entry.hostId }
+                ?: hosts.firstOrNull { it.name == entry.hostName }
+            if (host == null) {
+                scope.launch { snackbars.showSnackbar("未找到主机 ${entry.hostName}，请先添加主机") }
+                return
+            }
+            val dir = host.directories.firstOrNull { it.path == entry.directoryPath || it.id == entry.directoryId }
+                ?: ProjectDirectory(
+                    entry.directoryId.ifBlank { UUID.randomUUID().toString() },
+                    entry.directoryName.ifBlank { entry.directoryPath },
+                    entry.directoryPath,
+                )
+            val agent = agents.firstOrNull { it.command == entry.agentCommand || it.id == entry.agentId }
+                ?: AgentPreset(
+                    entry.agentId.ifBlank { UUID.randomUUID().toString() },
+                    entry.agentName.ifBlank { entry.agentCommand },
+                    entry.agentCommand,
+                    "✳",
+                )
+            val targetId = entry.sessionId.ifBlank { UUID.randomUUID().toString() }
+            val displayName = entry.sessionName.ifBlank { "${dir.name} · ${agent.name}" }
+            val task = TerminalTask(targetId, host, dir, agent, displayName)
+            recordOperationLog(task, "resume")
+            openTask(host, dir, agent, restoredTask = task, attachOrCreate = true)
         }
 
         fun openSharedSession(host: HostProfile, item: org.json.JSONObject, activate: Boolean = true) {
@@ -1096,12 +1189,13 @@ private fun RemoteTerminalApp(store: LocalStore) {
                     runCatching { syncSharedSessions(host) }
                         .onFailure { error -> snackbars.showSnackbar("${host.name} 会话同步失败：${error.message}") }
                 }
+                runCatching { syncOperationLogs() }
                 syncLoading = false
                 kotlinx.coroutines.delay(syncIntervalSeconds * 1_000L)
             }
         }
 
-        BackHandler(enabled = if (isPad) (route == AppRoute.SETTINGS || route == AppRoute.LOGIN) else (route != AppRoute.HOME)) {
+        BackHandler(enabled = if (isPad) (route == AppRoute.SETTINGS || route == AppRoute.LOGIN || route == AppRoute.LOGS) else (route != AppRoute.HOME)) {
             route = AppRoute.HOME
         }
 
@@ -1128,6 +1222,10 @@ private fun RemoteTerminalApp(store: LocalStore) {
                             syncWorkspaceList(host, ordered)
                         },
                         onOpenAgents = { route = AppRoute.AGENTS },
+                        onOpenLogs = {
+                            route = AppRoute.LOGS
+                            scope.launch { runCatching { syncOperationLogs() } }
+                        },
                         onOpenSettings = { route = AppRoute.SETTINGS },
                         onStartTask = { host, dir, agent -> openTask(host, dir, agent) },
                         onResumeSession = { index -> activePage = index; sessions[index].unread = false; route = AppRoute.TERMINAL },
@@ -1151,6 +1249,17 @@ private fun RemoteTerminalApp(store: LocalStore) {
                             store.saveAgents(ordered)
                             selectedHost?.let { syncAgentList(it, ordered) }
                         },
+                    )
+                    AppRoute.LOGS -> OperationLogsScreen(
+                        logs = operationLogs,
+                        onBack = { route = AppRoute.HOME },
+                        onRefresh = {
+                            scope.launch {
+                                runCatching { syncOperationLogs() }
+                                    .onFailure { snackbars.showSnackbar("日志同步失败：${it.message}") }
+                            }
+                        },
+                        onRestore = { entry -> restoreFromLog(entry) },
                     )
                     AppRoute.SETTINGS -> SettingsScreen(
                         store = store,
@@ -1295,6 +1404,17 @@ private fun RemoteTerminalApp(store: LocalStore) {
                             store.saveSyncCredentials(username, password, remember)
                             route = AppRoute.HOME
                         },
+                    )
+                    AppRoute.LOGS -> OperationLogsScreen(
+                        logs = operationLogs,
+                        onBack = { route = AppRoute.HOME },
+                        onRefresh = {
+                            scope.launch {
+                                runCatching { syncOperationLogs() }
+                                    .onFailure { snackbars.showSnackbar("日志同步失败：${it.message}") }
+                            }
+                        },
+                        onRestore = { entry -> restoreFromLog(entry) },
                     )
                     else -> PadWorkspace(
                         hosts = hosts,
@@ -1545,7 +1665,7 @@ private fun HomeScreen(
     hosts: List<HostProfile>, agents: List<AgentPreset>, selectedHost: HostProfile?, selectedAgent: AgentPreset?,
     quotaFor: (HostProfile, AgentPreset) -> List<QuotaWindow>?,
     sessions: List<TerminalSessionState>, onSelectHost: (HostProfile) -> Unit, onSelectAgent: (AgentPreset) -> Unit,
-    onManage: () -> Unit, onAddHost: () -> Unit, onAddDirectory: () -> Unit, onOpenAgents: () -> Unit, onOpenSettings: () -> Unit,
+    onManage: () -> Unit, onAddHost: () -> Unit, onAddDirectory: () -> Unit, onOpenAgents: () -> Unit, onOpenLogs: () -> Unit, onOpenSettings: () -> Unit,
     onStartTask: (HostProfile, ProjectDirectory, AgentPreset) -> Unit, onResumeSession: (Int) -> Unit,
     onRenameSession: (TerminalSessionState) -> Unit,
     syncLoading: Boolean,
@@ -1576,6 +1696,9 @@ private fun HomeScreen(
             }
             IconButton(onClick = onOpenAgents) {
                 Icon(Icons.Default.SmartToy, contentDescription = "编辑开发者", tint = Muted)
+            }
+            IconButton(onClick = onOpenLogs) {
+                Icon(Icons.Default.History, contentDescription = "操作日志", tint = Muted)
             }
             IconButton(onClick = onOpenSettings) {
                 Icon(Icons.Default.Settings, contentDescription = "设置", tint = Muted)
@@ -2008,6 +2131,109 @@ private fun EmptyRow(title: String, detail: String, action: () -> Unit, label: S
         Row(Modifier.fillMaxWidth().padding(15.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) { Text(title, color = White, fontSize = 13.sp, fontWeight = FontWeight.Medium); Text(detail, color = Muted, fontSize = 11.sp, modifier = Modifier.padding(top = 3.dp)) }
             TextButton(onClick = action) { Text(label, color = Mint, fontSize = 12.sp) }
+        }
+    }
+}
+
+@Composable
+private fun OperationLogsScreen(
+    logs: List<OperationLogEntry>,
+    onBack: () -> Unit,
+    onRefresh: () -> Unit,
+    onRestore: (OperationLogEntry) -> Unit,
+) {
+    val formatter = remember { java.text.SimpleDateFormat("MM-dd HH:mm:ss", java.util.Locale.getDefault()) }
+    Column(Modifier.fillMaxSize().padding(horizontal = 20.dp)) {
+        Row(Modifier.fillMaxWidth().padding(top = 18.dp, bottom = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onBack) {
+                Icon(Icons.Default.ArrowBack, contentDescription = "返回", tint = White)
+            }
+            Text("操作日志", color = White, fontSize = 18.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            IconButton(onClick = onRefresh) {
+                Icon(Icons.Default.Refresh, contentDescription = "同步日志", tint = Mint)
+            }
+        }
+        if (logs.isEmpty()) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text("暂无操作记录\n打开任意工作区会话后会自动记录并同步", color = Muted, textAlign = TextAlign.Center, fontSize = 13.sp)
+            }
+        } else {
+            LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp), contentPadding = PaddingValues(bottom = 24.dp)) {
+                items(logs, key = { it.id }) { entry ->
+                    Surface(
+                        color = Panel,
+                        shape = RoundedCornerShape(14.dp),
+                        border = BorderStroke(1.dp, Edge),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Column(Modifier.padding(14.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    formatter.format(java.util.Date(entry.createdAt)),
+                                    color = Mint,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                if (entry.client.isNotBlank()) {
+                                    Text(
+                                        entry.client.uppercase(),
+                                        color = Blue,
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .background(Blue.copy(alpha = 0.14f))
+                                            .padding(horizontal = 6.dp, vertical = 2.dp),
+                                    )
+                                }
+                                Spacer(Modifier.weight(1f))
+                                Text(
+                                    if (entry.action == "resume") "重回现场" else "打开会话",
+                                    color = Muted,
+                                    fontSize = 11.sp,
+                                )
+                            }
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                "${entry.agentName.ifBlank { entry.agentCommand }} · ${entry.directoryName.ifBlank { entry.directoryPath }}",
+                                color = White,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                "主机: ${entry.hostName}  ·  目录: ${entry.directoryPath}",
+                                color = Muted,
+                                fontSize = 12.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                "会话: ${entry.sessionName.ifBlank { entry.sessionId }} (${entry.sessionId.take(12)})",
+                                color = Muted,
+                                fontSize = 11.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Spacer(Modifier.height(10.dp))
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                                Button(
+                                    onClick = { onRestore(entry) },
+                                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
+                                    colors = ButtonDefaults.buttonColors(containerColor = Mint, contentColor = Ink),
+                                ) {
+                                    Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("一键重回现场", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }

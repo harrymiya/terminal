@@ -217,6 +217,23 @@ def sync_data_request(config, method, path, item=None):
         return json.load(response)
 
 
+def merge_operation_logs(local_logs, remote_logs, limit=200):
+    merged = {}
+    for item in (remote_logs or []) + (local_logs or []):
+        if isinstance(item, dict) and item.get("id"):
+            merged[str(item["id"])] = item
+    return sorted(merged.values(), key=lambda x: int(x.get("created_at", 0)), reverse=True)[:limit]
+
+
+def sync_operation_logs(config, local_logs=None, limit=200):
+    local = list(local_logs or [])
+    if local:
+        res = sync_data_request(config, "POST", "/v1/operation-logs", {"logs": local[:50]})
+    else:
+        res = sync_data_request(config, "GET", f"/v1/operation-logs?limit={limit}")
+    return merge_operation_logs(local, res.get("logs", []), limit=limit)
+
+
 def sync_host_key(host):
     if host.get("id"):
         return str(host["id"])

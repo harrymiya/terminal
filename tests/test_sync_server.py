@@ -140,6 +140,38 @@ class SyncServerTest(unittest.TestCase):
         active = [host for host in self.request("GET", "/v1/hosts")[1]["hosts"] if not host.get("deleted")]
         self.assertEqual([(host["id"], host["port"]) for host in active], [(canonical_id, 2204)])
 
+    def test_operation_logs_sync(self):
+        log1 = {
+            "id": "1" * 32,
+            "created_at": 1732410000000,
+            "host_id": "host-1",
+            "host_name": "Dev Server",
+            "ssh_username": "dev",
+            "directory_id": "dir-1",
+            "directory_name": "remote-dev",
+            "directory_path": "/home/dev/remote-dev",
+            "agent_id": "agent-1",
+            "agent_name": "Claude Code",
+            "agent_command": "claude",
+            "session_id": "a" * 32,
+            "session_name": "remote-dev · Claude Code",
+            "client": "android",
+            "action": "open",
+        }
+        log2 = {**log1, "id": "2" * 32, "created_at": 1732410005000, "client": "ubuntu"}
+        status, body = self.request("POST", "/v1/operation-logs", {"logs": [log1, log2]})
+        self.assertEqual(status, 200)
+        self.assertEqual([item["id"] for item in body["logs"]], [log2["id"], log1["id"]])
+
+        # Duplicate POST is idempotent
+        status, body = self.request("POST", "/v1/operation-logs", {"logs": [log1]})
+        self.assertEqual(status, 200)
+        self.assertEqual(len(body["logs"]), 2)
+
+        status, body = self.request("GET", "/v1/operation-logs?limit=1")
+        self.assertEqual(status, 200)
+        self.assertEqual([item["id"] for item in body["logs"]], [log2["id"]])
+
 
 if __name__ == "__main__":
     unittest.main()

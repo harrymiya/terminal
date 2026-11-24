@@ -20,7 +20,7 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("Vte", "2.91")
 gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Gtk, Vte, GLib, Gdk, GdkPixbuf, Pango
-from core import load_config, save_config, ssh_argv, close_remote_session_command, should_close_missing_shared_session, auto_enter_signature, confirmation_pending, AutoEnterController, quota_agent, quota_key, read_agent_quota, hourly_quota, upload_image, MAX_IMAGE_BYTES, sync_request, sync_data_request, sync_host_key, legacy_sync_keys, ssh_address, ssh_port, ssh_host_fingerprint, sync_auth_request, save_sync_password, load_sync_password, clear_sync_password, render_battery_pixbuf, save_host_password, clear_host_password, ssh_auth_environment
+from core import load_config, save_config, ssh_argv, close_remote_session_command, should_close_missing_shared_session, auto_enter_signature, confirmation_pending, AutoEnterController, quota_agent, quota_key, read_agent_quota, hourly_quota, upload_image, MAX_IMAGE_BYTES, sync_request, sync_data_request, sync_operation_logs, merge_operation_logs, sync_host_key, legacy_sync_keys, ssh_address, ssh_port, ssh_host_fingerprint, sync_auth_request, save_sync_password, load_sync_password, clear_sync_password, render_battery_pixbuf, save_host_password, clear_host_password, ssh_auth_environment
 from version import VERSION
 from host_metrics import metrics_key, read_host_metrics
 from mcp_server import EmbeddedMCPServer
@@ -1134,6 +1134,10 @@ class App(Gtk.Window):
         refresh_button.set_tooltip_text("立即同步主机、开发者、工作区和共享会话")
         refresh_button.connect("clicked", lambda *_: self.refresh_all_shared())
         brand_row.pack_start(refresh_button, False, False, 0)
+        log_button = Gtk.Button(label="日志")
+        log_button.set_tooltip_text("查看操作日志并一键重回现场")
+        log_button.connect("clicked", self.show_operation_logs)
+        brand_row.pack_start(log_button, False, False, 0)
         settings_button = Gtk.Button()
         settings_button.set_image(Gtk.Image.new_from_icon_name("emblem-system-symbolic", Gtk.IconSize.BUTTON))
         settings_button.set_tooltip_text("系统设置")
@@ -4241,6 +4245,7 @@ class App(Gtk.Window):
             return
         self.refresh_sessions_after_host_profiles = True
         self.sync_host_profiles()
+        self.sync_operation_logs_async()
         for host in self.data["hosts"]:
             self.shared_by_host[self.shared_host_key(host)] = "正在同步…"
         self.update_sync_status()
@@ -4354,7 +4359,158 @@ class App(Gtk.Window):
             GLib.idle_add(show)
         self.sync_executor.submit(worker)
 
-    def open_terminal(self, _button, shared_host=None, shared_item=None, activate=True):
+    def record_operation_log(self, host, directory, agent, session_id, display_name, action="open"):
+        entry = {
+            "id": uuid.uuid4().hex,
+            "created_at": int(time.time() * 1000),
+            "host_id": str(host.get("id", "")),
+            "host_name": str(host.get("name", "")),
+            "ssh_username": str(host.get("username", "")),
+            "directory_id": str(directory.get("id", "")),
+            "directory_name": str(directory.get("name", "")),
+            "directory_path": str(directory.get("path", "")),
+            "agent_id": str(agent.get("id", "")),
+            "agent_name": str(agent.get("name", "")),
+            "agent_command": str(agent.get("command", "")),
+            "session_id": str(session_id),
+            "session_name": str(display_name),
+            "client": "omarchy",
+            "action": action,
+        }
+        self.data["operation_logs"] = merge_operation_logs([entry], self.data.get("operation_logs", []))
+        save_config(self.data)
+        if not self.is_offline_mode() and self.data.get("sync_url") and self.data.get("sync_token"):
+            snapshot = dict(self.data)
+            def worker():
+                try:
+                    merged = sync_operation_logs(snapshot, [entry])
+                    GLib.idle_add(self._apply_merged_operation_logs, merged)
+                except Exception:
+                    pass
+            self.sync_executor.submit(worker)
+
+    def _apply_merged_operation_logs(self, merged):
+        self.data["operation_logs"] = merge_operation_logs(self.data.get("operation_logs", []), merged)
+        save_config(self.data)
+        return False
+
+    def sync_operation_logs_async(self, on_done=None):
+        if self.is_offline_mode() or not self.data.get("sync_url") or not self.data.get("sync_token"):
+            if on_done:
+                GLib.idle_add(on_done, None)
+            return
+        snapshot = dict(self.data)
+        local_logs = list(self.data.get("operation_logs", []))
+        def worker():
+            err = None
+            try:
+                merged = sync_operation_logs(snapshot, local_logs)
+                GLib.idle_add(self._apply_merged_operation_logs, merged)
+            except Exception as exc:
+                err = str(exc)
+            if on_done:
+                GLib.idle_add(on_done, err)
+        self.sync_executor.submit(worker)
+
+    def restore_from_operation_log(self, entry):
+        target_sid = str(entry.get("session_id", "")).strip()
+        existing = next((s for s in self.sessions if s.get("id") == target_sid or s.get("id", "").replace("-", "") == target_sid.replace("-", "")), None)
+        if existing:
+            if existing.get("minimized_button") is not None:
+                self.restore_minimized_session(existing)
+            elif existing.get("floating_window") is not None:
+                existing["floating_window"].activate()
+            else:
+                terminal = existing["terminal"]
+                if not self.tiled:
+                    self.tabs.set_current_page(self.tabs.page_num(terminal))
+                terminal.grab_focus()
+            return
+        hosts = self.data.get("hosts", [])
+        host = next((h for h in hosts if h.get("id") == entry.get("host_id")), None) or next((h for h in hosts if h.get("name") == entry.get("host_name")), None)
+        if not host:
+            self.message("无法重回现场", f"未找到主机 {entry.get('host_name', '')}，请先添加主机。")
+            return
+        item = {
+            "id": target_sid or uuid.uuid4().hex,
+            "directory_name": entry.get("directory_name") or entry.get("directory_path", ""),
+            "directory_path": entry.get("directory_path", ""),
+            "agent_name": entry.get("agent_name") or entry.get("agent_command", ""),
+            "agent_command": entry.get("agent_command", ""),
+            "display_name": entry.get("session_name") or f"{entry.get('agent_name', '')} · {entry.get('directory_name', '')}",
+        }
+        self.open_terminal(None, shared_host=host, shared_item=item, activate=True, attach_or_create=True, log_action="resume")
+
+    def show_operation_logs(self, _button=None):
+        dialog = Gtk.Dialog(title="操作日志", transient_for=self, modal=True)
+        dialog.set_default_size(680, 520)
+        area = dialog.get_content_area()
+        area.set_spacing(10)
+        area.set_margin_start(14); area.set_margin_end(14); area.set_margin_top(12); area.set_margin_bottom(12)
+        header = Gtk.Box(spacing=8)
+        title = Gtk.Label(label="操作日志 · 一键重回现场", xalign=0)
+        title.get_style_context().add_class("section")
+        header.pack_start(title, True, True, 0)
+        refresh_btn = Gtk.Button(label="同步刷新")
+        header.pack_start(refresh_btn, False, False, 0)
+        area.pack_start(header, False, False, 0)
+
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroller.set_vexpand(True)
+        list_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        scroller.add(list_box)
+        area.pack_start(scroller, True, True, 0)
+
+        def render_rows():
+            for child in list(list_box.get_children()):
+                list_box.remove(child)
+            logs = self.data.get("operation_logs", [])
+            if not logs:
+                empty = Gtk.Label(label="暂无操作记录，打开任意工作区会话后会自动记录并同步。", xalign=0.5)
+                empty.get_style_context().add_class("subtitle")
+                list_box.pack_start(empty, True, True, 24)
+            else:
+                for entry in logs:
+                    card = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+                    card.get_style_context().add_class("sidebar-row")
+                    info = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+                    ts = time.strftime("%m-%d %H:%M:%S", time.localtime(int(entry.get("created_at", 0)) / 1000.0))
+                    client = str(entry.get("client", "")).upper() or "LOCAL"
+                    action_label = "重回现场" if entry.get("action") == "resume" else "打开会话"
+                    top_lbl = Gtk.Label(label=f"[{ts}] [{client}] {action_label}", xalign=0)
+                    top_lbl.get_style_context().add_class("subtitle")
+                    main_lbl = Gtk.Label(label=f"{entry.get('agent_name') or entry.get('agent_command', '')} · {entry.get('directory_name') or entry.get('directory_path', '')}", xalign=0)
+                    main_lbl.set_ellipsize(Pango.EllipsizeMode.END)
+                    sub_lbl = Gtk.Label(label=f"主机: {entry.get('host_name', '')} · 目录: {entry.get('directory_path', '')} · 会话: {entry.get('session_name') or entry.get('session_id', '')[:12]}", xalign=0)
+                    sub_lbl.get_style_context().add_class("subtitle")
+                    sub_lbl.set_ellipsize(Pango.EllipsizeMode.END)
+                    info.pack_start(top_lbl, False, False, 0)
+                    info.pack_start(main_lbl, False, False, 0)
+                    info.pack_start(sub_lbl, False, False, 0)
+                    card.pack_start(info, True, True, 0)
+                    restore_btn = Gtk.Button(label="一键重回现场")
+                    restore_btn.connect("clicked", lambda _b, item=entry: (dialog.destroy(), self.restore_from_operation_log(item)))
+                    card.pack_start(restore_btn, False, False, 0)
+                    list_box.pack_start(card, False, False, 0)
+            list_box.show_all()
+
+        def on_refresh(_btn):
+            refresh_btn.set_sensitive(False)
+            def done(_err):
+                refresh_btn.set_sensitive(True)
+                render_rows()
+                return False
+            self.sync_operation_logs_async(on_done=done)
+
+        refresh_btn.connect("clicked", on_refresh)
+        render_rows()
+        self.sync_operation_logs_async(on_done=lambda _e: (render_rows(), False)[1])
+        dialog.add_button("关闭", Gtk.ResponseType.CLOSE)
+        dialog.run()
+        dialog.destroy()
+
+    def open_terminal(self, _button, shared_host=None, shared_item=None, activate=True, attach_or_create=False, log_action="open"):
         host = shared_host or self.current_host()
         di, ai = self.directories.get_active(), self.agents.get_active()
         if not host or (shared_item is None and (di < 0 or ai < 0)):
@@ -4388,12 +4544,13 @@ class App(Gtk.Window):
         socket_dir = tempfile.mkdtemp(prefix="rdt-")
         socket_path = os.path.join(socket_dir, "ssh")
         session_id = shared_item["id"] if shared_item else uuid.uuid4().hex
-        argv, _ = ssh_argv(host, directory["path"], agent["command"], session_id=session_id, control_path=socket_path, restore_only=shared_item is not None)
+        argv, _ = ssh_argv(host, directory["path"], agent["command"], session_id=session_id, control_path=socket_path, restore_only=(shared_item is not None and not attach_or_create))
         display_name = session_display_name(shared_item, agent) if shared_item else f"{agent['name']} · {directory['name']}"
         item = {"id": session_id, "directory_path": directory["path"], "directory_name": directory["name"],
                 "agent_name": agent["name"], "agent_command": agent["command"], "display_name": display_name}
-        if not shared_item:
+        if not shared_item or attach_or_create:
             self.sync_async(host, "PUT", session_id, item)
+            self.record_operation_log(host, directory, agent, session_id, display_name, action=log_action)
         terminal = Vte.Terminal()
         self.apply_terminal_theme(terminal)
         def copy_selection(widget):

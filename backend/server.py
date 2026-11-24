@@ -11,7 +11,7 @@ import sqlite3
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 
 MAX_BODY = 65536
 FIELDS = ("id", "directory_path", "directory_name", "agent_name", "agent_command", "display_name")
@@ -181,6 +181,8 @@ def create_server(address, database, token=None):
         db.execute("CREATE TABLE IF NOT EXISTS agent_history (user_id INTEGER NOT NULL, host_id TEXT NOT NULL, revision INTEGER NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(user_id, host_id, revision))")
         db.execute("CREATE TABLE IF NOT EXISTS account_host_state (user_id INTEGER NOT NULL, host_id TEXT NOT NULL, revision INTEGER NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(user_id, host_id))")
         db.execute("CREATE TABLE IF NOT EXISTS account_hosts (user_id INTEGER NOT NULL, host_id TEXT NOT NULL, payload TEXT NOT NULL, deleted INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(user_id, host_id))")
+        db.execute("CREATE TABLE IF NOT EXISTS account_operation_logs (user_id INTEGER NOT NULL, id TEXT NOT NULL, created_at INTEGER NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(user_id, id))")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_operation_logs_user_time ON account_operation_logs(user_id, created_at DESC)")
         db.execute("UPDATE users SET must_change = 0 WHERE must_change != 0")
         if db.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
             username = os.environ.get("RDT_SYNC_BOOTSTRAP_USERNAME", "lirui").strip().lower()
@@ -352,6 +354,18 @@ def create_server(address, database, token=None):
                     configured = row is not None
                 return self.reply(200, {"workspaces": json.loads(current_payload), "configured": configured,
                                         "revision": history, "etag": workspace_revision(current_payload)})
+            if path == "/v1/operation-logs":
+                try:
+                    raw_limit = dict(parse_qsl(urlsplit(self.path).query)).get("limit", "200")
+                    limit = max(1, min(500, int(raw_limit)))
+                except (TypeError, ValueError):
+                    limit = 200
+                with sqlite3.connect(database) as db:
+                    rows = db.execute(
+                        "SELECT payload FROM account_operation_logs WHERE user_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                        (self.user_id, limit),
+                    ).fetchall()
+                return self.reply(200, {"logs": [json.loads(r[0]) for r in rows]})
             if path != "/v1/sessions":
                 return self.reply(404, {"error": "not found"})
             with sqlite3.connect(database) as db:
@@ -408,6 +422,63 @@ def create_server(address, database, token=None):
                     with sqlite3.connect(database) as db:
                         db.execute("DELETE FROM auth_tokens WHERE token_hash = ?", (hashlib.sha256(bearer.encode()).digest(),))
                 return self.reply(200, {"logged_out": True})
+            if path == "/v1/operation-logs":
+                if not self.authorized(): return
+                try:
+                    length = int(self.headers.get("Content-Length", "-1"))
+                    if length < 0 or length > MAX_BODY * 16:
+                        raise ValueError()
+                    data = json.loads(self.rfile.read(length))
+                    raw_logs = data.get("logs") if isinstance(data, dict) and isinstance(data.get("logs"), list) else ([data] if isinstance(data, dict) else None)
+                    if raw_logs is None:
+                        raise ValueError()
+                    normalized = []
+                    for entry in raw_logs:
+                        if not isinstance(entry, dict):
+                            raise ValueError()
+                        log_id = str(entry.get("id", "")).strip()
+                        if not log_id or len(log_id) > 64:
+                            raise ValueError()
+                        created_at = int(entry.get("created_at", 0))
+                        if created_at <= 0:
+                            created_at = int(time.time() * 1000)
+                        clean = {
+                            "id": log_id,
+                            "created_at": created_at,
+                            "host_id": str(entry.get("host_id", ""))[:256],
+                            "host_name": str(entry.get("host_name", ""))[:256],
+                            "ssh_username": str(entry.get("ssh_username", ""))[:256],
+                            "directory_id": str(entry.get("directory_id", ""))[:256],
+                            "directory_name": str(entry.get("directory_name", ""))[:256],
+                            "directory_path": str(entry.get("directory_path", ""))[:4096],
+                            "agent_id": str(entry.get("agent_id", ""))[:256],
+                            "agent_name": str(entry.get("agent_name", ""))[:256],
+                            "agent_command": str(entry.get("agent_command", ""))[:4096],
+                            "session_id": str(entry.get("session_id", ""))[:256],
+                            "session_name": str(entry.get("session_name", ""))[:512],
+                            "client": str(entry.get("client", ""))[:64],
+                            "action": str(entry.get("action", "open"))[:64] or "open",
+                        }
+                        if not clean["host_id"] or not clean["directory_path"] or not clean["agent_command"] or not clean["session_id"]:
+                            raise ValueError()
+                        normalized.append(clean)
+                except (ValueError, TypeError, UnicodeDecodeError, json.JSONDecodeError):
+                    return self.reply(400, {"error": "invalid operation log"})
+                with sqlite3.connect(database) as db:
+                    for item in normalized:
+                        db.execute(
+                            "INSERT OR IGNORE INTO account_operation_logs(user_id, id, created_at, payload) VALUES (?, ?, ?, ?)",
+                            (self.user_id, item["id"], item["created_at"], json.dumps(item, ensure_ascii=False)),
+                        )
+                    db.execute(
+                        "DELETE FROM account_operation_logs WHERE user_id = ? AND id NOT IN (SELECT id FROM account_operation_logs WHERE user_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 500)",
+                        (self.user_id, self.user_id),
+                    )
+                    rows = db.execute(
+                        "SELECT payload FROM account_operation_logs WHERE user_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 200",
+                        (self.user_id,),
+                    ).fetchall()
+                return self.reply(200, {"logs": [json.loads(r[0]) for r in rows]})
             return self.reply(404, {"error": "not found"})
 
         def do_PUT(self):
@@ -729,7 +800,7 @@ def create_server(address, database, token=None):
                     if not row: return self.reply(404, {"error": "user not found"})
                     if row[0] and db.execute("SELECT COUNT(*) FROM users WHERE is_admin = 1").fetchone()[0] <= 1:
                         return self.reply(400, {"error": "at least one administrator is required"})
-                    for table in ("auth_tokens", "account_sessions", "account_workspaces", "workspace_history", "account_agents", "agent_history", "account_host_state", "account_hosts"):
+                    for table in ("auth_tokens", "account_sessions", "account_workspaces", "workspace_history", "account_agents", "agent_history", "account_host_state", "account_hosts", "account_operation_logs"):
                         db.execute(f"DELETE FROM {table} WHERE user_id = ?", (user_id,))
                     db.execute("DELETE FROM users WHERE id = ?", (user_id,))
                 return self.reply(200, {"deleted": user_id})

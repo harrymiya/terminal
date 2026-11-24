@@ -1082,6 +1082,7 @@ function openSession(workspaceIndex) {
   if(sessions.size>=8){showError('最多同时打开 8 个终端。');return '';}
   const id=makeId(), title=formatSessionTitle({workspace,agent});
   const session=createTerminalSession({id,title,host,workspace,agent,restoreOnly:false,activate:true});
+  recordOperationLog({ sessionId: id, sessionName: title, host, workspace, agent, action: 'open' });
   renderSessions();
   session.term.writeln('\x1b[90m正在连接 SSH…\x1b[0m');
   post({action:'session-sync',method:'PUT',host:session.host,id,item:buildSessionSyncItem(session)});
@@ -1223,6 +1224,7 @@ function reconcileSyncedSessions(syncedHosts, remappedHosts = {}) {
 function handleNativeMessage(event) {
   const msg=event.data;
   if(msg.type==='config'){normalizeConfig(msg.config);return;}
+  if(msg.type==='operation-logs'){config.operation_logs=Array.isArray(msg.logs)?msg.logs:[];if($('operation-logs-dialog')?.open)renderOperationLogs();return;}
   if(msg.type==='sync-sessions'){reconcileSyncedSessions(msg.hosts||{},msg.remapped_hosts||{});return;}
   if(msg.type==='sync-auth-result'){if(msg.auth||(!msg.success&&msg.manual))showError(msg.message);else if(msg.success&&msg.manual)$('connection-status').title=msg.message;else if(!msg.success)$('connection-status').title=`同步失败：${msg.message}`;return;}
   if(msg.type==='admin-users'){renderAdminUsers(msg.users||[]);return;}
@@ -1413,6 +1415,8 @@ for (const button of document.querySelectorAll('button[data-close-dialog]')) {
   button.addEventListener('click', () => button.closest('dialog').close('cancel'));
 }
 $('settings').addEventListener('click',openSettings);
+$('operation-logs')?.addEventListener('click',openOperationLogsDialog);
+$('operation-logs-refresh')?.addEventListener('click',()=>post({action:'sync-operation-logs'}));
 $('theme-select').addEventListener('change',()=>{config.theme=$('theme-select').value;applyTheme();sendConfig();});
 $('settings-save').addEventListener('click',(event)=>{event.preventDefault();const oldUrl=config.sync_url||'';config.auto_enter=$('auto-enter').checked;config.auto_enter_delay=Math.max(50,Math.min(30000,Number($('auto-enter-delay').value)||1000));config.agent_quota_interval_seconds=Math.max(15,Math.min(300,Number($('quota-interval').value)||60));config.host_metrics_interval_seconds=Math.max(5,Math.min(300,Number($('metrics-interval').value)||5));config.sync_interval_seconds=Math.max(5,Math.min(300,Number($('sync-interval').value)||5));config.sync_url=$('sync-url').value.trim().replace(/\/$/,'');config.auto_sync_enabled=$('auto-sync').checked;config.offline_mode=$('offline-mode').checked;if(oldUrl!==config.sync_url)config.sync_token='';sendConfig();$('settings-dialog').close('save');});
 $('sync-login').addEventListener('click',()=>{const username=prompt('同步账号',config.sync_username||'');if(!username)return;const password=prompt('同步密码');if(password===null)return;post({action:'sync-auth',mode:'login',username:username.trim(),password});});
@@ -1562,6 +1566,120 @@ async function imageData(file){
     return {data,width:sourceWidth,height:sourceHeight};
   }finally{URL.revokeObjectURL(objectUrl);}
 }
+function recordOperationLog({ sessionId, sessionName, host, workspace, agent, action = 'open' }) {
+  const entry = {
+    id: makeId(),
+    created_at: Date.now(),
+    host_id: String(host?.id || ''),
+    host_name: String(host?.name || ''),
+    ssh_username: String(host?.username || ''),
+    directory_id: String(workspace?.id || ''),
+    directory_name: String(workspace?.name || ''),
+    directory_path: String(workspace?.path || ''),
+    agent_id: String(agent?.id || ''),
+    agent_name: String(agent?.name || ''),
+    agent_command: String(agent?.command || ''),
+    session_id: String(sessionId || ''),
+    session_name: String(sessionName || ''),
+    client: 'windows',
+    action,
+  };
+  const existing = Array.isArray(config.operation_logs) ? config.operation_logs : [];
+  config.operation_logs = [entry, ...existing].slice(0, 200);
+  post({ action: 'record-operation-log', entry });
+}
+
+function renderOperationLogs() {
+  const container = $('operation-logs-list');
+  if (!container) return;
+  container.innerHTML = '';
+  const logs = Array.isArray(config.operation_logs) ? config.operation_logs : [];
+  if (!logs.length) {
+    const empty = document.createElement('div');
+    empty.className = 'muted small';
+    empty.textContent = '暂无操作记录，打开任意工作区会话后会自动记录并同步。';
+    container.appendChild(empty);
+    return;
+  }
+  for (const entry of logs) {
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px;border:1px solid var(--edge);border-radius:8px;margin-bottom:8px;';
+    const info = document.createElement('div');
+    info.style.cssText = 'min-width:0;flex:1;';
+    const ts = new Date(Number(entry.created_at) || Date.now()).toLocaleString();
+    const client = String(entry.client || 'LOCAL').toUpperCase();
+    const actionLabel = entry.action === 'resume' ? '重回现场' : '打开会话';
+    const meta = document.createElement('div');
+    meta.className = 'muted small';
+    meta.textContent = `[${ts}] [${client}] ${actionLabel}`;
+    const title = document.createElement('div');
+    title.style.cssText = 'font-weight:600;margin:2px 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+    title.textContent = `${entry.agent_name || entry.agent_command} · ${entry.directory_name || entry.directory_path}`;
+    const detail = document.createElement('div');
+    detail.className = 'muted small';
+    detail.style.cssText = 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+    detail.textContent = `主机: ${entry.host_name || ''} · 目录: ${entry.directory_path || ''} · 会话: ${entry.session_name || (entry.session_id || '').slice(0, 12)}`;
+    info.append(meta, title, detail);
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'button primary';
+    btn.textContent = '一键重回现场';
+    btn.onclick = () => {
+      $('operation-logs-dialog')?.close();
+      restoreFromOperationLog(entry);
+    };
+    row.append(info, btn);
+    container.appendChild(row);
+  }
+}
+
+function openOperationLogsDialog() {
+  renderOperationLogs();
+  post({ action: 'sync-operation-logs' });
+  $('operation-logs-dialog')?.showModal();
+}
+
+function restoreFromOperationLog(entry) {
+  const sid = normalizeSessionId(entry.session_id || '');
+  const existing = [...sessions.values()].find((s) => s.id === sid || s.remoteId === sid);
+  if (existing) {
+    if (existing.minimized) restoreSession(existing.id);
+    else {
+      activeSession = existing.id;
+      renderSessions();
+      existing.term.focus();
+    }
+    return;
+  }
+  const hosts = Array.isArray(config.hosts) ? config.hosts : [];
+  const host = hosts.find((h) => h.id === entry.host_id) || hosts.find((h) => h.name === entry.host_name);
+  if (!host) {
+    showError(`未找到主机 ${entry.host_name || ''}，请先添加主机。`);
+    return;
+  }
+  if (sessions.size >= 8) {
+    showError('最多同时打开 8 个终端。');
+    return;
+  }
+  const workspace = (host.directories || []).find((d) => d.path === entry.directory_path || d.id === entry.directory_id) || {
+    id: entry.directory_id || makeId(),
+    name: entry.directory_name || entry.directory_path,
+    path: entry.directory_path,
+  };
+  const agent = agentsForHost(host).find((a) => a.command === entry.agent_command || a.id === entry.agent_id) || {
+    id: entry.agent_id || makeId(),
+    name: entry.agent_name || entry.agent_command,
+    command: entry.agent_command,
+  };
+  const id = sid || makeId();
+  const title = entry.session_name || formatSessionTitle({ workspace, agent });
+  const session = createTerminalSession({ id, remoteId: id, title, host, workspace, agent, restoreOnly: false, activate: true });
+  recordOperationLog({ sessionId: id, sessionName: title, host, workspace, agent, action: 'resume' });
+  renderSessions();
+  connectSession(session);
+  session.term.focus();
+}
+
 window.chrome?.webview?.addEventListener('message',handleNativeMessage);
 window.addEventListener('resize',()=>{
   const stageRect = stage.getBoundingClientRect();

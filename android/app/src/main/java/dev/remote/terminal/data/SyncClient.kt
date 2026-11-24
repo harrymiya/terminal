@@ -265,4 +265,52 @@ object SyncClient {
         }
         throw lastException ?: IllegalStateException("Agent 保存失败")
     }
+
+    fun operationLogJson(entry: OperationLogEntry): JSONObject = JSONObject()
+        .put("id", entry.id)
+        .put("created_at", entry.createdAt)
+        .put("host_id", entry.hostId)
+        .put("host_name", entry.hostName)
+        .put("ssh_username", entry.sshUsername)
+        .put("directory_id", entry.directoryId)
+        .put("directory_name", entry.directoryName)
+        .put("directory_path", entry.directoryPath)
+        .put("agent_id", entry.agentId)
+        .put("agent_name", entry.agentName)
+        .put("agent_command", entry.agentCommand)
+        .put("session_id", entry.sessionId)
+        .put("session_name", entry.sessionName)
+        .put("client", entry.client)
+        .put("action", entry.action)
+
+    fun operationLogFromJson(obj: JSONObject): OperationLogEntry = OperationLogEntry(
+        id = obj.getString("id"),
+        createdAt = obj.getLong("created_at"),
+        hostId = obj.optString("host_id", ""),
+        hostName = obj.optString("host_name", ""),
+        sshUsername = obj.optString("ssh_username", ""),
+        directoryId = obj.optString("directory_id", ""),
+        directoryName = obj.optString("directory_name", ""),
+        directoryPath = obj.optString("directory_path", ""),
+        agentId = obj.optString("agent_id", ""),
+        agentName = obj.optString("agent_name", ""),
+        agentCommand = obj.optString("agent_command", ""),
+        sessionId = obj.optString("session_id", ""),
+        sessionName = obj.optString("session_name", ""),
+        client = obj.optString("client", ""),
+        action = obj.optString("action", "open"),
+    )
+
+    fun fetchOperationLogs(limit: Int = 200): List<OperationLogEntry> {
+        val array = accountRequest("GET", "/v1/operation-logs?limit=$limit").getJSONArray("logs")
+        return (0 until array.length()).map { operationLogFromJson(array.getJSONObject(it)) }
+    }
+
+    fun pushOperationLogs(logs: List<OperationLogEntry>): List<OperationLogEntry> {
+        val array = JSONArray()
+        logs.forEach { array.put(operationLogJson(it)) }
+        val response = accountRequest("POST", "/v1/operation-logs", JSONObject().put("logs", array))
+        val result = response.optJSONArray("logs") ?: return logs
+        return (0 until result.length()).map { operationLogFromJson(result.getJSONObject(it)) }
+    }
 }

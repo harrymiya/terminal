@@ -99,6 +99,8 @@ public partial class MainWindow : Window
                 case "mcp-info": ShowMcpInfo(); break;
                 case "delete-host-profile": _ = DeleteHostProfileAsync(Text(message, "host_id")); break;
                 case "session-sync": HandleSessionSyncMessage(message); break;
+                case "record-operation-log": _ = RecordOperationLogAsync(message); break;
+                case "sync-operation-logs": _ = SyncOperationLogsActionAsync(); break;
                 case "browse-directories": _ = BrowseDirectoriesAsync(message); break;
                 case "admin-users": _ = GetAdminUsersAsync(); break;
                 case "admin-user-save": _ = SaveAdminUserAsync(message); break;
@@ -841,7 +843,108 @@ public partial class MainWindow : Window
             latest["shared_sessions"] = latestShared;
             ConfigStore.Save(latest);
         }).Task.ConfigureAwait(false);
+        _ = SyncOperationLogsAsync(url, token);
         return (finalSynced, remappedJson);
+    }
+
+    private static JsonArray MergeOperationLogs(JsonArray? localLogs, JsonArray? remoteLogs, int limit = 200)
+    {
+        var byId = new Dictionary<string, JsonObject>(StringComparer.Ordinal);
+        foreach (var source in new[] { remoteLogs, localLogs })
+        {
+            if (source is null) continue;
+            foreach (var item in source.OfType<JsonObject>())
+            {
+                var id = Text(item, "id");
+                if (id.Length > 0) byId[id] = Clone(item);
+            }
+        }
+        var sorted = byId.Values
+            .OrderByDescending(item => item["created_at"]?.GetValue<long>() ?? 0L)
+            .Take(limit);
+        var result = new JsonArray();
+        foreach (var item in sorted) result.Add(item);
+        return result;
+    }
+
+    private async Task RecordOperationLogAsync(JsonElement message)
+    {
+        if (!message.TryGetProperty("entry", out var entryEl) || entryEl.ValueKind != JsonValueKind.Object) return;
+        var entry = JsonNode.Parse(entryEl.GetRawText()) as JsonObject;
+        if (entry is null) return;
+        var incoming = new JsonArray { entry };
+        JsonArray merged = incoming;
+        var config = ConfigStore.Load();
+        merged = MergeOperationLogs(new JsonArray { Clone(entry) }, config["operation_logs"] as JsonArray);
+        config["operation_logs"] = merged;
+        ConfigStore.Save(config);
+        Send(new { type = "operation-logs", logs = merged });
+
+        var url = Text(config, "sync_url").TrimEnd('/');
+        var token = Text(config, "sync_token");
+        if (!Bool(config, "offline_mode") && url.Length > 0 && token.Length > 0)
+        {
+            try
+            {
+                var body = new JsonObject { ["logs"] = new JsonArray { Clone(entry) } };
+                var response = ParseObject(await SyncRequestAsync(url + "/v1/operation-logs", "POST", token, body).ConfigureAwait(false));
+                var remote = response["logs"] as JsonArray;
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    if (_disposed) return;
+                    var latest = ConfigStore.Load();
+                    var finalLogs = MergeOperationLogs(latest["operation_logs"] as JsonArray, remote);
+                    latest["operation_logs"] = finalLogs;
+                    ConfigStore.Save(latest);
+                    Send(new { type = "operation-logs", logs = finalLogs });
+                }).Task.ConfigureAwait(false);
+            }
+            catch { }
+        }
+    }
+
+    private Task SyncOperationLogsActionAsync()
+    {
+        var config = ConfigStore.Load();
+        var url = Text(config, "sync_url").TrimEnd('/');
+        var token = Text(config, "sync_token");
+        if (Bool(config, "offline_mode") || url.Length == 0 || token.Length == 0)
+        {
+            Send(new { type = "operation-logs", logs = config["operation_logs"] as JsonArray ?? new JsonArray() });
+            return Task.CompletedTask;
+        }
+        return SyncOperationLogsAsync(url, token);
+    }
+
+    private async Task SyncOperationLogsAsync(string url, string token)
+    {
+        try
+        {
+            var config = ConfigStore.Load();
+            var local = config["operation_logs"] as JsonArray ?? new JsonArray();
+            JsonObject response;
+            if (local.Count > 0)
+            {
+                var slice = new JsonArray();
+                foreach (var item in local.OfType<JsonObject>().Take(50)) slice.Add(Clone(item));
+                response = ParseObject(await SyncRequestAsync(url + "/v1/operation-logs", "POST", token, new JsonObject { ["logs"] = slice }).ConfigureAwait(false));
+            }
+            else
+            {
+                response = ParseObject(await SyncRequestAsync(url + "/v1/operation-logs?limit=200", "GET", token, null).ConfigureAwait(false));
+            }
+            var remote = response["logs"] as JsonArray;
+            await Dispatcher.InvokeAsync(() =>
+            {
+                if (_disposed) return;
+                var latest = ConfigStore.Load();
+                var merged = MergeOperationLogs(latest["operation_logs"] as JsonArray, remote);
+                latest["operation_logs"] = merged;
+                ConfigStore.Save(latest);
+                Send(new { type = "operation-logs", logs = merged });
+            }).Task.ConfigureAwait(false);
+        }
+        catch { }
     }
 
     private static async Task<JsonArray?> SyncHostSessionsAsync(

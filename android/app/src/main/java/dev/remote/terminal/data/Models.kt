@@ -22,6 +22,24 @@ data class ProjectDirectory(
     val icon: String = "📁",
 )
 
+data class OperationLogEntry(
+    val id: String,
+    val createdAt: Long,
+    val hostId: String,
+    val hostName: String,
+    val sshUsername: String,
+    val directoryId: String,
+    val directoryName: String,
+    val directoryPath: String,
+    val agentId: String,
+    val agentName: String,
+    val agentCommand: String,
+    val sessionId: String,
+    val sessionName: String,
+    val client: String = "android",
+    val action: String = "open",
+)
+
 data class HostProfile(
     val id: String,
     val name: String,
@@ -455,6 +473,75 @@ class LocalStore(context: Context) {
         val keys = preferences.getStringSet("trusted_host_keys", emptySet()).orEmpty().toMutableSet()
         keys += "$address:$port|$fingerprint"
         preferences.edit().putStringSet("trusted_host_keys", keys).apply()
+    }
+
+    fun loadOperationLogs(): List<OperationLogEntry> = runCatching {
+        val raw = preferences.getString("operation_logs", null) ?: return emptyList()
+        val array = JSONArray(raw)
+        (0 until array.length()).map { index ->
+            val obj = array.getJSONObject(index)
+            OperationLogEntry(
+                id = obj.getString("id"),
+                createdAt = obj.getLong("created_at"),
+                hostId = obj.optString("host_id", ""),
+                hostName = obj.optString("host_name", ""),
+                sshUsername = obj.optString("ssh_username", ""),
+                directoryId = obj.optString("directory_id", ""),
+                directoryName = obj.optString("directory_name", ""),
+                directoryPath = obj.optString("directory_path", ""),
+                agentId = obj.optString("agent_id", ""),
+                agentName = obj.optString("agent_name", ""),
+                agentCommand = obj.optString("agent_command", ""),
+                sessionId = obj.optString("session_id", ""),
+                sessionName = obj.optString("session_name", ""),
+                client = obj.optString("client", "android"),
+                action = obj.optString("action", "open"),
+            )
+        }.sortedByDescending { it.createdAt }
+    }.getOrDefault(emptyList())
+
+    fun saveOperationLogs(logs: List<OperationLogEntry>) {
+        val trimmed = logs.distinctBy { it.id }.sortedByDescending { it.createdAt }.take(200)
+        val array = JSONArray()
+        trimmed.forEach { entry ->
+            array.put(
+                JSONObject()
+                    .put("id", entry.id)
+                    .put("created_at", entry.createdAt)
+                    .put("host_id", entry.hostId)
+                    .put("host_name", entry.hostName)
+                    .put("ssh_username", entry.sshUsername)
+                    .put("directory_id", entry.directoryId)
+                    .put("directory_name", entry.directoryName)
+                    .put("directory_path", entry.directoryPath)
+                    .put("agent_id", entry.agentId)
+                    .put("agent_name", entry.agentName)
+                    .put("agent_command", entry.agentCommand)
+                    .put("session_id", entry.sessionId)
+                    .put("session_name", entry.sessionName)
+                    .put("client", entry.client)
+                    .put("action", entry.action),
+            )
+        }
+        preferences.edit().putString("operation_logs", array.toString()).apply()
+    }
+
+    fun appendOperationLog(entry: OperationLogEntry): List<OperationLogEntry> {
+        val merged = (listOf(entry) + loadOperationLogs())
+            .distinctBy { it.id }
+            .sortedByDescending { it.createdAt }
+            .take(200)
+        saveOperationLogs(merged)
+        return merged
+    }
+
+    fun mergeOperationLogs(remote: List<OperationLogEntry>): List<OperationLogEntry> {
+        val merged = (remote + loadOperationLogs())
+            .distinctBy { it.id }
+            .sortedByDescending { it.createdAt }
+            .take(200)
+        saveOperationLogs(merged)
+        return merged
     }
 }
 

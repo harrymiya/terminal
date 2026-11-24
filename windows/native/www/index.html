@@ -20,6 +20,7 @@
             <span id="connection-status" class="status-dot" title="就绪"></span>
             <button id="edit-mode" class="button quiet" title="管理主机、开发者和工作区">编辑</button>
             <button id="sync-now" class="icon-button" title="立即同步主机、开发者、工作区和会话">↻</button>
+            <button id="operation-logs" class="button quiet" title="查看操作日志并一键重回现场">日志</button>
             <button id="settings" class="icon-button" title="系统设置">⚙</button>
           </div>
         </div>
@@ -107,6 +108,7 @@
     </form>
   </dialog>
   <dialog id="admin-users-dialog" class="dialog"><form method="dialog"><div class="dialog-heading"><h2>同步用户维护</h2><button class="icon-button" type="button" data-close-dialog aria-label="关闭">×</button></div><div id="admin-users-list" class="form-fields"></div><div class="dialog-actions"><button id="admin-user-add" class="button" type="button">添加用户</button><button class="button" type="button" data-close-dialog>关闭</button></div></form></dialog>
+  <dialog id="operation-logs-dialog" class="dialog"><form method="dialog"><div class="dialog-heading"><h2>操作日志 · 一键重回现场</h2><button class="icon-button" type="button" data-close-dialog aria-label="关闭">×</button></div><div class="dialog-actions" style="justify-content:flex-start;margin-bottom:8px;"><button id="operation-logs-refresh" class="button" type="button">同步刷新</button></div><div id="operation-logs-list" class="form-fields browse-list"></div><div class="dialog-actions"><button class="button" type="button" data-close-dialog>关闭</button></div></form></dialog>
   <dialog id="browse-dialog" class="dialog" aria-labelledby="browse-title">
     <form method="dialog">
       <div class="dialog-heading">
