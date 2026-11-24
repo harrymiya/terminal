@@ -282,6 +282,7 @@ object SyncClient {
         .put("session_name", entry.sessionName)
         .put("client", entry.client)
         .put("action", entry.action)
+        .put("agent_icon", entry.agentIcon)
 
     fun operationLogFromJson(obj: JSONObject): OperationLogEntry = OperationLogEntry(
         id = obj.getString("id"),
@@ -299,6 +300,7 @@ object SyncClient {
         sessionName = obj.optString("session_name", ""),
         client = obj.optString("client", ""),
         action = obj.optString("action", "open"),
+        agentIcon = obj.optString("agent_icon", ""),
     )
 
     fun fetchOperationLogs(limit: Int = 200): List<OperationLogEntry> {

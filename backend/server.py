@@ -464,6 +464,7 @@ def create_server(address, database, token=None):
                             "agent_id": str(entry.get("agent_id", ""))[:256],
                             "agent_name": str(entry.get("agent_name", ""))[:256],
                             "agent_command": str(entry.get("agent_command", ""))[:4096],
+                            "agent_icon": str(entry.get("agent_icon", ""))[:128],
                             "session_id": str(entry.get("session_id", ""))[:256],
                             "session_name": str(entry.get("session_name", ""))[:512],
                             "client": str(entry.get("client", ""))[:64],

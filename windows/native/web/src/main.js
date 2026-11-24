@@ -1581,6 +1581,7 @@ function recordOperationLog({ sessionId, sessionName, host, workspace, agent, ac
     agent_id: String(agent?.id || ''),
     agent_name: String(agent?.name || ''),
     agent_command: String(agent?.command || ''),
+    agent_icon: String(agent?.icon || ''),
     session_id: String(sessionId || ''),
     session_name: String(sessionName || ''),
     client: 'windows',
@@ -1591,13 +1592,25 @@ function recordOperationLog({ sessionId, sessionName, host, workspace, agent, ac
   post({ action: 'record-operation-log', entry });
 }
 
+function operationLogAgentIcon(entry) {
+  if (entry?.agent_icon) return agentIcon(entry.agent_icon);
+  const hosts = Array.isArray(config.hosts) ? config.hosts : [];
+  const host = hosts.find((h) => h.id === entry?.host_id) || hosts.find((h) => h.name === entry?.host_name);
+  const presets = host ? agentsForHost(host) : (Array.isArray(config.agents) ? config.agents : []);
+  const preset = presets.find((a) => entry?.agent_id && a.id === entry.agent_id)
+    || presets.find((a) => a.command === entry?.agent_command && a.name === entry?.agent_name)
+    || presets.find((a) => a.command === entry?.agent_command);
+  return agentIcon(preset?.icon || '');
+}
+
 function renderOperationLogs() {
   const container = $('operation-logs-list');
   if (!container) return;
   container.innerHTML = '';
   const account = String(config.sync_username || '').trim().toLowerCase();
   const logs = (Array.isArray(config.operation_logs) ? config.operation_logs : [])
-    .filter((item) => String(item?.account || '').trim().toLowerCase() === account);
+    .filter((item) => String(item?.account || '').trim().toLowerCase() === account)
+    .sort((a, b) => (Number(b?.created_at) || 0) - (Number(a?.created_at) || 0));
   if (!logs.length) {
     const empty = document.createElement('div');
     empty.className = 'muted small';
@@ -1605,17 +1618,28 @@ function renderOperationLogs() {
     container.appendChild(empty);
     return;
   }
+  const openIds = new Set([...sessions.values()].flatMap((s) => [s.id, s.remoteId].filter(Boolean)));
   for (const entry of logs) {
     const row = document.createElement('div');
     row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px;border:1px solid var(--edge);border-radius:8px;margin-bottom:8px;';
+    const iconEl = operationLogAgentIcon(entry);
+    if (iconEl) row.appendChild(iconEl);
     const info = document.createElement('div');
     info.style.cssText = 'min-width:0;flex:1;';
     const ts = new Date(Number(entry.created_at) || Date.now()).toLocaleString();
     const client = String(entry.client || 'LOCAL').toUpperCase();
-    const actionLabel = entry.action === 'resume' ? '重回现场' : '打开会话';
+    const actionLabel = entry.action === 'resume' ? '回到现场' : '打开会话';
+    const sid = normalizeSessionId(entry.session_id || '');
+    const isOpen = Boolean(sid && openIds.has(sid));
     const meta = document.createElement('div');
     meta.className = 'muted small';
     meta.textContent = `[${ts}] [${client}] ${actionLabel}`;
+    if (isOpen) {
+      const badge = document.createElement('span');
+      badge.textContent = '● 已打开';
+      badge.style.cssText = 'margin-left:8px;color:var(--mint,#34d399);font-weight:600;';
+      meta.appendChild(badge);
+    }
     const title = document.createElement('div');
     title.style.cssText = 'font-weight:600;margin:2px 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
     title.textContent = `${entry.agent_name || entry.agent_command} · ${entry.directory_name || entry.directory_path}`;
@@ -1627,7 +1651,7 @@ function renderOperationLogs() {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'button primary';
-    btn.textContent = '一键重回现场';
+    btn.textContent = isOpen ? '切到会话' : '回到现场';
     btn.onclick = () => {
       $('operation-logs-dialog')?.close();
       restoreFromOperationLog(entry);
@@ -1679,6 +1703,7 @@ function restoreFromOperationLog(entry) {
   const title = entry.session_name || formatSessionTitle({ workspace, agent });
   const session = createTerminalSession({ id, remoteId: id, title, host, workspace, agent, restoreOnly: false, activate: true });
   recordOperationLog({ sessionId: id, sessionName: title, host, workspace, agent, action: 'resume' });
+  post({ action: 'session-sync', method: 'PUT', host: session.host, id, item: buildSessionSyncItem(session) });
   renderSessions();
   connectSession(session);
   session.term.focus();

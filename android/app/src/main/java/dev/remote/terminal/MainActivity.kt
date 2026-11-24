@@ -850,6 +850,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 client = "android",
                 action = action,
                 account = account,
+                agentIcon = task.agent.icon,
             )
             val merged = store.appendOperationLog(entry)
             operationLogs.clear()
@@ -1261,6 +1262,8 @@ private fun RemoteTerminalApp(store: LocalStore) {
                     )
                     AppRoute.LOGS -> OperationLogsScreen(
                         logs = operationLogs,
+                        agents = agents,
+                        openSessionIds = sessions.map { it.task.id.replace("-", "") }.toSet(),
                         onBack = { route = AppRoute.HOME },
                         onRefresh = {
                             scope.launch {
@@ -1416,6 +1419,8 @@ private fun RemoteTerminalApp(store: LocalStore) {
                     )
                     AppRoute.LOGS -> OperationLogsScreen(
                         logs = operationLogs,
+                        agents = agents,
+                        openSessionIds = sessions.map { it.task.id.replace("-", "") }.toSet(),
                         onBack = { route = AppRoute.HOME },
                         onRefresh = {
                             scope.launch {
@@ -2147,6 +2152,8 @@ private fun EmptyRow(title: String, detail: String, action: () -> Unit, label: S
 @Composable
 private fun OperationLogsScreen(
     logs: List<OperationLogEntry>,
+    agents: List<AgentPreset>,
+    openSessionIds: Set<String>,
     onBack: () -> Unit,
     onRefresh: () -> Unit,
     onRestore: (OperationLogEntry) -> Unit,
@@ -2157,7 +2164,7 @@ private fun OperationLogsScreen(
             IconButton(onClick = onBack) {
                 Icon(Icons.Default.ArrowBack, contentDescription = "返回", tint = White)
             }
-            Text("操作日志", color = White, fontSize = 18.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            Text("历史记录", color = White, fontSize = 18.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
             IconButton(onClick = onRefresh) {
                 Icon(Icons.Default.Refresh, contentDescription = "同步日志", tint = Mint)
             }
@@ -2169,6 +2176,13 @@ private fun OperationLogsScreen(
         } else {
             LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp), contentPadding = PaddingValues(bottom = 24.dp)) {
                 items(logs, key = { it.id }) { entry ->
+                    val isOpen = entry.sessionId.replace("-", "") in openSessionIds
+                    val iconValue = entry.agentIcon.ifBlank {
+                        agents.firstOrNull { it.id == entry.agentId }?.icon
+                            ?: agents.firstOrNull { it.command == entry.agentCommand && it.name == entry.agentName }?.icon
+                            ?: agents.firstOrNull { it.command == entry.agentCommand }?.icon
+                            ?: "✳"
+                    }
                     Surface(
                         color = Panel,
                         shape = RoundedCornerShape(14.dp),
@@ -2196,22 +2210,39 @@ private fun OperationLogsScreen(
                                             .padding(horizontal = 6.dp, vertical = 2.dp),
                                     )
                                 }
+                                if (isOpen) {
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(
+                                        "● 已打开",
+                                        color = Mint,
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .background(Mint.copy(alpha = 0.14f))
+                                            .padding(horizontal = 6.dp, vertical = 2.dp),
+                                    )
+                                }
                                 Spacer(Modifier.weight(1f))
                                 Text(
-                                    if (entry.action == "resume") "重回现场" else "打开会话",
+                                    if (entry.action == "resume") "回到现场" else "打开会话",
                                     color = Muted,
                                     fontSize = 11.sp,
                                 )
                             }
                             Spacer(Modifier.height(6.dp))
-                            Text(
-                                "${entry.agentName.ifBlank { entry.agentCommand }} · ${entry.directoryName.ifBlank { entry.directoryPath }}",
-                                color = White,
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                AgentMark(iconValue, 20.dp)
+                                Text(
+                                    "${entry.agentName.ifBlank { entry.agentCommand }} · ${entry.directoryName.ifBlank { entry.directoryPath }}",
+                                    color = White,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f),
+                                )
+                            }
                             Spacer(Modifier.height(4.dp))
                             Text(
                                 "主机: ${entry.hostName}  ·  目录: ${entry.directoryPath}",
@@ -2236,7 +2267,7 @@ private fun OperationLogsScreen(
                                 ) {
                                     Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
                                     Spacer(Modifier.width(4.dp))
-                                    Text("一键重回现场", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                    Text(if (isOpen) "切到会话" else "回到现场", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                                 }
                             }
                         }

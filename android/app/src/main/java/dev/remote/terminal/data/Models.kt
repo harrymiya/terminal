@@ -39,6 +39,7 @@ data class OperationLogEntry(
     val client: String = "android",
     val action: String = "open",
     val account: String = "",
+    val agentIcon: String = "",
 )
 
 data class HostProfile(
@@ -498,6 +499,7 @@ class LocalStore(context: Context) {
                 client = obj.optString("client", "android"),
                 action = obj.optString("action", "open"),
                 account = obj.optString("account", "").trim().lowercase(),
+                agentIcon = obj.optString("agent_icon", ""),
             )
         }.sortedByDescending { it.createdAt }
     }.getOrDefault(emptyList())
@@ -528,7 +530,8 @@ class LocalStore(context: Context) {
                     .put("session_id", entry.sessionId)
                     .put("session_name", entry.sessionName)
                     .put("client", entry.client)
-                    .put("action", entry.action),
+                    .put("action", entry.action)
+                    .put("agent_icon", entry.agentIcon),
             )
         }
         preferences.edit().putString("operation_logs", array.toString()).apply()

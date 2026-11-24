@@ -4355,6 +4355,7 @@ class App(Gtk.Window):
             "agent_id": str(agent.get("id", "")),
             "agent_name": str(agent.get("name", "")),
             "agent_command": str(agent.get("command", "")),
+            "agent_icon": str(agent.get("icon", "")),
             "session_id": str(session_id),
             "session_name": str(display_name),
             "client": "ubuntu",
@@ -4395,6 +4396,20 @@ class App(Gtk.Window):
                 GLib.idle_add(on_done, err)
         self.sync_executor.submit(worker)
 
+    def operation_log_icon(self, entry):
+        icon = str(entry.get("agent_icon", "")).strip()
+        if icon:
+            return icon
+        hosts = self.data.get("hosts", [])
+        host = next((h for h in hosts if h.get("id") == entry.get("host_id")), None) or next((h for h in hosts if h.get("name") == entry.get("host_name")), None)
+        presets = self.host_agents(host) if host else self.data.get("agents", [])
+        preset = next((a for a in presets if entry.get("agent_id") and a.get("id") == entry.get("agent_id")), None)
+        if preset is None:
+            preset = next((a for a in presets if a.get("command") == entry.get("agent_command") and a.get("name") == entry.get("agent_name")), None)
+        if preset is None:
+            preset = next((a for a in presets if a.get("command") == entry.get("agent_command")), None)
+        return (preset.get("icon") if preset else None) or "✳"
+
     def restore_from_operation_log(self, entry):
         target_sid = str(entry.get("session_id", "")).strip()
         existing = next((s for s in self.sessions if s.get("id") == target_sid or s.get("id", "").replace("-", "") == target_sid.replace("-", "")), None)
@@ -4407,6 +4422,8 @@ class App(Gtk.Window):
                 terminal = existing["terminal"]
                 if not self.tiled:
                     self.tabs.set_current_page(self.tabs.page_num(terminal))
+                else:
+                    self.set_active_terminal(terminal)
                 terminal.grab_focus()
             return
         hosts = self.data.get("hosts", [])
@@ -4458,14 +4475,21 @@ class App(Gtk.Window):
                 empty.get_style_context().add_class("subtitle")
                 list_box.pack_start(empty, True, True, 24)
             else:
+                open_ids = {str(s.get("id", "")).replace("-", "") for s in self.sessions}
                 for entry in logs:
                     card = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
                     card.get_style_context().add_class("sidebar-row")
+                    icon_widget = agent_icon_widget(self.operation_log_icon(entry), size=22) or Gtk.Label(label="✳")
+                    icon_widget.set_valign(Gtk.Align.CENTER)
+                    card.pack_start(icon_widget, False, False, 2)
                     info = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
                     ts = time.strftime("%m-%d %H:%M:%S", time.localtime(int(entry.get("created_at", 0)) / 1000.0))
                     client = str(entry.get("client", "")).upper() or "LOCAL"
-                    action_label = "重回现场" if entry.get("action") == "resume" else "打开会话"
-                    top_lbl = Gtk.Label(label=f"[{ts}] [{client}] {action_label}", xalign=0)
+                    action_label = "回到现场" if entry.get("action") == "resume" else "打开会话"
+                    sid_norm = str(entry.get("session_id", "")).strip().replace("-", "")
+                    is_open = bool(sid_norm and sid_norm in open_ids)
+                    status_text = " · ● 已打开" if is_open else ""
+                    top_lbl = Gtk.Label(label=f"[{ts}] [{client}] {action_label}{status_text}", xalign=0)
                     top_lbl.get_style_context().add_class("subtitle")
                     main_lbl = Gtk.Label(label=f"{entry.get('agent_name') or entry.get('agent_command', '')} · {entry.get('directory_name') or entry.get('directory_path', '')}", xalign=0)
                     main_lbl.set_ellipsize(Pango.EllipsizeMode.END)
@@ -4476,8 +4500,12 @@ class App(Gtk.Window):
                     info.pack_start(main_lbl, False, False, 0)
                     info.pack_start(sub_lbl, False, False, 0)
                     card.pack_start(info, True, True, 0)
-                    restore_btn = Gtk.Button(label="一键重回现场")
-                    restore_btn.connect("clicked", lambda _b, item=entry: (dialog.destroy(), self.restore_from_operation_log(item)))
+                    restore_btn = Gtk.Button(label="切到会话" if is_open else "回到现场")
+                    def on_restore(_b, item=entry):
+                        closed[0] = True
+                        dialog.response(Gtk.ResponseType.CLOSE)
+                        GLib.idle_add(lambda: (self.restore_from_operation_log(item), False)[1])
+                    restore_btn.connect("clicked", on_restore)
                     card.pack_start(restore_btn, False, False, 0)
                     list_box.pack_start(card, False, False, 0)
             list_box.show_all()
