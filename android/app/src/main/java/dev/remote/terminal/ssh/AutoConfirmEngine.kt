@@ -23,7 +23,12 @@ object AutoConfirmEngine {
         }
     }
 
-    private val mainHandler = Handler(Looper.getMainLooper())
+    private val mainHandler: Handler? by lazy {
+        runCatching { Looper.getMainLooper()?.let(::Handler) }.getOrNull()
+    }
+    private fun postMain(action: () -> Unit) {
+        mainHandler?.post(action)
+    }
     @Volatile private var appContext: Context? = null
     @Volatile private var wakeLock: PowerManager.WakeLock? = null
 
@@ -139,8 +144,10 @@ object AutoConfirmEngine {
 
     private fun detectWrappedApprovalSignature(rawLines: List<String>): String? {
         val lines = rawLines.filterNot { it.all { char -> char in "─━═╭╮╰╯┌┐└┘+ " } }
-        val footer = (lines.lastIndex downTo maxOf(0, lines.size - 4)).firstOrNull {
-            WrappedApprovalFooter.matches(lines.subList(it, lines.size).joinToString(" "))
+        val footer = (lines.lastIndex downTo maxOf(0, lines.size - 6)).firstOrNull { start ->
+            (start + 1..minOf(lines.size, start + 3)).any { end ->
+                WrappedApprovalFooter.matches(lines.subList(start, end).joinToString(" "))
+            }
         } ?: return null
         val selected = (footer - 1 downTo 0).firstOrNull { ApprovalCursor.containsMatchIn(lines[it]) } ?: return null
         val choice = ApprovalChoice.matchEntire(lines[selected]) ?: return null
@@ -229,19 +236,20 @@ object AutoConfirmEngine {
         }
         releaseWakeLock(sessionId)
         sessions[sessionId]?.let { callback ->
-            mainHandler.post { callback.onAutoEnterCancelled() }
+            postMain { callback.onAutoEnterCancelled() }
         }
     }
 
     fun cancel(sessionId: String) {
         val state = sessionStates[sessionId] ?: return
         synchronized(state) {
+            state.handledSignature = state.signature
             state.deadlineUptime = null
             state.awaitingResponse = false
         }
         releaseWakeLock(sessionId)
         sessions[sessionId]?.let { callback ->
-            mainHandler.post { callback.onAutoEnterCancelled() }
+            postMain { callback.onAutoEnterCancelled() }
         }
     }
 
@@ -255,11 +263,21 @@ object AutoConfirmEngine {
         }
         releaseWakeLock(sessionId)
         sessions[sessionId]?.let { callback ->
-            mainHandler.post { callback.onAutoEnterCancelled() }
+            postMain { callback.onAutoEnterCancelled() }
         }
     }
 
-    private fun processSession(sessionId: String, callback: SessionCallback) {
+    internal fun processSessionForTest(
+        sessionId: String,
+        callback: SessionCallback,
+        nowMillis: Long,
+    ) = processSession(sessionId, callback, nowMillis)
+
+    private fun processSession(
+        sessionId: String,
+        callback: SessionCallback,
+        nowMillis: Long = SystemClock.elapsedRealtime(),
+    ) {
         val state = sessionStates[sessionId] ?: return
         synchronized(state) {
             if (!callback.isConnected() || callback.isClosed()) {
@@ -269,7 +287,7 @@ object AutoConfirmEngine {
                     state.handledSignature = null
                     state.awaitingResponse = false
                     releaseWakeLock(sessionId)
-                    mainHandler.post { callback.onAutoEnterCancelled() }
+                    postMain { callback.onAutoEnterCancelled() }
                 }
                 return@synchronized
             }
@@ -278,7 +296,7 @@ object AutoConfirmEngine {
                 if (state.deadlineUptime != null) {
                     state.deadlineUptime = null
                     releaseWakeLock(sessionId)
-                    mainHandler.post { callback.onAutoEnterCancelled() }
+                    postMain { callback.onAutoEnterCancelled() }
                 }
                 return@synchronized
             }
@@ -287,7 +305,7 @@ object AutoConfirmEngine {
             val detectedSig = detectPromptSignature(tail)
             val hasRequest = detectedSig != null || ActionRequestRegex.containsMatchIn(tail)
 
-            mainHandler.post { callback.onNeedsActionChanged(hasRequest) }
+            postMain { callback.onNeedsActionChanged(hasRequest) }
 
             if (detectedSig == null) {
                 // 终端提示已消失（例如上一条命令已继续执行或已被清屏）
@@ -297,7 +315,7 @@ object AutoConfirmEngine {
                     state.awaitingResponse = false
                     state.deadlineUptime = null
                     releaseWakeLock(sessionId)
-                    mainHandler.post { callback.onAutoEnterCancelled() }
+                    postMain { callback.onAutoEnterCancelled() }
                 }
                 return@synchronized
             }
@@ -307,12 +325,10 @@ object AutoConfirmEngine {
                 return@synchronized
             }
 
-            if (state.awaitingResponse) {
-                // 已发送回车，等待远端响应变动
-                return@synchronized
-            }
+            // 只要签名已经变化为新的未处理 prompt，说明远端已响应上一条确认并进入下一条确认
+            state.awaitingResponse = false
 
-            val now = SystemClock.elapsedRealtime()
+            val now = nowMillis
             val delayMillis = globalDelaySeconds.coerceIn(1, 30) * 1_000L
 
             if (state.signature != detectedSig) {
@@ -325,7 +341,7 @@ object AutoConfirmEngine {
                 // 持有 CPU WakeLock，防止手机在倒数期间进入 Deep Sleep
                 acquireWakeLock(sessionId)
 
-                mainHandler.post {
+                postMain {
                     callback.onAutoEnterScheduled(deadline, detectedSig)
                 }
                 return@synchronized
@@ -341,7 +357,7 @@ object AutoConfirmEngine {
                         state.handledSignature = detectedSig
                         state.awaitingResponse = true
                         state.deadlineUptime = null
-                        mainHandler.post {
+                        postMain {
                             callback.onAutoEnterTriggered(detectedSig)
                         }
                     }
