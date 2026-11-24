@@ -636,6 +636,18 @@ private fun RemoteTerminalApp(store: LocalStore) {
             }
         }
 
+        fun moveDirectory(host: HostProfile, from: Int, offset: Int) {
+            val dirs = host.directories.toMutableList()
+            if (from !in dirs.indices) return
+            val to = (from + offset).coerceIn(0, dirs.lastIndex)
+            if (from == to) return
+            val item = dirs.removeAt(from)
+            dirs.add(to, item)
+            val updatedHost = host.copy(directories = dirs)
+            saveHosts(hosts.map { if (it.id == host.id) updatedHost else it })
+            syncWorkspaceList(updatedHost, dirs)
+        }
+
         fun replaceAgents(ordered: List<AgentPreset>) {
             if (agents.toList() == ordered) return
             val previous = agents.associateBy { it.id }
@@ -1248,6 +1260,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
                         onAddDirectory = { selectedHost?.let { editingDirectory = it.id to null } },
                         onEditDirectory = { host, dir -> editingDirectory = host.id to dir },
                         onDeleteDirectory = { host, dir -> deletingDirectory = host.id to dir },
+                        onMoveDirectory = ::moveDirectory,
                     )
                     AppRoute.AGENTS -> AgentsScreen(
                         agents = agents, onBack = { route = AppRoute.HOME }, onAdd = { addingAgent = true },
@@ -1488,17 +1501,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
                         onAddDirectory = { host -> editingDirectory = host.id to null },
                         onEditDirectory = { host, dir -> editingDirectory = host.id to dir },
                         onDeleteDirectory = { host, dir -> deletingDirectory = host.id to dir },
-                        onMoveDirectory = { host, from, offset ->
-                            val dirs = host.directories.toMutableList()
-                            val to = (from + offset).coerceIn(0, dirs.lastIndex)
-                            if (from != to) {
-                                val item = dirs.removeAt(from)
-                                dirs.add(to, item)
-                                val updatedHosts = hosts.map { if (it.id == host.id) it.copy(directories = dirs) else it }
-                                saveHosts(updatedHosts)
-                                syncWorkspaceList(host, dirs)
-                            }
-                        },
+                        onMoveDirectory = ::moveDirectory,
                         onAddAgent = { addingAgent = true },
                         onEditAgent = { editingAgent = it },
                         onDeleteAgent = { deletingAgent = it },
@@ -2012,6 +2015,7 @@ private fun ManageScreen(
     onEditHost: (HostProfile) -> Unit, onDeleteHost: (HostProfile) -> Unit,
     onAddDirectory: () -> Unit, onEditDirectory: (HostProfile, ProjectDirectory) -> Unit,
     onDeleteDirectory: (HostProfile, ProjectDirectory) -> Unit,
+    onMoveDirectory: (HostProfile, Int, Int) -> Unit,
 ) {
     var visibleHostId by remember { mutableStateOf(selectedHost?.id.orEmpty()) }
     LaunchedEffect(selectedHost?.id) {
@@ -2088,13 +2092,19 @@ private fun ManageScreen(
                 EmptyRow("这个主机还没有目录", "保存项目路径后，就能从首页直接启动任务。", onAddDirectory, "添加目录")
             } else {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    host.directories.forEach { dir ->
+                    host.directories.forEachIndexed { index, dir ->
                         Surface(color = Panel, shape = RoundedCornerShape(14.dp), border = androidx.compose.foundation.BorderStroke(1.dp, Edge)) {
                             Row(Modifier.fillMaxWidth().padding(start = 13.dp, end = 4.dp, top = 7.dp, bottom = 7.dp), verticalAlignment = Alignment.CenterVertically) {
                                 Text(dir.icon, fontSize = 19.sp, modifier = Modifier.padding(horizontal = 4.dp))
                                 Column(Modifier.weight(1f).padding(start = 9.dp)) {
                                     Text(dir.name, color = White, fontWeight = FontWeight.Medium, fontSize = 13.sp)
                                     Text(dir.path, color = Muted, fontFamily = FontFamily.Monospace, fontSize = 10.sp, maxLines = 1)
+                                }
+                                IconButton(enabled = index > 0, onClick = { onMoveDirectory(host, index, -1) }, modifier = Modifier.size(32.dp)) {
+                                    Icon(Icons.Default.KeyboardArrowUp, "上移 ${dir.name}", tint = if (index > 0) White else Muted.copy(alpha = 0.35f))
+                                }
+                                IconButton(enabled = index < host.directories.lastIndex, onClick = { onMoveDirectory(host, index, 1) }, modifier = Modifier.size(32.dp)) {
+                                    Icon(Icons.Default.KeyboardArrowDown, "下移 ${dir.name}", tint = if (index < host.directories.lastIndex) White else Muted.copy(alpha = 0.35f))
                                 }
                                 IconButton(onClick = { onEditDirectory(host, dir) }) { Icon(Icons.Default.Edit, "编辑目录", tint = Muted, modifier = Modifier.size(17.dp)) }
                                 IconButton(onClick = { onDeleteDirectory(host, dir) }) { Icon(Icons.Default.DeleteOutline, "删除目录", tint = Muted, modifier = Modifier.size(18.dp)) }
