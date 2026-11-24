@@ -770,6 +770,28 @@ def build_theme_css(theme_name):
             min-height: 24px;
             padding: 2px 8px;
         }}
+        .history-row {{
+            padding: 8px 10px;
+            border-radius: 8px;
+        }}
+        .history-open-row {{
+            background-color: {t["accent_bg"]};
+            border: 1px solid {t["accent"]};
+        }}
+        .history-open-row label {{
+            color: {t["accent_fg"]};
+        }}
+        .history-divider {{
+            min-height: 1px;
+            background-color: {t["border"]};
+            margin-top: 6px;
+            margin-bottom: 6px;
+        }}
+        button.history-action-btn {{
+            min-height: 12px;
+            padding: 1px 10px;
+            font-size: 11px;
+        }}
         button:not(.titlebutton) {{
             background-image: none;
             background-color: {t["control_bg"]};
@@ -4458,7 +4480,7 @@ class App(Gtk.Window):
         scroller = Gtk.ScrolledWindow()
         scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         scroller.set_vexpand(True)
-        list_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        list_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         scroller.add(list_box)
         area.pack_start(scroller, True, True, 0)
 
@@ -4476,9 +4498,15 @@ class App(Gtk.Window):
                 list_box.pack_start(empty, True, True, 24)
             else:
                 open_ids = {str(s.get("id", "")).replace("-", "") for s in self.sessions}
-                for entry in logs:
+                for idx, entry in enumerate(logs):
+                    if idx > 0:
+                        div = Gtk.Box()
+                        div.get_style_context().add_class("history-divider")
+                        div.set_size_request(520, 1)
+                        div.set_halign(Gtk.Align.CENTER)
+                        list_box.pack_start(div, False, False, 0)
                     card = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-                    card.get_style_context().add_class("sidebar-row")
+                    card.get_style_context().add_class("history-row")
                     icon_widget = agent_icon_widget(self.operation_log_icon(entry), size=22) or Gtk.Label(label="✳")
                     icon_widget.set_valign(Gtk.Align.CENTER)
                     card.pack_start(icon_widget, False, False, 2)
@@ -4488,6 +4516,8 @@ class App(Gtk.Window):
                     action_label = "回到现场" if entry.get("action") == "resume" else "打开会话"
                     sid_norm = str(entry.get("session_id", "")).strip().replace("-", "")
                     is_open = bool(sid_norm and sid_norm in open_ids)
+                    if is_open:
+                        card.get_style_context().add_class("history-open-row")
                     status_text = " · ● 已打开" if is_open else ""
                     top_lbl = Gtk.Label(label=f"[{ts}] [{client}] {action_label}{status_text}", xalign=0)
                     top_lbl.get_style_context().add_class("subtitle")
@@ -4501,6 +4531,9 @@ class App(Gtk.Window):
                     info.pack_start(sub_lbl, False, False, 0)
                     card.pack_start(info, True, True, 0)
                     restore_btn = Gtk.Button(label="切到会话" if is_open else "回到现场")
+                    restore_btn.get_style_context().add_class("history-action-btn")
+                    restore_btn.set_valign(Gtk.Align.CENTER)
+                    restore_btn.set_margin_end(10)
                     def on_restore(_b, item=entry):
                         closed[0] = True
                         dialog.response(Gtk.ResponseType.CLOSE)

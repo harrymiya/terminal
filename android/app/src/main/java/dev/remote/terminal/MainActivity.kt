@@ -2174,8 +2174,14 @@ private fun OperationLogsScreen(
                 Text("暂无操作记录\n打开任意工作区会话后会自动记录并同步", color = Muted, textAlign = TextAlign.Center, fontSize = 13.sp)
             }
         } else {
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp), contentPadding = PaddingValues(bottom = 24.dp)) {
-                items(logs, key = { it.id }) { entry ->
+            LazyColumn(verticalArrangement = Arrangement.spacedBy(0.dp), contentPadding = PaddingValues(bottom = 24.dp)) {
+                items(logs.size, key = { logs[it].id }) { index ->
+                    val entry = logs[index]
+                    if (index > 0) {
+                        Box(Modifier.fillMaxWidth().padding(vertical = 6.dp), contentAlignment = Alignment.Center) {
+                            Box(Modifier.fillMaxWidth(0.8f).height(1.dp).background(Edge))
+                        }
+                    }
                     val isOpen = entry.sessionId.replace("-", "") in openSessionIds
                     val iconValue = entry.agentIcon.ifBlank {
                         agents.firstOrNull { it.id == entry.agentId }?.icon
@@ -2184,9 +2190,9 @@ private fun OperationLogsScreen(
                             ?: "✳"
                     }
                     Surface(
-                        color = Panel,
+                        color = if (isOpen) Mint.copy(alpha = 0.12f) else Panel,
                         shape = RoundedCornerShape(14.dp),
-                        border = BorderStroke(1.dp, Edge),
+                        border = BorderStroke(1.dp, if (isOpen) Mint else Edge),
                         modifier = Modifier.fillMaxWidth(),
                     ) {
                         Column(Modifier.padding(14.dp)) {
@@ -2259,10 +2265,11 @@ private fun OperationLogsScreen(
                                 overflow = TextOverflow.Ellipsis,
                             )
                             Spacer(Modifier.height(10.dp))
-                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                            Row(Modifier.fillMaxWidth().padding(end = 6.dp), horizontalArrangement = Arrangement.End) {
                                 Button(
                                     onClick = { onRestore(entry) },
-                                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
+                                    modifier = Modifier.height(26.dp),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
                                     colors = ButtonDefaults.buttonColors(containerColor = Mint, contentColor = Ink),
                                 ) {
                                     Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))

@@ -1619,9 +1619,18 @@ function renderOperationLogs() {
     return;
   }
   const openIds = new Set([...sessions.values()].flatMap((s) => [s.id, s.remoteId].filter(Boolean)));
-  for (const entry of logs) {
+  logs.forEach((entry, idx) => {
+    if (idx > 0) {
+      const divider = document.createElement('div');
+      divider.style.cssText = 'width:80%;height:1px;background:var(--edge);margin:6px auto;';
+      container.appendChild(divider);
+    }
+    const sid = normalizeSessionId(entry.session_id || '');
+    const isOpen = Boolean(sid && openIds.has(sid));
     const row = document.createElement('div');
-    row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px;border:1px solid var(--edge);border-radius:8px;margin-bottom:8px;';
+    row.style.cssText = isOpen
+      ? 'display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px;border:1px solid var(--accent,#38bdf8);border-radius:8px;background:color-mix(in srgb,var(--accent,#38bdf8) 14%,transparent);'
+      : 'display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px;border:1px solid transparent;border-radius:8px;';
     const iconEl = operationLogAgentIcon(entry);
     if (iconEl) row.appendChild(iconEl);
     const info = document.createElement('div');
@@ -1629,8 +1638,6 @@ function renderOperationLogs() {
     const ts = new Date(Number(entry.created_at) || Date.now()).toLocaleString();
     const client = String(entry.client || 'LOCAL').toUpperCase();
     const actionLabel = entry.action === 'resume' ? '回到现场' : '打开会话';
-    const sid = normalizeSessionId(entry.session_id || '');
-    const isOpen = Boolean(sid && openIds.has(sid));
     const meta = document.createElement('div');
     meta.className = 'muted small';
     meta.textContent = `[${ts}] [${client}] ${actionLabel}`;
@@ -1651,6 +1658,7 @@ function renderOperationLogs() {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'button primary';
+    btn.style.cssText = 'min-height:0;padding:3px 10px;font-size:12px;line-height:1.2;margin-right:8px;';
     btn.textContent = isOpen ? '切到会话' : '回到现场';
     btn.onclick = () => {
       $('operation-logs-dialog')?.close();
@@ -1658,7 +1666,7 @@ function renderOperationLogs() {
     };
     row.append(info, btn);
     container.appendChild(row);
-  }
+  });
 }
 
 function openOperationLogsDialog() {
