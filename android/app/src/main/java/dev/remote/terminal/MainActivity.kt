@@ -23,6 +23,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.animation.animateColor
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -152,8 +153,11 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.nativeCanvas
@@ -167,6 +171,8 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.DialogProperties
@@ -1700,12 +1706,8 @@ private fun HomeScreen(
     }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
         Row(Modifier.fillMaxWidth().padding(top = 24.dp, bottom = 18.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.size(42.dp).clip(RoundedCornerShape(14.dp)).background(PanelRaised), contentAlignment = Alignment.Center) {
-                Icon(Icons.Default.Terminal, null, tint = Mint, modifier = Modifier.size(23.dp))
-            }
-            Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
-                Text("REMOTE DEV", color = White, fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp, fontSize = 17.sp)
+                NeonGlowBrandLogo(fontSize = 19.sp, letterSpacing = 1.4.sp)
                 Text("随时接回你的开发现场 · v${BuildConfig.VERSION_NAME}", color = Muted, fontSize = 12.sp)
             }
             IconButton(onClick = onManage) {
@@ -2006,6 +2008,54 @@ private fun HomeScreen(
         }
         Spacer(Modifier.height(24.dp))
     }
+}
+
+@Composable
+private fun NeonGlowBrandLogo(
+    text: String = "REMOTE DEV",
+    fontSize: TextUnit = 19.sp,
+    letterSpacing: TextUnit = 1.4.sp,
+    modifier: Modifier = Modifier,
+) {
+    var textSize by remember { mutableStateOf(IntSize.Zero) }
+    val transition = rememberInfiniteTransition(label = "brand_neon_glow")
+    val progress by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 2200, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "glow_progress",
+    )
+    val accent = Color(0xFF00F0FF)
+    val highlight = Color(0xFFF4EAFF)
+    val brand = Color(0xFFFF2EEC)
+    val width = textSize.width.toFloat().coerceAtLeast(1f)
+    val height = textSize.height.toFloat().coerceAtLeast(1f)
+    val brush = Brush.linearGradient(
+        colors = listOf(accent, highlight, brand, accent),
+        start = Offset(x = -width * 1.2f * progress, y = 0f),
+        end = Offset(x = width * (2.2f - 1.2f * progress), y = height * 0.27f),
+    )
+    val glowColor = lerp(accent.copy(alpha = 0.50f), brand.copy(alpha = 0.80f), progress)
+    val blurRadius = with(LocalDensity.current) { (2f + 5f * progress).dp.toPx() }
+    Text(
+        text = text,
+        maxLines = 1,
+        modifier = modifier.onSizeChanged { textSize = it },
+        style = TextStyle(
+            brush = brush,
+            fontSize = fontSize,
+            fontWeight = FontWeight.ExtraBold,
+            letterSpacing = letterSpacing,
+            shadow = Shadow(
+                color = glowColor,
+                offset = Offset.Zero,
+                blurRadius = blurRadius,
+            ),
+        ),
+    )
 }
 
 @Composable
@@ -3273,13 +3323,7 @@ private fun PadSidebar(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "REMOTE DEV",
-                    color = Mint,
-                    fontSize = 17.sp,
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 0.5.sp
-                )
+                NeonGlowBrandLogo(fontSize = 17.sp, letterSpacing = 0.8.sp)
                 Text(
                     text = "远程开发工作台 · v${BuildConfig.VERSION_NAME}",
                     color = Muted,
