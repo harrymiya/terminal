@@ -172,6 +172,53 @@ class SyncServerTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual([item["id"] for item in body["logs"]], [log2["id"]])
 
+        # Operation logs are strictly isolated per authenticated user
+        status, created_user = self.request("POST", "/v1/admin/users", {"username": "bob_logs", "password": "bob-password-1"})
+        self.assertEqual(status, 201)
+        status, bob_login = self.request("POST", "/v1/auth/login", {"username": "bob_logs", "password": "bob-password-1"}, token=None)
+        self.assertEqual(status, 200)
+        bob_token = bob_login["access_token"]
+        status, bob_logs = self.request("GET", "/v1/operation-logs", token=bob_token)
+        self.assertEqual(status, 200)
+        self.assertEqual(bob_logs["logs"], [])
+
+        # Client-side helper isolates local logs per account
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ubuntu"))
+        import core as ubuntu_core
+        alice_log = {**log1, "account": "alice"}
+        bob_log = {**log2, "account": "bob_logs"}
+        self.assertEqual([x["id"] for x in ubuntu_core.filter_operation_logs([alice_log, bob_log], "alice")], [alice_log["id"]])
+        self.assertEqual([x["id"] for x in ubuntu_core.filter_operation_logs([alice_log, bob_log], "bob_logs")], [bob_log["id"]])
+        merged = ubuntu_core.merge_operation_logs([alice_log], [log2], account="bob_logs")
+        self.assertEqual([x["id"] for x in ubuntu_core.filter_operation_logs(merged, "alice")], [alice_log["id"]])
+        self.assertEqual([x["id"] for x in ubuntu_core.filter_operation_logs(merged, "bob_logs")], [log2["id"]])
+
+    def test_theme_preference_sync_per_user(self):
+        status, bob_user = self.request("POST", "/v1/admin/users", {"username": "bob_theme", "password": "bob-password-1"})
+        self.assertEqual(status, 201)
+        status, bob_login = self.request("POST", "/v1/auth/login", {"username": "bob_theme", "password": "bob-password-1"}, token=None)
+        self.assertEqual(status, 200)
+        bob_token = bob_login["access_token"]
+
+        # Alice sets her theme to light
+        status, body = self.request("PUT", "/v1/preferences", {"theme": "light"})
+        self.assertEqual(status, 200)
+        self.assertEqual(body["theme"], "light")
+        # Bob sets his theme to nord
+        status, body = self.request("PUT", "/v1/preferences", {"theme": "nord"}, token=bob_token)
+        self.assertEqual(status, 200)
+        self.assertEqual(body["theme"], "nord")
+
+        # Each user restores their own theme via /v1/preferences, /v1/auth/me, and /v1/auth/login
+        self.assertEqual(self.request("GET", "/v1/preferences")[1]["theme"], "light")
+        self.assertEqual(self.request("GET", "/v1/auth/me")[1]["theme"], "light")
+        self.assertEqual(self.request("GET", "/v1/preferences", token=bob_token)[1]["theme"], "nord")
+        status, relogin = self.request("POST", "/v1/auth/login", {"username": "bob_theme", "password": "bob-password-1"}, token=None)
+        self.assertEqual(status, 200)
+        self.assertEqual(relogin["theme"], "nord")
+
 
 if __name__ == "__main__":
     unittest.main()

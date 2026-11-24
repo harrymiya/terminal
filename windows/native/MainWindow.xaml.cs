@@ -124,6 +124,7 @@ public partial class MainWindow : Window
                     node["credential_saved"] = ReadHostPassword(Text(node, "credential_id"), Text(node, "username")).Length > 0;
                 }
             }
+            config["operation_logs"] = FilterOperationLogs(config["operation_logs"] as JsonArray, Text(config, "sync_username").Trim().ToLowerInvariant());
             Send(new { type = "config", config });
         }
         catch (Exception ex)
@@ -170,9 +171,26 @@ public partial class MainWindow : Window
         }
         if (previousConfig["pending_session_sync"] is JsonArray pendingSessions)
             node["pending_session_sync"] = pendingSessions.DeepClone();
+        if (previousConfig["operation_logs"] is JsonArray operationLogs)
+            node["operation_logs"] = operationLogs.DeepClone();
         if (node["shared_sessions"] is null && previousConfig["shared_sessions"] is JsonObject sharedSessions)
             node["shared_sessions"] = sharedSessions.DeepClone();
         ConfigStore.Save(node);
+        var previousTheme = Text(previousConfig, "theme");
+        var newTheme = Text(node, "theme");
+        if (newTheme.Length > 0 && newTheme != previousTheme && !Bool(node, "offline_mode"))
+        {
+            var url = Text(node, "sync_url").TrimEnd('/');
+            var token = Text(node, "sync_token");
+            if (url.Length > 0 && token.Length > 0)
+            {
+                _ = Task.Run(async () =>
+                {
+                    try { await SyncRequestAsync(url + "/v1/preferences", "PUT", token, new { theme = newTheme }).ConfigureAwait(false); }
+                    catch { }
+                });
+            }
+        }
         Send(new { type = "saved" });
         if (message.TryGetProperty("ssh_password_change", out _)) SendConfig();
         ConfigureSyncTimer();
@@ -304,6 +322,8 @@ public partial class MainWindow : Window
                 config["sync_token"] = token;
                 config["sync_username"] = Text(root, "username");
                 config["sync_is_admin"] = root.TryGetProperty("is_admin", out var admin) && admin.ValueKind == JsonValueKind.True;
+                var serverTheme = Text(root, "theme");
+                if (serverTheme.Length > 0) config["theme"] = serverTheme;
                 ConfigStore.Save(config);
                 CredentialStore.Write("RemoteDevTerminal:sync:" + Text(root, "username").ToLowerInvariant(), Text(root, "username"), password);
                 Dispatcher.BeginInvoke(() => { ConfigureSyncTimer(); Send(new { type = "sync-auth-result", success = true, auth = true, message = "同步账号登录成功。" }); SendConfig(); });
@@ -337,6 +357,21 @@ public partial class MainWindow : Window
             var token = Text(config, "sync_token");
             if (url.Length == 0 || token.Length == 0) throw new InvalidOperationException("请先填写同步服务地址并登录账号。");
             var syncResult = await SynchronizeAccountAsync(config, url, token).ConfigureAwait(false);
+            try
+            {
+                var pref = ParseObject(await SyncRequestAsync(url + "/v1/preferences", "GET", token, null).ConfigureAwait(false));
+                var remoteTheme = Text(pref, "theme");
+                if (remoteTheme.Length > 0)
+                {
+                    var latest = ConfigStore.Load();
+                    if (Text(latest, "theme") != remoteTheme)
+                    {
+                        latest["theme"] = remoteTheme;
+                        ConfigStore.Save(latest);
+                    }
+                }
+            }
+            catch { }
             if (_disposed || Dispatcher.HasShutdownStarted) return;
             await Dispatcher.InvokeAsync(() =>
             {
@@ -847,16 +882,42 @@ public partial class MainWindow : Window
         return (finalSynced, remappedJson);
     }
 
-    private static JsonArray MergeOperationLogs(JsonArray? localLogs, JsonArray? remoteLogs, int limit = 200)
+    private static JsonArray FilterOperationLogs(JsonArray? logs, string account, int limit = 200)
+    {
+        var target = account.Trim().ToLowerInvariant();
+        var filtered = new JsonArray();
+        if (logs is null) return filtered;
+        foreach (var item in logs.OfType<JsonObject>()
+            .Where(item => string.Equals(Text(item, "account").Trim().ToLowerInvariant(), target, StringComparison.Ordinal))
+            .OrderByDescending(item => item["created_at"]?.GetValue<long>() ?? 0L)
+            .Take(limit))
+        {
+            filtered.Add(Clone(item));
+        }
+        return filtered;
+    }
+
+    private static JsonArray MergeOperationLogs(JsonArray? localLogs, JsonArray? remoteLogs, int limit = 500, string? remoteAccount = null)
     {
         var byId = new Dictionary<string, JsonObject>(StringComparer.Ordinal);
-        foreach (var source in new[] { remoteLogs, localLogs })
+        if (localLogs is not null)
         {
-            if (source is null) continue;
-            foreach (var item in source.OfType<JsonObject>())
+            foreach (var item in localLogs.OfType<JsonObject>())
             {
                 var id = Text(item, "id");
                 if (id.Length > 0) byId[id] = Clone(item);
+            }
+        }
+        if (remoteLogs is not null)
+        {
+            var normalizedAccount = remoteAccount?.Trim().ToLowerInvariant();
+            foreach (var item in remoteLogs.OfType<JsonObject>())
+            {
+                var id = Text(item, "id");
+                if (id.Length == 0) continue;
+                var clone = Clone(item);
+                if (normalizedAccount is not null) clone["account"] = normalizedAccount;
+                byId[id] = clone;
             }
         }
         var sorted = byId.Values
@@ -872,13 +933,13 @@ public partial class MainWindow : Window
         if (!message.TryGetProperty("entry", out var entryEl) || entryEl.ValueKind != JsonValueKind.Object) return;
         var entry = JsonNode.Parse(entryEl.GetRawText()) as JsonObject;
         if (entry is null) return;
-        var incoming = new JsonArray { entry };
-        JsonArray merged = incoming;
         var config = ConfigStore.Load();
-        merged = MergeOperationLogs(new JsonArray { Clone(entry) }, config["operation_logs"] as JsonArray);
+        var account = Text(config, "sync_username").Trim().ToLowerInvariant();
+        entry["account"] = account;
+        var merged = MergeOperationLogs(config["operation_logs"] as JsonArray, new JsonArray { Clone(entry) });
         config["operation_logs"] = merged;
         ConfigStore.Save(config);
-        Send(new { type = "operation-logs", logs = merged });
+        Send(new { type = "operation-logs", logs = FilterOperationLogs(merged, account) });
 
         var url = Text(config, "sync_url").TrimEnd('/');
         var token = Text(config, "sync_token");
@@ -893,10 +954,11 @@ public partial class MainWindow : Window
                 {
                     if (_disposed) return;
                     var latest = ConfigStore.Load();
-                    var finalLogs = MergeOperationLogs(latest["operation_logs"] as JsonArray, remote);
+                    var latestAccount = Text(latest, "sync_username").Trim().ToLowerInvariant();
+                    var finalLogs = MergeOperationLogs(latest["operation_logs"] as JsonArray, remote, 500, account);
                     latest["operation_logs"] = finalLogs;
                     ConfigStore.Save(latest);
-                    Send(new { type = "operation-logs", logs = finalLogs });
+                    Send(new { type = "operation-logs", logs = FilterOperationLogs(finalLogs, latestAccount) });
                 }).Task.ConfigureAwait(false);
             }
             catch { }
@@ -906,11 +968,12 @@ public partial class MainWindow : Window
     private Task SyncOperationLogsActionAsync()
     {
         var config = ConfigStore.Load();
+        var account = Text(config, "sync_username").Trim().ToLowerInvariant();
         var url = Text(config, "sync_url").TrimEnd('/');
         var token = Text(config, "sync_token");
         if (Bool(config, "offline_mode") || url.Length == 0 || token.Length == 0)
         {
-            Send(new { type = "operation-logs", logs = config["operation_logs"] as JsonArray ?? new JsonArray() });
+            Send(new { type = "operation-logs", logs = FilterOperationLogs(config["operation_logs"] as JsonArray, account) });
             return Task.CompletedTask;
         }
         return SyncOperationLogsAsync(url, token);
@@ -921,7 +984,8 @@ public partial class MainWindow : Window
         try
         {
             var config = ConfigStore.Load();
-            var local = config["operation_logs"] as JsonArray ?? new JsonArray();
+            var account = Text(config, "sync_username").Trim().ToLowerInvariant();
+            var local = FilterOperationLogs(config["operation_logs"] as JsonArray, account);
             JsonObject response;
             if (local.Count > 0)
             {
@@ -938,10 +1002,11 @@ public partial class MainWindow : Window
             {
                 if (_disposed) return;
                 var latest = ConfigStore.Load();
-                var merged = MergeOperationLogs(latest["operation_logs"] as JsonArray, remote);
+                var latestAccount = Text(latest, "sync_username").Trim().ToLowerInvariant();
+                var merged = MergeOperationLogs(latest["operation_logs"] as JsonArray, remote, 500, account);
                 latest["operation_logs"] = merged;
                 ConfigStore.Save(latest);
-                Send(new { type = "operation-logs", logs = merged });
+                Send(new { type = "operation-logs", logs = FilterOperationLogs(merged, latestAccount) });
             }).Task.ConfigureAwait(false);
         }
         catch { }

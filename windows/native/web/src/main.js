@@ -1567,9 +1567,11 @@ async function imageData(file){
   }finally{URL.revokeObjectURL(objectUrl);}
 }
 function recordOperationLog({ sessionId, sessionName, host, workspace, agent, action = 'open' }) {
+  const account = String(config.sync_username || '').trim().toLowerCase();
   const entry = {
     id: makeId(),
     created_at: Date.now(),
+    account,
     host_id: String(host?.id || ''),
     host_name: String(host?.name || ''),
     ssh_username: String(host?.username || ''),
@@ -1593,7 +1595,9 @@ function renderOperationLogs() {
   const container = $('operation-logs-list');
   if (!container) return;
   container.innerHTML = '';
-  const logs = Array.isArray(config.operation_logs) ? config.operation_logs : [];
+  const account = String(config.sync_username || '').trim().toLowerCase();
+  const logs = (Array.isArray(config.operation_logs) ? config.operation_logs : [])
+    .filter((item) => String(item?.account || '').trim().toLowerCase() === account);
   if (!logs.length) {
     const empty = document.createElement('div');
     empty.className = 'muted small';

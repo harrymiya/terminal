@@ -20,7 +20,7 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("Vte", "2.91")
 gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Gtk, Vte, GLib, Gdk, GdkPixbuf, Pango
-from core import load_config, save_config, ssh_argv, close_remote_session_command, should_close_missing_shared_session, auto_enter_signature, confirmation_pending, AutoEnterController, quota_agent, quota_key, read_agent_quota, hourly_quota, upload_image, MAX_IMAGE_BYTES, sync_request, sync_data_request, sync_operation_logs, merge_operation_logs, sync_host_key, legacy_sync_keys, ssh_address, ssh_port, ssh_host_fingerprint, sync_auth_request, save_sync_password, load_sync_password, clear_sync_password, render_battery_pixbuf, save_host_password, clear_host_password, ssh_auth_environment
+from core import load_config, save_config, ssh_argv, close_remote_session_command, should_close_missing_shared_session, auto_enter_signature, confirmation_pending, AutoEnterController, quota_agent, quota_key, read_agent_quota, hourly_quota, upload_image, MAX_IMAGE_BYTES, sync_request, sync_data_request, sync_operation_logs, merge_operation_logs, filter_operation_logs, sync_host_key, legacy_sync_keys, ssh_address, ssh_port, ssh_host_fingerprint, sync_auth_request, save_sync_password, load_sync_password, clear_sync_password, render_battery_pixbuf, save_host_password, clear_host_password, ssh_auth_environment
 from version import VERSION
 from host_metrics import metrics_key, read_host_metrics
 from mcp_server import EmbeddedMCPServer
@@ -1134,7 +1134,7 @@ class App(Gtk.Window):
         refresh_button.set_tooltip_text("立即同步主机、开发者、工作区和共享会话")
         refresh_button.connect("clicked", lambda *_: self.refresh_all_shared())
         brand_row.pack_start(refresh_button, False, False, 0)
-        log_button = Gtk.Button(label="日志")
+        log_button = Gtk.Button(label="历史")
         log_button.set_tooltip_text("查看操作日志并一键重回现场")
         log_button.connect("clicked", self.show_operation_logs)
         brand_row.pack_start(log_button, False, False, 0)
@@ -2737,7 +2737,9 @@ class App(Gtk.Window):
             self.data["sync_interval_seconds"] = sync_interval.get_value_as_int()
             self.data["agent_quota_interval_seconds"] = quota_interval.get_value_as_int()
             self.data["host_metrics_interval_seconds"] = metrics_interval.get_value_as_int()
+            previous_theme = self.current_theme()
             chosen_theme = theme_combo.get_active_id()
+            theme_changed = chosen_theme in THEMES and chosen_theme != previous_theme
             if chosen_theme in THEMES:
                 self.data["theme"] = chosen_theme
                 self.apply_theme()
@@ -2746,7 +2748,9 @@ class App(Gtk.Window):
             self.refresh_quotas()
             self.save_settings()
             self.configure_sync_polling()
-            self.refresh_all_shared()
+            if theme_changed:
+                self.push_theme_preference_async(chosen_theme)
+            self.refresh_all_shared(sync_theme=not theme_changed)
         delay_row.remove(self.delay)
         grid.remove(self.auto_enter)
         dialog.destroy()
@@ -4161,6 +4165,7 @@ class App(Gtk.Window):
                 account = sync_data_request(self.data, "GET", "/v1/auth/me")
                 self.data["sync_username"] = account.get("username", "")
                 self.data["sync_is_admin"] = account.get("is_admin", False)
+                self.apply_remote_theme(account.get("theme", ""))
                 return True
             except Exception as exc:
                 if getattr(exc, "code", None) != 401:
@@ -4205,6 +4210,7 @@ class App(Gtk.Window):
                 self.data["sync_username"] = result["username"]
                 self.data["sync_token"] = result["access_token"]
                 self.data["sync_is_admin"] = result.get("is_admin", False)
+                self.apply_remote_theme(result.get("theme", ""))
                 self.data["sync_remember"] = remember.get_active()
                 if remember.get_active():
                     save_sync_password(account_name, account_password)
@@ -4226,7 +4232,37 @@ class App(Gtk.Window):
                 self.update_sync_status()
         return False
 
-    def refresh_all_shared(self, prompt_for_login=True):
+    def apply_remote_theme(self, theme_name):
+        if theme_name in THEMES and theme_name != self.current_theme():
+            self.data["theme"] = theme_name
+            self.apply_theme()
+            self.persist()
+
+    def push_theme_preference_async(self, theme_name):
+        if self.is_offline_mode() or not self.data.get("sync_url") or not self.data.get("sync_token"):
+            return
+        snapshot = dict(self.data)
+        def worker():
+            try:
+                sync_data_request(snapshot, "PUT", "/v1/preferences", {"theme": theme_name})
+            except Exception:
+                pass
+        self.sync_executor.submit(worker)
+
+    def sync_theme_preference_async(self):
+        if self.is_offline_mode() or not self.data.get("sync_url") or not self.data.get("sync_token"):
+            return
+        snapshot = dict(self.data)
+        def worker():
+            try:
+                res = sync_data_request(snapshot, "GET", "/v1/preferences")
+                theme = res.get("theme", "")
+                GLib.idle_add(lambda: (self.apply_remote_theme(theme), False)[1])
+            except Exception:
+                pass
+        self.sync_executor.submit(worker)
+
+    def refresh_all_shared(self, prompt_for_login=True, sync_theme=True):
         self.shared_by_host = {}
         if self.is_offline_mode() or not self.data.get("auto_sync_enabled", False):
             self.refresh_sessions_after_host_profiles = False
@@ -4246,6 +4282,8 @@ class App(Gtk.Window):
         self.refresh_sessions_after_host_profiles = True
         self.sync_host_profiles()
         self.sync_operation_logs_async()
+        if sync_theme:
+            self.sync_theme_preference_async()
         for host in self.data["hosts"]:
             self.shared_by_host[self.shared_host_key(host)] = "正在同步…"
         self.update_sync_status()
@@ -4360,9 +4398,11 @@ class App(Gtk.Window):
         self.sync_executor.submit(worker)
 
     def record_operation_log(self, host, directory, agent, session_id, display_name, action="open"):
+        account = str(self.data.get("sync_username", "")).strip().casefold()
         entry = {
             "id": uuid.uuid4().hex,
             "created_at": int(time.time() * 1000),
+            "account": account,
             "host_id": str(host.get("id", "")),
             "host_name": str(host.get("name", "")),
             "ssh_username": str(host.get("username", "")),
@@ -4377,7 +4417,7 @@ class App(Gtk.Window):
             "client": "omarchy",
             "action": action,
         }
-        self.data["operation_logs"] = merge_operation_logs([entry], self.data.get("operation_logs", []))
+        self.data["operation_logs"] = merge_operation_logs([entry], self.data.get("operation_logs", []), limit=500)
         save_config(self.data)
         if not self.is_offline_mode() and self.data.get("sync_url") and self.data.get("sync_token"):
             snapshot = dict(self.data)
@@ -4390,7 +4430,7 @@ class App(Gtk.Window):
             self.sync_executor.submit(worker)
 
     def _apply_merged_operation_logs(self, merged):
-        self.data["operation_logs"] = merge_operation_logs(self.data.get("operation_logs", []), merged)
+        self.data["operation_logs"] = merge_operation_logs(self.data.get("operation_logs", []), merged, limit=500)
         save_config(self.data)
         return False
 
@@ -4400,7 +4440,7 @@ class App(Gtk.Window):
                 GLib.idle_add(on_done, None)
             return
         snapshot = dict(self.data)
-        local_logs = list(self.data.get("operation_logs", []))
+        local_logs = filter_operation_logs(self.data.get("operation_logs", []), snapshot.get("sync_username", ""))
         def worker():
             err = None
             try:
@@ -4462,10 +4502,14 @@ class App(Gtk.Window):
         scroller.add(list_box)
         area.pack_start(scroller, True, True, 0)
 
+        closed = [False]
+
         def render_rows():
+            if closed[0]:
+                return
             for child in list(list_box.get_children()):
                 list_box.remove(child)
-            logs = self.data.get("operation_logs", [])
+            logs = filter_operation_logs(self.data.get("operation_logs", []), self.data.get("sync_username", ""))
             if not logs:
                 empty = Gtk.Label(label="暂无操作记录，打开任意工作区会话后会自动记录并同步。", xalign=0.5)
                 empty.get_style_context().add_class("subtitle")
@@ -4498,8 +4542,9 @@ class App(Gtk.Window):
         def on_refresh(_btn):
             refresh_btn.set_sensitive(False)
             def done(_err):
-                refresh_btn.set_sensitive(True)
-                render_rows()
+                if not closed[0]:
+                    refresh_btn.set_sensitive(True)
+                    render_rows()
                 return False
             self.sync_operation_logs_async(on_done=done)
 
@@ -4507,7 +4552,9 @@ class App(Gtk.Window):
         render_rows()
         self.sync_operation_logs_async(on_done=lambda _e: (render_rows(), False)[1])
         dialog.add_button("关闭", Gtk.ResponseType.CLOSE)
+        dialog.show_all()
         dialog.run()
+        closed[0] = True
         dialog.destroy()
 
     def open_terminal(self, _button, shared_host=None, shared_item=None, activate=True, attach_or_create=False, log_action="open"):

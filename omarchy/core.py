@@ -165,21 +165,48 @@ def sync_data_request(config, method, path, item=None):
         return json.load(response)
 
 
-def merge_operation_logs(local_logs, remote_logs, limit=200):
+def operation_log_account(config_or_entry):
+    if not isinstance(config_or_entry, dict):
+        return ""
+    if "sync_username" in config_or_entry:
+        return str(config_or_entry.get("sync_username", "")).strip().casefold()
+    return str(config_or_entry.get("account", "")).strip().casefold()
+
+
+def filter_operation_logs(logs, account="", limit=200):
+    target = str(account or "").strip().casefold()
+    filtered = [
+        item for item in (logs or [])
+        if isinstance(item, dict) and item.get("id")
+        and str(item.get("account", "")).strip().casefold() == target
+    ]
+    return sorted(filtered, key=lambda x: int(x.get("created_at", 0)), reverse=True)[:limit]
+
+
+def merge_operation_logs(local_logs, remote_logs, limit=200, account=None):
     merged = {}
-    for item in (remote_logs or []) + (local_logs or []):
+    target = str(account).strip().casefold() if account is not None else None
+    for item in (local_logs or []):
         if isinstance(item, dict) and item.get("id"):
-            merged[str(item["id"])] = item
+            merged[str(item["id"])] = dict(item)
+    for item in (remote_logs or []):
+        if isinstance(item, dict) and item.get("id"):
+            entry = dict(item)
+            if target is not None:
+                entry["account"] = target
+            merged[str(entry["id"])] = entry
     return sorted(merged.values(), key=lambda x: int(x.get("created_at", 0)), reverse=True)[:limit]
 
 
 def sync_operation_logs(config, local_logs=None, limit=200):
-    local = list(local_logs or [])
-    if local:
-        res = sync_data_request(config, "POST", "/v1/operation-logs", {"logs": local[:50]})
+    account = operation_log_account(config)
+    all_local = list(local_logs or [])
+    scoped_local = filter_operation_logs(all_local, account, limit=limit)
+    if scoped_local:
+        res = sync_data_request(config, "POST", "/v1/operation-logs", {"logs": scoped_local[:50]})
     else:
         res = sync_data_request(config, "GET", f"/v1/operation-logs?limit={limit}")
-    return merge_operation_logs(local, res.get("logs", []), limit=limit)
+    return merge_operation_logs(all_local, res.get("logs", []), limit=max(limit, 500), account=account)
 
 
 def sync_request(config, method, session_id=None, item=None, host=None):

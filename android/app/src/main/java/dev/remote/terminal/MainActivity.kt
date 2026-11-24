@@ -832,6 +832,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
         }
 
         fun recordOperationLog(task: TerminalTask, action: String = "open") {
+            val account = store.loadSyncUsername().trim().lowercase()
             val entry = OperationLogEntry(
                 id = UUID.randomUUID().toString().replace("-", ""),
                 createdAt = System.currentTimeMillis(),
@@ -848,6 +849,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 sessionName = task.displayName,
                 client = "android",
                 action = action,
+                account = account,
             )
             val merged = store.appendOperationLog(entry)
             operationLogs.clear()
@@ -856,9 +858,11 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 scope.launch {
                     runCatching {
                         val remote = withContext(SyncClient.dispatcher) { SyncClient.pushOperationLogs(listOf(entry)) }
-                        val synced = store.mergeOperationLogs(remote)
-                        operationLogs.clear()
-                        operationLogs.addAll(synced)
+                        val synced = store.mergeOperationLogs(remote, account)
+                        if (store.loadSyncUsername().trim().lowercase() == account) {
+                            operationLogs.clear()
+                            operationLogs.addAll(synced)
+                        }
                     }
                 }
             }
@@ -866,14 +870,17 @@ private fun RemoteTerminalApp(store: LocalStore) {
 
         suspend fun syncOperationLogs() {
             if (offlineMode || syncUrl.isBlank() || syncToken.isBlank()) return
-            val local = store.loadOperationLogs()
+            val account = store.loadSyncUsername().trim().lowercase()
+            val local = store.loadOperationLogs(account)
             val remote = withContext(SyncClient.dispatcher) {
                 if (local.isNotEmpty()) SyncClient.pushOperationLogs(local.take(50))
                 else SyncClient.fetchOperationLogs(200)
             }
-            val merged = store.mergeOperationLogs(remote)
-            operationLogs.clear()
-            operationLogs.addAll(merged)
+            val merged = store.mergeOperationLogs(remote, account)
+            if (store.loadSyncUsername().trim().lowercase() == account) {
+                operationLogs.clear()
+                operationLogs.addAll(merged)
+            }
         }
 
         fun openTask(
@@ -1068,6 +1075,8 @@ private fun RemoteTerminalApp(store: LocalStore) {
         }
 
         LaunchedEffect(syncUrl, syncToken, offlineMode, autoSyncEnabled, syncIntervalSeconds) {
+            operationLogs.clear()
+            operationLogs.addAll(store.loadOperationLogs(store.loadSyncUsername()))
             val syncEnabled = !offlineMode && autoSyncEnabled && syncUrl.isNotBlank() && syncToken.isNotBlank()
             syncLoading = syncEnabled && hosts.isNotEmpty()
             if (!syncEnabled) startupShared = emptyList()

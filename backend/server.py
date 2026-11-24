@@ -164,13 +164,17 @@ def create_server(address, database, token=None):
         db.execute("CREATE TABLE IF NOT EXISTS host_state (host_id TEXT PRIMARY KEY, revision INTEGER NOT NULL, payload TEXT NOT NULL)")
         db.execute("CREATE TABLE IF NOT EXISTS workspaces (host_id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
         db.execute("CREATE TABLE IF NOT EXISTS agents (host_id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
-        db.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT UNIQUE NOT NULL, salt BLOB NOT NULL, password_hash BLOB NOT NULL, must_change INTEGER NOT NULL DEFAULT 0, is_admin INTEGER NOT NULL DEFAULT 0)")
+        db.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT UNIQUE NOT NULL, salt BLOB NOT NULL, password_hash BLOB NOT NULL, must_change INTEGER NOT NULL DEFAULT 0, is_admin INTEGER NOT NULL DEFAULT 0, theme TEXT NOT NULL DEFAULT '')")
         try:
             db.execute("ALTER TABLE users ADD COLUMN must_change INTEGER NOT NULL DEFAULT 0")
         except sqlite3.OperationalError:
             pass
         try:
             db.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            db.execute("ALTER TABLE users ADD COLUMN theme TEXT NOT NULL DEFAULT ''")
         except sqlite3.OperationalError:
             pass
         db.execute("CREATE TABLE IF NOT EXISTS auth_tokens (token_hash BLOB PRIMARY KEY, user_id INTEGER NOT NULL, expires_at INTEGER NOT NULL)")
@@ -278,11 +282,12 @@ def create_server(address, database, token=None):
                     if not hmac.compare_digest(candidate, password_hash):
                         return self.reply(401, {"error": "invalid username or password"})
             with sqlite3.connect(database) as db:
-                account = db.execute("SELECT is_admin FROM users WHERE id = ?", (user_id,)).fetchone()
+                account = db.execute("SELECT is_admin, theme FROM users WHERE id = ?", (user_id,)).fetchone()
             access_token, expiry = self.issue_token(user_id)
             return self.reply(200, {"username": username, "access_token": access_token, "expires_at": expiry,
                                    "must_change": bool(must_change) if not register else False,
-                                   "is_admin": bool(account and account[0])})
+                                   "is_admin": bool(account and account[0]),
+                                   "theme": (account[1] or "") if account else ""})
 
         def do_GET(self):
             if urlsplit(self.path).path == "/v1/hosts":
@@ -300,8 +305,13 @@ def create_server(address, database, token=None):
             if urlsplit(self.path).path == "/v1/auth/me":
                 if not self.authorized(): return
                 with sqlite3.connect(database) as db:
-                    row = db.execute("SELECT username, must_change, is_admin FROM users WHERE id = ?", (self.user_id,)).fetchone()
-                return self.reply(200, {"username": row[0] if row else "legacy", "must_change": bool(row and row[1]), "is_admin": bool(row and row[2])})
+                    row = db.execute("SELECT username, must_change, is_admin, theme FROM users WHERE id = ?", (self.user_id,)).fetchone()
+                return self.reply(200, {"username": row[0] if row else "legacy", "must_change": bool(row and row[1]), "is_admin": bool(row and row[2]), "theme": (row[3] or "") if row else ""})
+            if urlsplit(self.path).path == "/v1/preferences":
+                if not self.authorized(): return
+                with sqlite3.connect(database) as db:
+                    row = db.execute("SELECT theme FROM users WHERE id = ?", (self.user_id,)).fetchone()
+                return self.reply(200, {"theme": (row[0] or "") if row else ""})
             if not self.authorized():
                 return
             path = urlsplit(self.path).path
@@ -485,6 +495,19 @@ def create_server(address, database, token=None):
             if not self.authorized():
                 return
             path = urlsplit(self.path).path
+            if path == "/v1/preferences":
+                try:
+                    length = int(self.headers.get("Content-Length", "-1"))
+                    if length < 0 or length > 4096: raise ValueError()
+                    data = json.loads(self.rfile.read(length))
+                    theme = str(data.get("theme", "")).strip()
+                    if not re.fullmatch(r"[a-z0-9_-]{0,64}", theme):
+                        raise ValueError("invalid theme")
+                except (ValueError, AttributeError, UnicodeDecodeError, json.JSONDecodeError):
+                    return self.reply(400, {"error": "invalid preferences"})
+                with sqlite3.connect(database) as db:
+                    db.execute("UPDATE users SET theme = ? WHERE id = ?", (theme, self.user_id))
+                return self.reply(200, {"theme": theme})
             if path.startswith("/v1/hosts/") and path.count("/") == 3:
                 host_id = path.removeprefix("/v1/hosts/")
                 try:

@@ -38,6 +38,7 @@ data class OperationLogEntry(
     val sessionName: String,
     val client: String = "android",
     val action: String = "open",
+    val account: String = "",
 )
 
 data class HostProfile(
@@ -475,7 +476,7 @@ class LocalStore(context: Context) {
         preferences.edit().putStringSet("trusted_host_keys", keys).apply()
     }
 
-    fun loadOperationLogs(): List<OperationLogEntry> = runCatching {
+    private fun loadAllOperationLogs(): List<OperationLogEntry> = runCatching {
         val raw = preferences.getString("operation_logs", null) ?: return emptyList()
         val array = JSONArray(raw)
         (0 until array.length()).map { index ->
@@ -496,18 +497,25 @@ class LocalStore(context: Context) {
                 sessionName = obj.optString("session_name", ""),
                 client = obj.optString("client", "android"),
                 action = obj.optString("action", "open"),
+                account = obj.optString("account", "").trim().lowercase(),
             )
         }.sortedByDescending { it.createdAt }
     }.getOrDefault(emptyList())
 
+    fun loadOperationLogs(account: String = loadSyncUsername()): List<OperationLogEntry> {
+        val target = account.trim().lowercase()
+        return loadAllOperationLogs().filter { it.account == target }.take(200)
+    }
+
     fun saveOperationLogs(logs: List<OperationLogEntry>) {
-        val trimmed = logs.distinctBy { it.id }.sortedByDescending { it.createdAt }.take(200)
+        val trimmed = logs.distinctBy { it.id }.sortedByDescending { it.createdAt }.take(500)
         val array = JSONArray()
         trimmed.forEach { entry ->
             array.put(
                 JSONObject()
                     .put("id", entry.id)
                     .put("created_at", entry.createdAt)
+                    .put("account", entry.account.trim().lowercase())
                     .put("host_id", entry.hostId)
                     .put("host_name", entry.hostName)
                     .put("ssh_username", entry.sshUsername)
@@ -527,21 +535,24 @@ class LocalStore(context: Context) {
     }
 
     fun appendOperationLog(entry: OperationLogEntry): List<OperationLogEntry> {
-        val merged = (listOf(entry) + loadOperationLogs())
+        val normalized = entry.copy(account = entry.account.trim().lowercase())
+        val merged = (listOf(normalized) + loadAllOperationLogs())
             .distinctBy { it.id }
             .sortedByDescending { it.createdAt }
-            .take(200)
+            .take(500)
         saveOperationLogs(merged)
-        return merged
+        return merged.filter { it.account == normalized.account }.take(200)
     }
 
-    fun mergeOperationLogs(remote: List<OperationLogEntry>): List<OperationLogEntry> {
-        val merged = (remote + loadOperationLogs())
+    fun mergeOperationLogs(remote: List<OperationLogEntry>, account: String = loadSyncUsername()): List<OperationLogEntry> {
+        val target = account.trim().lowercase()
+        val taggedRemote = remote.map { it.copy(account = target) }
+        val merged = (taggedRemote + loadAllOperationLogs())
             .distinctBy { it.id }
             .sortedByDescending { it.createdAt }
-            .take(200)
+            .take(500)
         saveOperationLogs(merged)
-        return merged
+        return merged.filter { it.account == target }.take(200)
     }
 }
 
