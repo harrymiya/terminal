@@ -697,11 +697,16 @@ function renderSessions({ focus = true } = {}) {
     card.className='terminal-card';
     card.classList.toggle('active', s.id === activeSession);
     card.classList.toggle('inactive', !row && !s.floating);
-    card.innerHTML=`<div class="terminal-head"><svg class="terminal-running-outline" aria-hidden="true"><rect x="2.5" y="2.5" width="calc(100% - 5px)" height="calc(100% - 5px)" rx="2"></rect></svg><span class="terminal-card-title agent-label" title="双击重命名"><span class="terminal-card-name">${escapeHtml(s.title)}</span><button class="terminal-close rename-session" title="编辑实例名称">✎</button></span><span class="terminal-quota quota-batteries" hidden></span><span class="terminal-tools"><button class="terminal-close image-session" title="发送图片">▧</button><button class="terminal-close minimize-session" title="最小化">−</button><button class="terminal-close float-session" title="${s.floating ? '还原到工作区' : '浮动窗口'}">□</button><button class="terminal-close close-session" title="关闭终端">×</button></span></div><div class="terminal-body"></div>`;
+    card.innerHTML=`<div class="terminal-head"><svg class="terminal-running-outline" aria-hidden="true"><rect x="2.5" y="2.5" width="calc(100% - 5px)" height="calc(100% - 5px)" rx="2"></rect></svg><span class="terminal-card-title agent-label" title="双击重命名"><span class="terminal-card-name">${escapeHtml(s.title)}</span><button class="terminal-close rename-session" title="编辑实例名称">✎</button></span><span class="terminal-quota quota-batteries" hidden></span><span class="terminal-tools"><button type="button" class="terminal-close reconnect-session" title="重新连接 SSH">重新连接</button><button class="terminal-close image-session" title="发送图片">▧</button><button class="terminal-close minimize-session" title="最小化">−</button><button class="terminal-close float-session" title="${s.floating ? '还原到工作区' : '浮动窗口'}">□</button><button class="terminal-close close-session" title="关闭终端">×</button></span></div><div class="terminal-body"></div>`;
     const head = card.querySelector('.terminal-head');
     const title = card.querySelector('.terminal-card-title');
     const icon = sessionAgentIcon(s);
     if (icon) title.prepend(icon);
+    const reconnect = card.querySelector('.reconnect-session');
+    reconnect.hidden = s.connected;
+    reconnect.disabled = s.connecting;
+    reconnect.textContent = s.connecting ? '连接中…' : '重新连接';
+    reconnect.addEventListener('click', () => connectSession(s));
     card.querySelector('.terminal-close.close-session').addEventListener('click',()=>closeSession(s.id));
     card.querySelector('.terminal-close.rename-session').addEventListener('click',event=>{event.stopPropagation();renameSession(s);});
     card.querySelector('.terminal-close.rename-session').addEventListener('dblclick',event=>event.stopPropagation());
@@ -1051,6 +1056,11 @@ function createTerminalSession({ id, remoteId = id, title, host, workspace, agen
     startedAt: Date.now(),
     lastOutputAt: 0,
     connected: false,
+    connecting: false,
+    canResume: false,
+    attempt: 0,
+    retryCount: 0,
+    retryTimer: null,
     opened: false,
   };
   session.autoState = createAutoConfirmState();
@@ -1077,6 +1087,7 @@ function openSession(workspaceIndex) {
       renderSessions();
       existing.term.focus();
     }
+    connectSession(existing);
     return existing.id;
   }
   if(sessions.size>=8){showError('最多同时打开 8 个终端。');return '';}
@@ -1084,7 +1095,6 @@ function openSession(workspaceIndex) {
   const session=createTerminalSession({id,title,host,workspace,agent,restoreOnly:false,activate:true});
   recordOperationLog({ sessionId: id, sessionName: title, host, workspace, agent, action: 'open' });
   renderSessions();
-  session.term.writeln('\x1b[90m正在连接 SSH…\x1b[0m');
   post({action:'session-sync',method:'PUT',host:session.host,id,item:buildSessionSyncItem(session)});
   connectSession(session);
   return id;
@@ -1122,18 +1132,57 @@ function openSyncedSession(host, item) {
   });
 }
 
-function connectSession(session) {
-  session.connected=false;setBusy(true);
+function updateConnectionControls(session) {
+  const reconnect = session.card?.querySelector('.reconnect-session');
+  if (reconnect) {
+    reconnect.hidden = session.connected;
+    reconnect.disabled = session.connecting;
+    reconnect.textContent = session.connecting ? '连接中…' : '重新连接';
+  }
+  setBusy([...sessions.values()].some((item) => item.connecting));
+}
+
+function connectSession(session, automatic = false) {
+  if (sessions.get(session.id) !== session || session.connected || session.connecting) return false;
+  clearTimeout(session.retryTimer);
+  session.retryTimer = null;
+  if (!automatic) session.retryCount = 0;
+  session.connecting = true;
+  session.attempt += 1;
+  resetAutoConfirm(session.autoState);
+  updateConnectionControls(session);
+  const restoring = session.restoreOnly || session.canResume;
+  session.term.writeln(`\r\n\x1b[90m${restoring ? '正在重新连接 SSH…' : '正在连接 SSH…'}\x1b[0m`);
   post({
     action:'connect',
     id:session.id,
+    attempt:session.attempt,
     host:session.host,
     workspace:session.workspace,
     agent:session.agent,
     cols:session.term.cols,
     rows:session.term.rows,
-    restore_only:Boolean(session.restoreOnly),
+    restore_only:restoring,
   });
+  return true;
+}
+
+function onConnectionClosed(session, { code, remote_session_missing }) {
+  session.connecting = false;
+  session.connected = false;
+  resetAutoConfirm(session.autoState);
+  updateConnectionControls(session);
+  if (remote_session_missing) {
+    session.term.writeln('\r\n\x1b[90m[远端 tmux 会话已不存在。如需新建会话，请关闭此终端后重新打开工作区。]\x1b[0m');
+    return;
+  }
+  const exitCode = (Number(code) >>> 0).toString(16).toUpperCase().padStart(8, '0');
+  session.term.writeln(`\r\n\x1b[90m[SSH 已断开，退出码 0x${exitCode}。点击终端上的「重新连接」可重试。]\x1b[0m`);
+  const retryDelays = [2000, 5000, 10000];
+  if (code !== 255 || !session.canResume || session.retryCount >= retryDelays.length) return;
+  const delay = retryDelays[session.retryCount++];
+  session.term.writeln(`\x1b[90m[${delay / 1000} 秒后自动尝试恢复远端会话]\x1b[0m`);
+  session.retryTimer = setTimeout(() => connectSession(session, true), delay);
 }
 
 function closeSession(id, { syncDeletion = true, terminateRemote = true, skipRender = false } = {}) {
@@ -1142,9 +1191,10 @@ function closeSession(id, { syncDeletion = true, terminateRemote = true, skipRen
     post({action:'session-sync',method:'DELETE',host:session.host,id:session.remoteId||session.id});
   }
   post({action:'close',id,terminate_remote:Boolean(terminateRemote)});
+  clearTimeout(session.retryTimer);
   clearInterval(session.autoTimer);session.term.dispose();sessions.delete(id);
   if(activeSession===id)activeSession=sessions.keys().next().value||'';
-  setBusy([...sessions.values()].some(s=>s.connected));
+  setBusy([...sessions.values()].some(s=>s.connecting));
   if (!skipRender) renderSessions({ focus: !document.querySelector('dialog[open]') });
 }
 
@@ -1213,7 +1263,6 @@ function reconcileSyncedSessions(syncedHosts, remappedHosts = {}) {
   if (toClose.length || opened.length) {
     renderSessions({ focus: !hadActive && !document.querySelector('dialog[open]') });
     for (const session of opened) {
-      session.term.writeln('\x1b[90m正在恢复远程会话 SSH…\x1b[0m');
       connectSession(session);
     }
   } else if (titleChanged) {
@@ -1268,11 +1317,12 @@ function handleNativeMessage(event) {
     return;
   }
   const session=sessions.get(msg.id);
+  if (msg.attempt !== undefined && msg.attempt !== session?.attempt) return;
   if(msg.type==='output'&&session){session.lastOutputAt=performance.now();session.card?.querySelector('.terminal-head')?.classList.add('running');const raw=atob(msg.data);const bytes=Uint8Array.from(raw,c=>c.charCodeAt(0));session.term.write(bytes,()=>watchAutoEnter(session));}
   else if(msg.type==='endpoint-selected'&&session){const address=String(msg.address||'').replace(/[\x00-\x1f\x7f]/g,'');session.term.writeln(`\r\n\x1b[90m连接目标 ${address}:${Number(msg.port)||22} …\x1b[0m`);}
-  else if(msg.type==='connected'&&session){session.connected=true;setBusy(false);session.term.focus();}
-  else if(msg.type==='closed'&&session){session.connected=false;setBusy([...sessions.values()].some(s=>s.connected));const exitCode=(Number(msg.code)>>>0).toString(16).toUpperCase().padStart(8,'0');session.term.writeln(`\r\n\x1b[90m[SSH 已断开，退出码 0x${exitCode}；点击右上角 ↻ 重新连接]\x1b[0m`);}
-  else if(msg.type==='error'&&session){session.connected=false;setBusy(false);session.term.writeln(`\r\n\x1b[31m${msg.message}\x1b[0m`);}
+  else if(msg.type==='connected'&&session){session.connecting=false;session.connected=true;session.canResume=Boolean(msg.can_resume);session.retryCount=0;updateConnectionControls(session);}
+  else if(msg.type==='closed'&&session){onConnectionClosed(session,msg);}
+  else if(msg.type==='error'&&session){session.connecting=false;session.connected=false;updateConnectionControls(session);session.term.writeln(`\r\n\x1b[31m${msg.message}\x1b[0m`);}
   else if(msg.type==='saved'){ $('connection-status').title='配置已保存'; }
   else if(msg.type==='notice')showError(msg.message);
 }
@@ -1369,7 +1419,7 @@ async function executeMcpTool(name,a){
   if(name==='open_terminal'){const [,host]=resolveMcpHost(a);const [,agent]=resolveMcpAgent(host,a);const [,workspace]=resolveMcpWorkspace(host,a);activeHost=host.id;host.selected_agent=agentsForHost(host).indexOf(agent);sendConfig();render();const id=openSession(host.directories.indexOf(workspace));if(!id)throw new Error('无法打开终端，可能已达到 8 个会话上限');return {session:sessionState(sessions.get(id),[...sessions.keys()].indexOf(id))};}
   if(name==='focus_terminal'){const [index,s]=resolveMcpSession(a);activeSession=s.id;s.minimized=false;renderSessions();s.term.focus();return {session:sessionState(s,index)};}
   if(name==='close_terminal'){const [index,s]=resolveMcpSession(a);closeSession(s.id);return {closed_session_id:s.id,closed_index:index,remaining_sessions:sessions.size};}
-  if(name==='reconnect_terminal'){const [index,s]=resolveMcpSession(a);connectSession(s);return {reconnecting_session_id:s.id,session_index:index};}
+  if(name==='reconnect_terminal'){const [index,s]=resolveMcpSession(a);return {reconnecting_session_id:s.id,session_index:index,reconnecting:connectSession(s)};}
   if(name==='send_terminal_text'){const [index,s]=resolveMcpSession(a);if(a.focus!==false){activeSession=s.id;s.term.focus();}const text=String(a.text??'');const paste=a.use_paste??text.includes('\n');post({action:'input',id:s.id,data:paste?`\x1b[200~${text}\x1b[201~`:text});if(a.submit!==false)post({action:'input',id:s.id,data:'\r'});return {sent:true,session_id:s.id,bytes:new TextEncoder().encode(text).length,submitted:a.submit!==false,index};}
   if(name==='send_terminal_keys'){const [index,s]=resolveMcpSession(a),keys=Array.isArray(a.keys)?a.keys:[a.keys];const map={enter:'\r',return:'\r',tab:'\t','shift+tab':'\x1b[Z',escape:'\x1b',esc:'\x1b',backspace:'\x7f',delete:'\x1b[3~',space:' ',up:'\x1b[A',down:'\x1b[B',right:'\x1b[C',left:'\x1b[D',home:'\x1b[H',end:'\x1b[F',pageup:'\x1b[5~',page_up:'\x1b[5~',pagedown:'\x1b[6~',page_down:'\x1b[6~'};let payload='';for(const raw of keys){const key=String(raw).trim().toLowerCase();if(map[key])payload+=map[key];else if(/^ctrl\+[a-z]$/.test(key))payload+=String.fromCharCode(key.charCodeAt(5)-96);else throw new Error(`不支持的按键：${raw}`);}if(a.focus!==false){activeSession=s.id;s.term.focus();}post({action:'input',id:s.id,data:payload});return {sent:true,session_id:s.id,bytes:new TextEncoder().encode(payload).length,index};}
   if(name==='read_terminal_screen'){const [index,s]=resolveMcpSession(a),buffer=s.term.buffer.active,max=Math.max(1,Math.min(5000,Number(a.max_lines)||200)),end=buffer.length,start=a.include_scrollback?Math.max(0,end-max):Math.max(0,buffer.viewportY??buffer.baseY??0),lines=[];for(let row=start;row<Math.min(end,start+max);row++)lines.push(buffer.getLine(row)?.translateToString(true)||'');return {text:lines.join('\n'),cursor:{x:buffer.cursorX,y:buffer.cursorY},session:sessionState(s,index)};}
@@ -1685,6 +1735,7 @@ function restoreFromOperationLog(entry) {
       renderSessions();
       existing.term.focus();
     }
+    connectSession(existing);
     return;
   }
   const hosts = Array.isArray(config.hosts) ? config.hosts : [];

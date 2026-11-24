@@ -1,5 +1,6 @@
 param(
-    [switch]$NoRestore
+    [switch]$NoRestore,
+    [switch]$SkipPackage
 )
 
 $ErrorActionPreference = 'Stop'
@@ -50,6 +51,8 @@ $www = Join-Path $publishDir 'www'
 New-Item -ItemType Directory -Force -Path $www | Out-Null
 Copy-Item (Join-Path $nativeRoot 'www\*') $www -Recurse -Force
 Write-Host "Build complete: $publishDir"
+
+if ($SkipPackage) { return }
 
 $distDir = Join-Path $PSScriptRoot 'dist'
 $packageRoot = Join-Path $distDir 'RemoteDevTerminal-win-x64'

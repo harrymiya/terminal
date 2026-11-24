@@ -202,6 +202,13 @@ public partial class MainWindow : Window
         var id = Text(message, "id");
         if (id.Length is < 8 or > 64 || id.Any(c => !Uri.IsHexDigit(c)))
             throw new ArgumentException("终端 ID 无效。");
+        var attempt = Number(message, "attempt", 0);
+        try { Connect(message, id, attempt); }
+        catch (Exception ex) { Send(new { type = "error", id, attempt, message = ex.Message }); }
+    }
+
+    private void Connect(JsonElement message, string id, int attempt)
+    {
         CloseSession(id, terminateRemote: false);
 
         var restoreOnly = message.TryGetProperty("restore_only", out var restoreProp) && restoreProp.ValueKind == JsonValueKind.True;
@@ -215,7 +222,7 @@ public partial class MainWindow : Window
         var agent = message.GetProperty("agent");
         var username = Text(host, "username");
         var (address, port) = ResolveSshEndpoint(host);
-        Send(new { type = "endpoint-selected", id, address, port });
+        Send(new { type = "endpoint-selected", id, attempt, address, port });
 
         var session = new SshTerminalSession(id);
         var hostNode = JsonNode.Parse(host.GetRawText()) as JsonObject ?? new JsonObject();
@@ -224,7 +231,12 @@ public partial class MainWindow : Window
         session.DataReceived += bytes => Dispatcher.BeginInvoke(() =>
         {
             if (_sessions.TryGetValue(id, out var current) && ReferenceEquals(current, session))
-                Send(new { type = "output", id, data = Convert.ToBase64String(bytes) });
+                Send(new { type = "output", id, attempt, data = Convert.ToBase64String(bytes) });
+        });
+        session.Ready += canResume => Dispatcher.BeginInvoke(() =>
+        {
+            if (_sessions.TryGetValue(id, out var current) && ReferenceEquals(current, session))
+                Send(new { type = "connected", id, attempt, can_resume = canResume });
         });
         session.Exited += code => Dispatcher.BeginInvoke(() =>
         {
@@ -233,7 +245,7 @@ public partial class MainWindow : Window
                 _sessions.Remove(id);
                 _sessionHosts.Remove(id);
                 session.Dispose();
-                Send(new { type = "closed", id, code });
+                Send(new { type = "closed", id, attempt, code, remote_session_missing = restoreOnly && code == SshTerminalSession.MissingSessionExitCode });
             }
         }, DispatcherPriority.ContextIdle);
 
@@ -242,14 +254,13 @@ public partial class MainWindow : Window
         {
             session.Start(username, address, port, Text(workspace, "path"), Text(agent, "command"),
                 Number(message, "cols", 100), Number(message, "rows", 30), savedPassword, restoreOnly);
-            Send(new { type = "connected", id });
         }
-        catch (Exception ex)
+        catch
         {
             _sessions.Remove(id);
             _sessionHosts.Remove(id);
             session.Dispose();
-            Send(new { type = "error", id, message = ex.Message });
+            throw;
         }
     }
 

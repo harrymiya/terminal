@@ -10,6 +10,7 @@ namespace RemoteDevTerminal;
 
 internal sealed class SshTerminalSession : IDisposable
 {
+    internal const int MissingSessionExitCode = 44;
     private const uint HandleFlagInherit = 1;
     private const uint ExtendedStartupInfoPresent = 0x00080000;
     private const uint CreateUnicodeEnvironment = 0x00000400;
@@ -29,6 +30,7 @@ internal sealed class SshTerminalSession : IDisposable
 
     public string Id { get; }
     public event Action<byte[]>? DataReceived;
+    public event Action<bool>? Ready;
     public event Action<int>? Exited;
 
     public SshTerminalSession(string id) => Id = id;
@@ -67,9 +69,11 @@ internal sealed class SshTerminalSession : IDisposable
                     _pseudoConsole, (nuint)IntPtr.Size, IntPtr.Zero, IntPtr.Zero))
                 ThrowLastError("附加 Windows 伪终端失败");
 
-            var remote = BuildRemoteCommand(Id, directory, agent, restoreOnly);
+            var readyMarker = "RDT-READY-" + Guid.NewGuid().ToString("N") + ":";
+            var remote = BuildRemoteCommand(Id, directory, agent, restoreOnly, readyMarker);
             var commandLine = string.Join(" ", new[] {
-                QuoteArgument(ssh), "-tt", "-o", "ServerAliveInterval=20", "-o", "ServerAliveCountMax=6",
+                QuoteArgument(ssh), "-tt", "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=3",
+                "-o", "ConnectTimeout=8",
                 "-p", port.ToString(), "-l", QuoteArgument(username), "--", QuoteArgument(address), QuoteArgument(remote)
             });
             var startup = new StartupInfoEx
@@ -95,7 +99,7 @@ internal sealed class SshTerminalSession : IDisposable
             CloseHandle(processInfo.Thread);
             childInput.Dispose(); childInput = null;
             childOutput.Dispose(); childOutput = null;
-            _reader = Task.Run(ReadLoop);
+            _reader = Task.Run(() => ReadLoop(readyMarker));
             _ = Task.Run(MonitorProcess);
         }
         catch
@@ -173,20 +177,55 @@ internal sealed class SshTerminalSession : IDisposable
         ResizePseudoConsole(handle, size);
     }
 
-    private void ReadLoop()
+    private void ReadLoop(string readyMarker)
     {
         var buffer = new byte[8192];
+        var readyPrefix = Encoding.ASCII.GetBytes(readyMarker);
+        var pending = Array.Empty<byte>();
+        var ready = false;
         while (!_disposed && _output is { IsInvalid: false, IsClosed: false } output)
         {
             try
             {
                 if (!ReadFile(output, buffer, (uint)buffer.Length, out var read, IntPtr.Zero) || read == 0) break;
-                var chunk = new byte[(int)read]; Buffer.BlockCopy(buffer, 0, chunk, 0, (int)read);
+                var chunk = new byte[pending.Length + (int)read];
+                pending.CopyTo(chunk, 0);
+                Buffer.BlockCopy(buffer, 0, chunk, pending.Length, (int)read);
+                pending = Array.Empty<byte>();
+
+                if (!ready)
+                {
+                    // ConPTY can split the marker across reads. Keep only a trailing partial match.
+                    var position = chunk.AsSpan().IndexOf(readyPrefix);
+                    if (position >= 0 && position + readyPrefix.Length < chunk.Length)
+                    {
+                        var mode = chunk[position + readyPrefix.Length];
+                        WriteOutput(chunk.AsSpan(0, position));
+                        Ready?.Invoke(mode == (byte)'T');
+                        ready = true;
+                        WriteOutput(chunk.AsSpan(position + readyPrefix.Length + 1));
+                        continue;
+                    }
+
+                    var suffixLength = Math.Min(readyPrefix.Length, chunk.Length);
+                    while (suffixLength > 0 && !chunk.AsSpan(chunk.Length - suffixLength).SequenceEqual(readyPrefix.AsSpan(0, suffixLength)))
+                        suffixLength--;
+                    pending = chunk.AsSpan(chunk.Length - suffixLength).ToArray();
+                    WriteOutput(chunk.AsSpan(0, chunk.Length - suffixLength));
+                    continue;
+                }
+
                 DataReceived?.Invoke(chunk);
             }
             catch (ObjectDisposedException) { break; }
             catch (Exception) when (_disposed) { break; }
         }
+        WriteOutput(pending);
+    }
+
+    private void WriteOutput(ReadOnlySpan<byte> output)
+    {
+        if (!output.IsEmpty) DataReceived?.Invoke(output.ToArray());
     }
 
     private void MonitorProcess()
@@ -287,24 +326,26 @@ internal sealed class SshTerminalSession : IDisposable
             $"{text}; fi";
     }
 
-    private static string BuildRemoteCommand(string id, string directory, string agent, bool restoreOnly = false)
+    private static string BuildRemoteCommand(string id, string directory, string agent, bool restoreOnly, string readyMarker)
     {
         var safeId = new string(id.Where(Uri.IsHexDigit).Take(18).ToArray()).ToLowerInvariant();
         if (safeId.Length < 8) safeId = Guid.NewGuid().ToString("N").Substring(0, 18);
         var session = "rdt_" + safeId;
+        var target = "=" + session;
         var qDirectory = ShellQuote(directory);
         var qAgent = ShellQuote(WrapAgentCommand(id, agent));
+        var attach = $"tmux set-option -t {session} mouse on && printf '%s\\n' {ShellQuote(readyMarker + "T")} && exec tmux attach-session -t {target}";
         if (restoreOnly)
         {
-            return $"cd -- {qDirectory} && if command -v tmux >/dev/null 2>&1 && tmux has-session -t {session} 2>/dev/null; then " +
-                   $"tmux set-option -t {session} mouse on && tmux attach-session -t {session}; " +
-                   $"else printf '\\n[会话已不存在，无法恢复]\\n'; exit 1; fi";
+            return $"if command -v tmux >/dev/null 2>&1 && tmux has-session -t {target} 2>/dev/null; then {attach}; " +
+                   $"else exit {MissingSessionExitCode}; fi";
         }
         var inner = $"\"${{SHELL:-/bin/bash}}\" -l -i -c {qAgent}; code=$?; printf \\\"\\n[命令已退出，状态 %s；Shell 仍然可用]\\n\\\" \\\"$code\\\"; exec \\\"${{SHELL:-/bin/bash}}\\\" -l -i";
-        return $"cd -- {qDirectory} && if command -v tmux >/dev/null 2>&1; then " +
-               $"(tmux has-session -t {session} 2>/dev/null || tmux new-session -d -s {session} -c {qDirectory} {ShellQuote(inner)}) && " +
-               $"tmux set-option -t {session} mouse on && tmux attach-session -t {session}; " +
-               $"else printf '\\n[提示] 未安装 tmux，断线后无法恢复会话\\n'; exec \"${{SHELL:-/bin/bash}}\" -l -i -c {qAgent}; fi";
+        return $"if command -v tmux >/dev/null 2>&1; then " +
+               $"(tmux has-session -t {target} 2>/dev/null || (cd -- {qDirectory} && tmux new-session -d -s {session} -c {qDirectory} {ShellQuote(inner)}) || tmux has-session -t {target} 2>/dev/null) && " +
+               $"{attach}; " +
+               $"else cd -- {qDirectory} && printf '%s\\n' {ShellQuote(readyMarker + "D")} && " +
+               $"printf '\\n[提示] 未安装 tmux，断线后无法恢复会话\\n' && exec \"${{SHELL:-/bin/bash}}\" -l -i -c {qAgent}; fi";
     }
 
     private static string ShellQuote(string value) => "'" + value.Replace("'", "'\"'\"'") + "'";

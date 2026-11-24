@@ -8,6 +8,16 @@ if ([int]$os.BuildNumber -lt 22000) {
     throw "Remote Dev Terminal 原生版需要 Windows 11。当前系统版本：$($os.Caption) $($os.BuildNumber)。"
 }
 
+if (Get-Process -Name 'RemoteDevTerminal' -ErrorAction SilentlyContinue) {
+    throw 'Remote Dev Terminal 正在运行。请先关闭程序，再重新运行安装程序。'
+}
+
+$buildScript = Join-Path $PSScriptRoot 'build.ps1'
+$project = Join-Path $PSScriptRoot 'native\RemoteDevTerminal.csproj'
+if ((Test-Path -LiteralPath $buildScript) -and (Test-Path -LiteralPath $project)) {
+    & $buildScript -SkipPackage
+}
+
 $sourceDir = Join-Path $PSScriptRoot 'native\publish'
 $sourceExe = Join-Path $sourceDir 'RemoteDevTerminal.exe'
 if (-not (Test-Path -LiteralPath $sourceExe)) {
@@ -19,9 +29,6 @@ if (-not (Test-Path -LiteralPath (Join-Path $sourceDir 'OpenSSH\ssh.exe'))) {
 
 $installDir = Join-Path $env:LOCALAPPDATA 'Programs\RemoteDevTerminal'
 New-Item -ItemType Directory -Force -Path $installDir | Out-Null
-if (Get-Process -Name 'RemoteDevTerminal' -ErrorAction SilentlyContinue) {
-    throw 'Remote Dev Terminal 正在运行。请先关闭程序，再重新运行安装程序。'
-}
 Copy-Item -Path (Join-Path $sourceDir '*') -Destination $installDir -Recurse -Force
 Get-ChildItem -LiteralPath $installDir -File -Recurse -ErrorAction SilentlyContinue |
     Where-Object { $_.Extension -in @('.pdb', '.xml') } |
