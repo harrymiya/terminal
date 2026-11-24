@@ -35,6 +35,7 @@ let selectedImage = null;
 let imageUploadBusy = false;
 let clipboardReadPending = false;
 let config = { hosts: [], agents: [], tiled: true, ui_scale: 100 };
+let syncAuthPending = false;
 let activeHost = '';
 let activeSession = '';
 let viewMode = 'tabs';
@@ -140,6 +141,46 @@ function sendConfig(sshPasswordChange) {
 }
 function setBusy(value) { $('connection-status').classList.toggle('busy', value); }
 function showError(message) { window.alert(message); }
+function hasSyncSession(value = config) {
+  return Boolean(value.sync_url && value.sync_token);
+}
+
+function renderSyncAccount() {
+  const signedIn = hasSyncSession();
+  $('sync-account').textContent = signedIn ? config.sync_username || '已登录' : '未登录';
+  $('sync-account-mode').textContent = signedIn ? (config.offline_mode ? ' · 已登录，离线模式下同步已暂停' : ' · 已登录') : '';
+  $('sync-login').hidden = signedIn;
+  $('sync-logout').hidden = !signedIn;
+  $('sync-login').disabled = $('sync-logout').disabled = syncAuthPending;
+  $('sync-admin-users').hidden = !signedIn || !config.sync_is_admin;
+}
+
+function showSyncAuthStatus(message) {
+  const status = $('sync-auth-status');
+  status.hidden = !message;
+  status.textContent = message;
+}
+
+function requestSyncAuth(mode, credentials = {}) {
+  syncAuthPending = true;
+  renderSyncAccount();
+  showSyncAuthStatus(mode === 'login' ? '正在登录…' : '正在退出登录…');
+  post({ action: 'sync-auth', mode, ...credentials });
+}
+
+function normalizeSyncUrl(value) {
+  return String(value ?? '').trim().replace(/\/+$/, '');
+}
+
+function setSyncUrl(value) {
+  const url = normalizeSyncUrl(value);
+  if (url === normalizeSyncUrl(config.sync_url)) return;
+  config.sync_url = url;
+  config.sync_token = '';
+  config.sync_username = '';
+  config.sync_is_admin = false;
+}
+
 function autoEnterSignature(term) {
   const buffer=term.buffer.active;
   const start=Math.max(0,buffer.viewportY ?? buffer.baseY ?? 0);
@@ -222,15 +263,14 @@ function normalizeConfig(raw) {
   viewMode = config.tiled ? 'grid' : 'tabs';
   tileLayout=Object.hasOwn(tileLayouts,config.tile_layout)?config.tile_layout:'grid';
   document.body.classList.toggle('sidebar-hidden',Boolean(config.sidebar_hidden));
-  $('sync-account').textContent=config.sync_username||'未登录';
-  $('sync-admin-users').hidden=!config.sync_is_admin;
+  renderSyncAccount();
   const hostsChanged = !previous || JSON.stringify(previous.hosts) !== JSON.stringify(config.hosts) || previousActiveHost !== activeHost;
   const agentsChanged = !previous || JSON.stringify(previous.agents) !== JSON.stringify(config.agents);
   const themeChanged = !previous || previous.theme !== config.theme;
   const scaleChanged = !previous || Number(previous.ui_scale) !== Number(config.ui_scale) || Number(previous.sidebar_width) !== Number(config.sidebar_width);
   const sidebarHiddenChanged = !previous || Boolean(previous.sidebar_hidden) !== Boolean(config.sidebar_hidden);
   const viewChanged = !previous || previousViewMode !== viewMode || previousTileLayout !== tileLayout;
-  const syncChanged = !previous || previous.offline_mode !== config.offline_mode || previous.auto_sync_enabled !== config.auto_sync_enabled || previous.sync_username !== config.sync_username || previous.sync_url !== config.sync_url;
+  const syncChanged = !previous || previous.offline_mode !== config.offline_mode || previous.auto_sync_enabled !== config.auto_sync_enabled || previous.sync_username !== config.sync_username || previous.sync_url !== config.sync_url || hasSyncSession(previous) !== hasSyncSession();
   if (!hadConfig || themeChanged) applyTheme();
   if (!hadConfig || scaleChanged) applyUiScale();
   if (hadConfig && sidebarHiddenChanged && !scaleChanged) fitSessions();
@@ -260,6 +300,8 @@ function openSettings() {
   $('sync-url').value=config.sync_url||'';
   $('auto-sync').checked=Boolean(config.auto_sync_enabled);
   $('offline-mode').checked=Boolean(config.offline_mode);
+  if (!syncAuthPending) showSyncAuthStatus('');
+  renderSyncAccount();
   $('settings-dialog').showModal();
 }
 function hostMetric(label, value, description, warning) {
@@ -421,7 +463,14 @@ function renderAgents() {
   if(!list.length){const hint=document.createElement('div');hint.className='muted small empty-note';hint.textContent='请先选择主机，再点击顶部“编辑”添加开发者';agentList.append(hint);}
   $('add-agent').disabled=false;
 }
-function renderSyncStatus(){const root=$('sync-status');if(config.offline_mode)root.textContent='离线模式';else if(config.auto_sync_enabled&&config.sync_username)root.textContent=`跨设备同步 · ${config.sync_username}`;else if(config.sync_username)root.textContent=`已登录 · ${config.sync_username}`;else if(config.sync_url)root.textContent='同步账号未登录';else root.textContent='跨设备同步未配置';}
+function renderSyncStatus() {
+  const status = $('sync-status');
+  if (config.offline_mode) status.textContent = '离线模式';
+  else if (hasSyncSession()) {
+    const label = config.auto_sync_enabled ? '跨设备同步' : '已登录';
+    status.textContent = config.sync_username ? `${label} · ${config.sync_username}` : label;
+  } else status.textContent = config.sync_url ? '同步账号未登录' : '跨设备同步未配置';
+}
 function renderWorkspaces() {
   const host=currentHost(), workspaces=host?.directories || [];
   workspaceList.replaceChildren();
@@ -1275,7 +1324,17 @@ function handleNativeMessage(event) {
   if(msg.type==='config'){normalizeConfig(msg.config);return;}
   if(msg.type==='operation-logs'){config.operation_logs=Array.isArray(msg.logs)?msg.logs:[];if($('operation-logs-dialog')?.open)renderOperationLogs();return;}
   if(msg.type==='sync-sessions'){reconcileSyncedSessions(msg.hosts||{},msg.remapped_hosts||{});return;}
-  if(msg.type==='sync-auth-result'){if(msg.auth||(!msg.success&&msg.manual))showError(msg.message);else if(msg.success&&msg.manual)$('connection-status').title=msg.message;else if(!msg.success)$('connection-status').title=`同步失败：${msg.message}`;return;}
+  if (msg.type === 'sync-auth-result') {
+    if (msg.auth) {
+      syncAuthPending = false;
+      renderSyncAccount();
+      showSyncAuthStatus(msg.message);
+      if (!msg.success && !$('settings-dialog').open) showError(msg.message);
+    } else if (msg.manual && !msg.success) showError(msg.message);
+    else if (msg.success && msg.manual) $('connection-status').title = msg.message;
+    else if (!msg.success) $('connection-status').title = `同步失败：${msg.message}`;
+    return;
+  }
   if(msg.type==='admin-users'){renderAdminUsers(msg.users||[]);return;}
   if(msg.type==='browse-result'){renderBrowse(msg);return;}
   if(msg.type==='host-metrics'){metricsByHost.set(msg.host_id,{memory:Number(msg.memory),cpu:Number(msg.cpu)});renderHosts();return;}
@@ -1428,7 +1487,7 @@ async function executeMcpTool(name,a){
   if(name==='set_tile_layout'){if(!Object.hasOwn(tileLayouts,a.layout))throw new Error('layout 必须为 grid、columns 或 rows');tileLayout=a.layout;sendConfig();renderSessions();return {tile_layout:tileLayout};}
   if(name==='toggle_sidebar'){if(a.visible!==undefined){config.sidebar_hidden=!a.visible;document.body.classList.toggle('sidebar-hidden',!a.visible);fitSessions();sendConfig();}if(a.width!==undefined){config.sidebar_width=Math.max(sidebarMinimumWidth(),Math.min(2000,Number(a.width)));document.querySelector('.sidebar').style.width=`${config.sidebar_width}px`;fitSessions();sendConfig();}if(a.edit_mode!==undefined){editing=Boolean(a.edit_mode);updateEditing();}return {sidebar_visible:!document.body.classList.contains('sidebar-hidden'),sidebar_width:document.querySelector('.sidebar').getBoundingClientRect().width,edit_mode:editing};}
   if(name==='set_ui_scale'){const scale=Number(a.scale);if(!Number.isInteger(scale)||scale<uiScale.min||scale>uiScale.max)throw new Error('scale 必须在 50 到 200 之间');applyUiScale(scale);sendConfig();return {ui_scale:scale};}
-  if(name==='update_settings'){for(const key of ['auto_enter','auto_sync_enabled'])if(a[key]!==undefined)config[key]=Boolean(a[key]);for(const key of ['auto_enter_delay','sync_interval_seconds'])if(a[key]!==undefined)config[key]=Number(a[key]);if(a.sync_url!==undefined&&config.sync_url!==a.sync_url){config.sync_url=String(a.sync_url).trim().replace(/\/$/,'');config.sync_token='';}sendConfig();return {auto_enter:Boolean(config.auto_enter),auto_enter_delay:Number(config.auto_enter_delay)||1000,auto_sync_enabled:Boolean(config.auto_sync_enabled),sync_interval_seconds:Number(config.sync_interval_seconds)||5,sync_url:config.sync_url||''};}
+  if(name==='update_settings'){for(const key of ['auto_enter','auto_sync_enabled'])if(a[key]!==undefined)config[key]=Boolean(a[key]);for(const key of ['auto_enter_delay','sync_interval_seconds'])if(a[key]!==undefined)config[key]=Number(a[key]);if(a.sync_url!==undefined)setSyncUrl(a.sync_url);renderSyncAccount();renderSyncStatus();sendConfig();return {auto_enter:Boolean(config.auto_enter),auto_enter_delay:Number(config.auto_enter_delay)||1000,auto_sync_enabled:Boolean(config.auto_sync_enabled),sync_interval_seconds:Number(config.sync_interval_seconds)||5,sync_url:config.sync_url||''};}
   if(name==='trigger_sync'){post({action:'sync-now'});return {triggered:true};}
   if(name==='get_ssh_public_key'){return await new Promise((resolve,reject)=>{const request_id=makeId();pendingMcp.set(request_id,{resolve,reject});post({action:'get-ssh-public-key',request_id,generate_if_missing:Boolean(a.generate_if_missing)});});}
   throw new Error(`未知 MCP 工具：${name}`);
@@ -1468,9 +1527,22 @@ $('settings').addEventListener('click',openSettings);
 $('operation-logs')?.addEventListener('click',openOperationLogsDialog);
 $('operation-logs-refresh')?.addEventListener('click',()=>post({action:'sync-operation-logs'}));
 $('theme-select').addEventListener('change',()=>{config.theme=$('theme-select').value;applyTheme();sendConfig();});
-$('settings-save').addEventListener('click',(event)=>{event.preventDefault();const oldUrl=config.sync_url||'';config.auto_enter=$('auto-enter').checked;config.auto_enter_delay=Math.max(50,Math.min(30000,Number($('auto-enter-delay').value)||1000));config.agent_quota_interval_seconds=Math.max(15,Math.min(300,Number($('quota-interval').value)||60));config.host_metrics_interval_seconds=Math.max(5,Math.min(300,Number($('metrics-interval').value)||5));config.sync_interval_seconds=Math.max(5,Math.min(300,Number($('sync-interval').value)||5));config.sync_url=$('sync-url').value.trim().replace(/\/$/,'');config.auto_sync_enabled=$('auto-sync').checked;config.offline_mode=$('offline-mode').checked;if(oldUrl!==config.sync_url)config.sync_token='';sendConfig();$('settings-dialog').close('save');});
-$('sync-login').addEventListener('click',()=>{const username=prompt('同步账号',config.sync_username||'');if(!username)return;const password=prompt('同步密码');if(password===null)return;post({action:'sync-auth',mode:'login',username:username.trim(),password});});
-$('sync-logout').addEventListener('click',()=>post({action:'sync-auth',mode:'logout'}));
+$('settings-save').addEventListener('click',(event)=>{event.preventDefault();config.auto_enter=$('auto-enter').checked;config.auto_enter_delay=Math.max(50,Math.min(30000,Number($('auto-enter-delay').value)||1000));config.agent_quota_interval_seconds=Math.max(15,Math.min(300,Number($('quota-interval').value)||60));config.host_metrics_interval_seconds=Math.max(5,Math.min(300,Number($('metrics-interval').value)||5));config.sync_interval_seconds=Math.max(5,Math.min(300,Number($('sync-interval').value)||5));config.auto_sync_enabled=$('auto-sync').checked;config.offline_mode=$('offline-mode').checked;setSyncUrl($('sync-url').value);renderSyncAccount();renderSyncStatus();sendConfig();$('settings-dialog').close('save');});
+$('sync-login').addEventListener('click', () => {
+  if (syncAuthPending || hasSyncSession()) return;
+  const url = normalizeSyncUrl(config.sync_url);
+  if (!url || normalizeSyncUrl($('sync-url').value) !== url) {
+    showSyncAuthStatus('请先填写同步服务地址并保存设置。');
+    return;
+  }
+  const username = prompt('同步账号', config.sync_username || '')?.trim();
+  if (!username) return;
+  const password = prompt('同步密码');
+  if (password !== null) requestSyncAuth('login', { username, password });
+});
+$('sync-logout').addEventListener('click', () => {
+  if (!syncAuthPending && hasSyncSession()) requestSyncAuth('logout');
+});
 $('sync-now').addEventListener('click',()=>post({action:'sync-now'}));
 $('mcp-guide').addEventListener('click',()=>post({action:'mcp-info'}));
 $('sync-admin-users').addEventListener('click',()=>post({action:'admin-users'}));

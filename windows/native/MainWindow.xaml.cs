@@ -175,6 +175,10 @@ public partial class MainWindow : Window
             node["operation_logs"] = operationLogs.DeepClone();
         if (node["shared_sessions"] is null && previousConfig["shared_sessions"] is JsonObject sharedSessions)
             node["shared_sessions"] = sharedSessions.DeepClone();
+        var syncServiceChanged = SyncServiceUrl(node) != SyncServiceUrl(previousConfig);
+        node["sync_token"] = syncServiceChanged ? "" : Text(previousConfig, "sync_token");
+        node["sync_username"] = syncServiceChanged ? "" : Text(previousConfig, "sync_username");
+        node["sync_is_admin"] = !syncServiceChanged && Bool(previousConfig, "sync_is_admin");
         ConfigStore.Save(node);
         var previousTheme = Text(previousConfig, "theme");
         var newTheme = Text(node, "theme");
@@ -192,7 +196,7 @@ public partial class MainWindow : Window
             }
         }
         Send(new { type = "saved" });
-        if (message.TryGetProperty("ssh_password_change", out _)) SendConfig();
+        if (syncServiceChanged || message.TryGetProperty("ssh_password_change", out _)) SendConfig();
         ConfigureSyncTimer();
         ConfigureRefreshTimers();
     }
@@ -318,40 +322,62 @@ public partial class MainWindow : Window
         try
         {
             var config = ConfigStore.Load();
-            var url = config["sync_url"]?.GetValue<string>()?.TrimEnd('/') ?? "";
+            var url = SyncServiceUrl(config);
             if (url.Length == 0) throw new InvalidOperationException("请先填写同步服务地址并保存设置。");
+            string resultMessage;
             if (mode == "login")
             {
                 var username = Text(message, "username").Trim();
                 var password = Text(message, "password");
                 var response = await SyncRequestAsync(url + "/v1/auth/login", "POST", null,
-                    new { username, password }).ConfigureAwait(false);
+                    new { username, password });
                 using var document = JsonDocument.Parse(response);
                 var root = document.RootElement;
                 var token = Text(root, "access_token");
                 if (token.Length == 0) throw new InvalidDataException("同步服务没有返回登录令牌。");
+                config = ReloadSyncConfig(url);
+                var account = Text(root, "username");
+                CredentialStore.Write("RemoteDevTerminal:sync:" + account.ToLowerInvariant(), account, password);
                 config["sync_token"] = token;
-                config["sync_username"] = Text(root, "username");
+                config["sync_username"] = account;
                 config["sync_is_admin"] = root.TryGetProperty("is_admin", out var admin) && admin.ValueKind == JsonValueKind.True;
                 var serverTheme = Text(root, "theme");
                 if (serverTheme.Length > 0) config["theme"] = serverTheme;
-                ConfigStore.Save(config);
-                CredentialStore.Write("RemoteDevTerminal:sync:" + Text(root, "username").ToLowerInvariant(), Text(root, "username"), password);
-                Dispatcher.BeginInvoke(() => { ConfigureSyncTimer(); Send(new { type = "sync-auth-result", success = true, auth = true, message = "同步账号登录成功。" }); SendConfig(); });
+                resultMessage = "同步账号登录成功。";
             }
             else
             {
-                var token = config["sync_token"]?.GetValue<string>() ?? "";
-                if (token.Length > 0) await SyncRequestAsync(url + "/v1/auth/logout", "POST", token, new { }).ConfigureAwait(false);
-                var username = config["sync_username"]?.GetValue<string>() ?? "";
+                var token = Text(config, "sync_token");
+                if (token.Length > 0)
+                {
+                    try { await SyncRequestAsync(url + "/v1/auth/logout", "POST", token, new { }); }
+                    catch (SyncHttpException ex) when (ex.StatusCode == 401) { }
+                }
+                config = ReloadSyncConfig(url);
+                var username = Text(config, "sync_username");
                 if (username.Length > 0) CredentialStore.Delete("RemoteDevTerminal:sync:" + username.ToLowerInvariant());
                 config["sync_token"] = ""; config["sync_username"] = ""; config["sync_is_admin"] = false;
                 config["shared_sessions"] = new JsonObject();
-                ConfigStore.Save(config);
-                Dispatcher.BeginInvoke(() => { ConfigureSyncTimer(); Send(new { type = "sync-auth-result", success = true, auth = true, message = "已退出同步账号。" }); SendConfig(); });
+                resultMessage = "已退出同步账号。";
             }
+            ConfigStore.Save(config);
+            ConfigureSyncTimer();
+            SendConfig();
+            Send(new { type = "sync-auth-result", success = true, auth = true, message = resultMessage });
         }
-        catch (Exception ex) { Dispatcher.BeginInvoke(() => Send(new { type = "sync-auth-result", success = false, auth = true, message = ex.Message })); }
+        catch (Exception ex)
+        {
+            Send(new { type = "sync-auth-result", success = false, auth = true, message = ex.Message });
+        }
+    }
+
+    private static string SyncServiceUrl(JsonObject config) => Text(config, "sync_url").Trim().TrimEnd('/');
+
+    private static JsonObject ReloadSyncConfig(string url)
+    {
+        var config = ConfigStore.Load();
+        if (SyncServiceUrl(config) != url) throw new InvalidOperationException("同步服务地址已更改，请重试。");
+        return config;
     }
 
     private async Task SyncNowAsync(bool manual)
@@ -359,13 +385,15 @@ public partial class MainWindow : Window
         if (_disposed || (!manual && _syncInFlight)) return;
         await _syncLock.WaitAsync().ConfigureAwait(false);
         _syncInFlight = true;
+        var syncUrl = "";
+        var syncToken = "";
         try
         {
             if (_disposed) return;
             var config = ConfigStore.Load();
             if (Bool(config, "offline_mode")) throw new InvalidOperationException("当前处于离线模式，已跳过跨设备同步。");
-            var url = Text(config, "sync_url").TrimEnd('/');
-            var token = Text(config, "sync_token");
+            var url = syncUrl = SyncServiceUrl(config);
+            var token = syncToken = Text(config, "sync_token");
             if (url.Length == 0 || token.Length == 0) throw new InvalidOperationException("请先填写同步服务地址并登录账号。");
             var syncResult = await SynchronizeAccountAsync(config, url, token).ConfigureAwait(false);
             try
@@ -402,7 +430,15 @@ public partial class MainWindow : Window
                     if (_disposed) return;
                     if (ex is SyncHttpException http && http.StatusCode == 401)
                     {
-                        var expired = ConfigStore.Load(); expired["sync_token"] = ""; ConfigStore.Save(expired); ConfigureSyncTimer();
+                        var expired = ConfigStore.Load();
+                        if (SyncServiceUrl(expired) == syncUrl && Text(expired, "sync_token") == syncToken)
+                        {
+                            expired["sync_token"] = "";
+                            expired["sync_is_admin"] = false;
+                            ConfigStore.Save(expired);
+                            ConfigureSyncTimer();
+                            SendConfig();
+                        }
                     }
                     Send(new { type = "sync-auth-result", success = false, manual, message = ex.Message });
                 });

@@ -80,7 +80,8 @@
     <label>主机资源刷新周期（5–300 秒）<input id="metrics-interval" class="input" type="number" min="5" max="300" step="1"></label>
     <label>跨设备同步周期（5–300 秒）<input id="sync-interval" class="input" type="number" min="5" max="300" step="5"></label>
     <label>同步服务地址<input id="sync-url" class="input" type="url" placeholder="https://example.com"></label>
-    <div class="settings-row"><span>同步账号：<strong id="sync-account">未登录</strong></span><span><button id="sync-login" class="button" type="button">登录</button><button id="sync-logout" class="button" type="button">退出</button></span></div>
+    <div class="settings-row"><span>同步账号：<strong id="sync-account">未登录</strong><span id="sync-account-mode" class="muted small"></span></span><span><button id="sync-login" class="button" type="button">登录</button><button id="sync-logout" class="button" type="button" hidden>退出登录</button></span></div>
+    <div id="sync-auth-status" class="muted small" role="status" hidden></div>
     <label class="check-row"><input id="auto-sync" type="checkbox">启用跨设备自动同步</label>
     <label class="check-row"><input id="offline-mode" type="checkbox">离线模式（本机独立使用）</label>
     <div class="settings-row"><button id="mcp-guide" class="button" type="button">MCP 接入说明</button></div>
