@@ -601,24 +601,74 @@ public partial class MainWindow : Window
                 if (!firstWord.Success) return;
                 var executable = firstWord.Value.Trim('"', '\'');
                 var name = executable.Replace('\\', '/').Split('/').Last().ToLowerInvariant();
-                if (name is not ("codex" or "codex2" or "codx" or "agy" or "agy2")) return;
+                if (name is not ("codex" or "codex2" or "codx" or "agy" or "agy2" or "opencode")) return;
                 string? error = null;
                 JsonArray? quota = null;
+                JsonObject? modelUsage = null;
                 await throttle.WaitAsync().ConfigureAwait(false);
                 try
                 {
-                    quota = name is "codex" or "codex2" or "codx"
-                        ? await ReadCodexQuotaAsync(host, executable).ConfigureAwait(false)
-                        : await ReadAgyQuotaAsync(host, executable).ConfigureAwait(false);
-                    if (quota is null) error = "未获取到额度，请检查 SSH 连接和远端 Agent 登录状态。";
+                    if (name == "opencode")
+                    {
+                        modelUsage = await ReadOpenCodeUsageAsync(host, executable).ConfigureAwait(false);
+                        if (modelUsage is null) error = "未获取到 OpenCode 用量。请检查 SSH 连接，并确认远端 OpenCode 支持 stats --json。";
+                    }
+                    else
+                    {
+                        quota = name is "codex" or "codex2" or "codx"
+                            ? await ReadCodexQuotaAsync(host, executable).ConfigureAwait(false)
+                            : await ReadAgyQuotaAsync(host, executable).ConfigureAwait(false);
+                        if (quota is null) error = "未获取到额度，请检查 SSH 连接和远端 Agent 登录状态。";
+                    }
                 }
                 catch (Exception ex) { error = ex.Message; }
                 finally { throttle.Release(); }
-                Dispatcher.BeginInvoke(() => Send(new { type = "agent-quota", host_id = hostId, command, windows = quota ?? new JsonArray(), error }));
+                Dispatcher.BeginInvoke(() => Send(new { type = "agent-quota", host_id = hostId, command, windows = quota ?? new JsonArray(), model_usage = modelUsage, error }));
             }).ToArray();
             await Task.WhenAll(jobs).ConfigureAwait(false);
         }
         finally { _quotaInFlight = false; }
+    }
+
+    private async Task<JsonObject?> ReadOpenCodeUsageAsync(JsonObject host, string executable)
+    {
+        const int days = 7;
+        var remote = BuildQuotaCommand(executable, $"stats --days {days} --models --json");
+        var result = await RunSshCommandAsync(host, remote, null, 25_000).ConfigureAwait(false);
+        if (result.ExitCode != 0) return null;
+        using var document = ParseFirstJsonObject(result.Output);
+        if (document is null) return null;
+        var root = document.RootElement;
+        var usage = ReadOpenCodeTokens(root);
+        if (usage is null) return null;
+        var models = new JsonArray();
+        if (root.TryGetProperty("models", out var entries) && entries.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var entry in entries.EnumerateArray())
+            {
+                var tokens = ReadOpenCodeTokens(entry);
+                if (tokens is null || !entry.TryGetProperty("model", out var model) || model.ValueKind != JsonValueKind.Object) continue;
+                var id = Text(model, "id");
+                if (id.Length == 0) continue;
+                tokens["id"] = id;
+                tokens["provider"] = Text(model, "providerID");
+                tokens["variant"] = Text(model, "variant");
+                models.Add(tokens);
+            }
+        }
+        usage["days"] = days;
+        usage["models"] = models;
+        return usage;
+    }
+
+    private static JsonObject? ReadOpenCodeTokens(JsonElement entry)
+    {
+        if (entry.ValueKind != JsonValueKind.Object ||
+            !entry.TryGetProperty("tokens", out var tokens) || tokens.ValueKind != JsonValueKind.Object ||
+            !tokens.TryGetProperty("input", out var input) || input.ValueKind != JsonValueKind.Number || !input.TryGetInt64(out var inputCount) || inputCount < 0 ||
+            !tokens.TryGetProperty("output", out var output) || output.ValueKind != JsonValueKind.Number || !output.TryGetInt64(out var outputCount) || outputCount < 0)
+            return null;
+        return new JsonObject { ["input"] = inputCount, ["output"] = outputCount };
     }
 
     private async Task<JsonArray?> ReadAgyQuotaAsync(JsonObject host, string executable)

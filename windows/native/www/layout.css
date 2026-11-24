@@ -441,6 +441,12 @@
   white-space: nowrap;
 }
 
+.model-usage {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .quota-battery-icon {
   position: relative;
   width: 30px;

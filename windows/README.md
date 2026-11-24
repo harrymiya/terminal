@@ -21,6 +21,8 @@ Windows 11 原生桌面版，安装和运行都不需要 WSL、Ubuntu 或 Python
 3. 选择开发者，点击工作区连接。
 4. 顶部可切换标签和平铺视图；最多同时打开 8 个终端。
 
+OpenCode 开发者和终端标题栏显示远端 SSH 用户最近 7 天的输入和输出 token 用量。将鼠标移到用量数字上可以查看各模型明细。此功能要求远端 OpenCode 支持 `stats --json`，数据来自 OpenCode 的本地历史。
+
 配置保存在 %USERPROFILE%\.config\remote-dev-terminal\config.json，SSH 密钥和主机指纹由 Windows OpenSSH 保存在 %USERPROFILE%\.ssh。原有配置中未识别的字段会在保存时保留。
 
 ## 从源码构建

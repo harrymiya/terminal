@@ -78,7 +78,11 @@ function sshEndpointSignature(host) {
   return [String(host.id||''),String(host.username||''),lan,String(lanPort),external,String(externalPort)].join('\u001f');
 }
 function quotaKey(hostId,command) { return `${hostId||''}\0${command||''}`; }
-function supportsQuota(command) { const executable=String(command||'').trim().replace(/^["']|["']$/g,'').split(/\s+/,1)[0].split(/[\\/]/).pop().toLowerCase(); return ['codex','codex2','codx','agy','agy2'].includes(executable); }
+function agentExecutable(command) {
+  const word = String(command || '').trimStart().match(/^"([^"]+)"|^'([^']+)'|^([^\s"']+)/);
+  return (word?.[1] || word?.[2] || word?.[3] || '').split(/[\\/]/).pop().toLowerCase();
+}
+function supportsQuota(command) { return ['codex','codex2','codx','agy','agy2'].includes(agentExecutable(command)); }
 function makeId() { return crypto.randomUUID().replaceAll('-', ''); }
 function currentTheme() { return THEMES[config.theme] || THEMES.cyberpunk; }
 function applyTheme() {
@@ -408,6 +412,28 @@ function renderQuotaBatteries(root, quota, {showPercent = false, showReset = fal
   }
 }
 
+const tokenTotalFormat = new Intl.NumberFormat('zh-CN', { notation: 'compact', maximumFractionDigits: 1 });
+const tokenDetailFormat = new Intl.NumberFormat('zh-CN');
+
+function renderOpenCodeUsage(root, quota) {
+  root.classList.add('model-usage');
+  const usage = quota?.modelUsage;
+  if (!usage) {
+    root.textContent = '用量 —';
+    root.title = quota?.error || '正在获取 OpenCode 用量…';
+    return;
+  }
+  const formatDetails = ({ input, output }) => `输入 ${tokenDetailFormat.format(input)}，输出 ${tokenDetailFormat.format(output)} tokens`;
+  root.textContent = `${usage.days} 天 ${tokenTotalFormat.format(usage.input + usage.output)} tokens`;
+  const details = [...usage.models]
+    .sort((left, right) => (right.input + right.output) - (left.input + left.output))
+    .map(model => {
+      const name = model.provider ? `${model.provider}/${model.id}` : model.id;
+      return `${name}${model.variant ? ` (${model.variant})` : ''} · ${formatDetails(model)}`;
+    });
+  root.title = [`OpenCode 近 ${usage.days} 天用量 · ${formatDetails(usage)}`, ...details].join('\n');
+}
+
 function agentIcon(value) {
   if (!value || value === '✳') return null;
   const key = value.startsWith('brand:') ? value.slice(6) : '';
@@ -446,7 +472,11 @@ function renderAgents() {
     label.append(name);
     const quota=quotaByAgent.get(quotaKey(host?.id,agent.command));
     const detail=document.createElement('span');
-    if (host && supportsQuota(agent.command)) {
+    if (host && agentExecutable(agent.command) === 'opencode') {
+      button.classList.add('with-indicators');
+      detail.className = 'quota-batteries';
+      renderOpenCodeUsage(detail, quota);
+    } else if (host && supportsQuota(agent.command)) {
       button.classList.add('with-indicators');
       detail.className='quota-batteries';
       renderQuotaBatteries(detail,quota,{showReset:true});
@@ -456,7 +486,7 @@ function renderAgents() {
       detail.className='flat-list-detail';
       detail.textContent=agent.command;
     }
-    button.append(label,detail);button.title=`${agent.command}${quota?.error?`\n${quota.error}`:''}\n点击选择开发者`;button.addEventListener('click',()=>{if(!host)return;host.selected_agent=index;sendConfig();render();});row.append(button);
+    button.append(label,detail);button.title=`${agent.command}${detail.title?`\n${detail.title}`:''}\n点击选择开发者`;button.addEventListener('click',()=>{if(!host)return;host.selected_agent=index;sendConfig();render();});row.append(button);
     if(editing){const actions=document.createElement('span');actions.className='flat-list-actions';const up=document.createElement('button');up.type='button';up.textContent='↑';up.title='上移开发者';up.disabled=index===0;up.addEventListener('click',()=>moveAgentAt(index,-1));const down=document.createElement('button');down.type='button';down.textContent='↓';down.title='下移开发者';down.disabled=index===list.length-1;down.addEventListener('click',()=>moveAgentAt(index,1));const edit=document.createElement('button');edit.type='button';edit.textContent='✎';edit.title='编辑开发者';edit.addEventListener('click',()=>editAgent(index));const remove=document.createElement('button');remove.type='button';remove.textContent='×';remove.title='删除开发者';remove.addEventListener('click',()=>{const target=host&&host.agents?.length?host.agents:config.agents;if(!confirm(`删除开发者“${agent.name}”？`))return;target.splice(index,1);if(host)host.selected_agent=Math.max(0,index-1);sendConfig();render();});actions.append(up,down,edit,remove);row.append(actions);}
     agentList.append(row);
   });
@@ -607,12 +637,14 @@ function updateRunningHeaders() {
 }
 
 function renderSessionQuota(session) {
-  if (!supportsQuota(session.agent.command)) return;
+  const openCode = agentExecutable(session.agent.command) === 'opencode';
+  if (!openCode && !supportsQuota(session.agent.command)) return;
   const root = session.card?.querySelector('.terminal-quota');
   if (!root) return;
   root.hidden = false;
   const quota = quotaByAgent.get(quotaKey(session.host.id, session.agent.command));
-  renderQuotaBatteries(root, quota, {showPercent: viewMode === 'tabs' || session.floating});
+  if (openCode) renderOpenCodeUsage(root, quota);
+  else renderQuotaBatteries(root, quota, {showPercent: viewMode === 'tabs' || session.floating});
 }
 
 function bringFloatingToFront(session, card = session?.card) {
@@ -1341,7 +1373,7 @@ function handleNativeMessage(event) {
   if(msg.type==='host-endpoint'){const host=config.hosts.find(item=>item.id===msg.host_id);if(host&&sshEndpointSignature(host)===msg.signature){sshEndpoints.set(msg.host_id,{signature:msg.signature,address:msg.address,port:Number(msg.port)||22});renderHosts();}return;}
   if(msg.type==='agent-quota'){
     const hostId=msg.host_id||activeHost;
-    quotaByAgent.set(quotaKey(hostId,msg.command),{windows:msg.windows||[],error:msg.error||''});
+    quotaByAgent.set(quotaKey(hostId,msg.command),{windows:msg.windows||[],modelUsage:msg.model_usage,error:msg.error||''});
     if(hostId===activeHost)renderAgents();
     for(const session of sessions.values()){
       if(session.host.id===hostId && session.agent.command===msg.command)renderSessionQuota(session);
