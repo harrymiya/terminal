@@ -401,11 +401,59 @@ class SshTerminalController(
         while (retrySignal.tryAcquire()) Unit
     }
 
+    private fun wrapAgentCommand(sessionId: String, agent: String): String {
+        val text = agent.trim()
+        if (text.isEmpty()) return agent
+        val tokens = text.split(Regex("\\s+")).filter { it.isNotEmpty() }
+        if (tokens.isEmpty()) return agent
+        val cmdBin = tokens[0].substringAfterLast('/')
+        val rest = tokens.drop(1)
+        val codexSubs = setOf("resume", "exec", "e", "login", "logout", "mcp", "plugin", "app-server", "remote-control", "completion", "update", "doctor", "sandbox", "debug", "apply", "a", "archive", "delete", "unarchive", "fork", "cloud", "agents")
+        val agySubs = setOf("acp", "agent", "agents", "changelog", "help", "install", "mcp", "mic-serve", "models", "plugin", "plugins")
+
+        val resumeCmd: String
+        val searchRoots: String
+        val filePattern: String
+        val stripSuffix: String
+        if (cmdBin == "codex" && (rest.isEmpty() || rest[0] !in codexSubs)) {
+            val restArgs = rest.joinToString(" ") { shellQuote(it) }
+            resumeCmd = "${shellQuote(tokens[0])} resume \"${'$'}_rdt_id\"" + if (restArgs.isNotEmpty()) " $restArgs" else ""
+            searchRoots = "\"${'$'}{CODEX_HOME:-${'$'}HOME/.codex}/sessions\""
+            filePattern = "'rollout-*.jsonl'"
+            stripSuffix = ".jsonl"
+        } else if ((cmdBin == "agy" || cmdBin == "antigravity") && (rest.isEmpty() || (rest[0] !in agySubs && rest.none { it == "-c" || it == "--continue" || it == "--conversation" || it.startsWith("--conversation=") }))) {
+            val restArgs = rest.joinToString(" ") { shellQuote(it) }
+            resumeCmd = "${shellQuote(tokens[0])} --conversation \"${'$'}_rdt_id\"" + if (restArgs.isNotEmpty()) " $restArgs" else ""
+            searchRoots = "\"${'$'}{AGY_HOME:-${'$'}HOME/.gemini/antigravity-cli}/conversations\" \"${'$'}HOME/.agy-homes\""
+            filePattern = "'*.db'"
+            stripSuffix = ".db"
+        } else {
+            return agent
+        }
+
+        val sid = sessionId.replace("-", "").lowercase()
+        return "_rdt_dir=\"${'$'}HOME/.remote-dev-terminal/agent-sessions\"; " +
+            "_rdt_f=\"${'$'}_rdt_dir/$sid\"; " +
+            "mkdir -p \"${'$'}_rdt_dir\"; " +
+            "if [ -s \"${'$'}_rdt_f\" ]; then " +
+            "_rdt_id=${'$'}(cat \"${'$'}_rdt_f\"); " +
+            "$resumeCmd; " +
+            "else " +
+            "_rdt_mark=\"${'$'}_rdt_dir/.mark_$sid\"; : > \"${'$'}_rdt_mark\"; " +
+            "(_i=0; while [ ${'$'}_i -lt 120 ]; do sleep 1; " +
+            "_rdt_n=${'$'}(find $searchRoots -maxdepth 4 -type f -name $filePattern -newer \"${'$'}_rdt_mark\" 2>/dev/null | head -n 1); " +
+            "if [ -n \"${'$'}_rdt_n\" ]; then " +
+            "_rdt_id=${'$'}(basename \"${'$'}_rdt_n\" $stripSuffix | grep -oE \"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\" | tail -n 1); " +
+            "if [ -n \"${'$'}_rdt_id\" ]; then printf \"%s\" \"${'$'}_rdt_id\" > \"${'$'}_rdt_f\"; break; fi; " +
+            "fi; _i=${'$'}((_i + 1)); done; rm -f \"${'$'}_rdt_mark\") >/dev/null 2>&1 & " +
+            "$text; fi"
+    }
+
     private fun buildAttachCommand(): String {
         val sessionName = "rdt_${task.id.replace("-", "").take(18)}"
         val dir = shellQuote(task.directory.path)
         val shell = "\"${'$'}{SHELL:-/bin/bash}\""
-        val agentInvocation = "$shell -l -i -c ${shellQuote(task.agent.command)}"
+        val agentInvocation = "$shell -l -i -c ${shellQuote(wrapAgentCommand(task.id, task.agent.command))}"
         val keepSessionCommand = "$agentInvocation; agent_exit_code=${'$'}?; printf '\\n[Agent exited with status %s. Shell remains open.]\\n' \"${'$'}agent_exit_code\"; exec $shell -l -i"
         val tmuxCommand = shellQuote(keepSessionCommand)
         if (restoreOnly) {

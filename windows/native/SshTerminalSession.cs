@@ -234,13 +234,66 @@ internal sealed class SshTerminalSession : IDisposable
                $"fi";
     }
 
+    private static string WrapAgentCommand(string sessionId, string agent)
+    {
+        var text = (agent ?? "").Trim();
+        if (text.Length == 0) return agent ?? "";
+        var tokens = text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        if (tokens.Length == 0) return agent ?? "";
+        var cmdBin = System.IO.Path.GetFileName(tokens[0]);
+        var rest = tokens.Skip(1).ToArray();
+        var codexSubs = new HashSet<string>(StringComparer.Ordinal) { "resume", "exec", "e", "login", "logout", "mcp", "plugin", "app-server", "remote-control", "completion", "update", "doctor", "sandbox", "debug", "apply", "a", "archive", "delete", "unarchive", "fork", "cloud", "agents" };
+        var agySubs = new HashSet<string>(StringComparer.Ordinal) { "acp", "agent", "agents", "changelog", "help", "install", "mcp", "mic-serve", "models", "plugin", "plugins" };
+
+        string resumeCmd, searchRoots, filePattern, stripSuffix;
+        if (cmdBin == "codex" && (rest.Length == 0 || !codexSubs.Contains(rest[0])))
+        {
+            var restArgs = string.Join(" ", rest.Select(ShellQuote));
+            resumeCmd = $"{ShellQuote(tokens[0])} resume \"$_rdt_id\"" + (restArgs.Length > 0 ? " " + restArgs : "");
+            searchRoots = "\"${CODEX_HOME:-$HOME/.codex}/sessions\"";
+            filePattern = "'rollout-*.jsonl'";
+            stripSuffix = ".jsonl";
+        }
+        else if ((cmdBin == "agy" || cmdBin == "antigravity") && (rest.Length == 0 || (!agySubs.Contains(rest[0]) && !rest.Any(t => t == "-c" || t == "--continue" || t == "--conversation" || t.StartsWith("--conversation=", StringComparison.Ordinal)))))
+        {
+            var restArgs = string.Join(" ", rest.Select(ShellQuote));
+            resumeCmd = $"{ShellQuote(tokens[0])} --conversation \"$_rdt_id\"" + (restArgs.Length > 0 ? " " + restArgs : "");
+            searchRoots = "\"${AGY_HOME:-$HOME/.gemini/antigravity-cli}/conversations\" \"$HOME/.agy-homes\"";
+            filePattern = "'*.db'";
+            stripSuffix = ".db";
+        }
+        else
+        {
+            return agent ?? "";
+        }
+
+        var sid = new string(sessionId.Where(Uri.IsHexDigit).ToArray()).ToLowerInvariant();
+        if (sid.Length == 0) sid = Guid.NewGuid().ToString("N");
+        return
+            $"_rdt_dir=\"$HOME/.remote-dev-terminal/agent-sessions\"; " +
+            $"_rdt_f=\"$_rdt_dir/{sid}\"; " +
+            $"mkdir -p \"$_rdt_dir\"; " +
+            $"if [ -s \"$_rdt_f\" ]; then " +
+            $"_rdt_id=$(cat \"$_rdt_f\"); " +
+            $"{resumeCmd}; " +
+            $"else " +
+            $"_rdt_mark=\"$_rdt_dir/.mark_{sid}\"; : > \"$_rdt_mark\"; " +
+            $"(_i=0; while [ $_i -lt 120 ]; do sleep 1; " +
+            $"_rdt_n=$(find {searchRoots} -maxdepth 4 -type f -name {filePattern} -newer \"$_rdt_mark\" 2>/dev/null | head -n 1); " +
+            $"if [ -n \"$_rdt_n\" ]; then " +
+            $"_rdt_id=$(basename \"$_rdt_n\" {stripSuffix} | grep -oE \"[0-9a-f]{{8}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{12}}\" | tail -n 1); " +
+            $"if [ -n \"$_rdt_id\" ]; then printf \"%s\" \"$_rdt_id\" > \"$_rdt_f\"; break; fi; " +
+            $"fi; _i=$((_i + 1)); done; rm -f \"$_rdt_mark\") >/dev/null 2>&1 & " +
+            $"{text}; fi";
+    }
+
     private static string BuildRemoteCommand(string id, string directory, string agent, bool restoreOnly = false)
     {
         var safeId = new string(id.Where(Uri.IsHexDigit).Take(18).ToArray()).ToLowerInvariant();
         if (safeId.Length < 8) safeId = Guid.NewGuid().ToString("N").Substring(0, 18);
         var session = "rdt_" + safeId;
         var qDirectory = ShellQuote(directory);
-        var qAgent = ShellQuote(agent);
+        var qAgent = ShellQuote(WrapAgentCommand(id, agent));
         if (restoreOnly)
         {
             return $"cd -- {qDirectory} && if command -v tmux >/dev/null 2>&1 && tmux has-session -t {session} 2>/dev/null; then " +

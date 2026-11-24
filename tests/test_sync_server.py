@@ -219,6 +219,23 @@ class SyncServerTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(relogin["theme"], "nord")
 
+    def test_wrap_agent_command_codex_and_agy(self):
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ubuntu"))
+        import core as ubuntu_core
+
+        wrapped_codex = ubuntu_core.wrap_agent_command("a" * 32, "codex --dangerously-bypass-approvals-and-sandbox")
+        self.assertIn("codex resume \"$_rdt_id\" --dangerously-bypass-approvals-and-sandbox", wrapped_codex)
+        self.assertIn("rollout-*.jsonl", wrapped_codex)
+
+        wrapped_agy = ubuntu_core.wrap_agent_command("b" * 32, "agy")
+        self.assertIn("agy --conversation \"$_rdt_id\"", wrapped_agy)
+        self.assertIn("*.db", wrapped_agy)
+
+        self.assertEqual(ubuntu_core.wrap_agent_command("c" * 32, "bash -l"), "bash -l")
+        self.assertEqual(ubuntu_core.wrap_agent_command("d" * 32, "codex resume 1234"), "codex resume 1234")
+
 
 if __name__ == "__main__":
     unittest.main()

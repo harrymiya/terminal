@@ -356,13 +356,66 @@ def clear_sync_password(username):
         pass
 
 
+def wrap_agent_command(session_id, agent):
+    text = (agent or "").strip()
+    if not text:
+        return agent
+    try:
+        tokens = shlex.split(text)
+    except ValueError:
+        return agent
+    if not tokens:
+        return agent
+    cmd_bin = os.path.basename(tokens[0])
+    rest = tokens[1:]
+    codex_subcommands = {
+        "resume", "exec", "e", "login", "logout", "mcp", "plugin", "app-server",
+        "remote-control", "completion", "update", "doctor", "sandbox", "debug",
+        "apply", "a", "archive", "delete", "unarchive", "fork", "cloud", "agents",
+    }
+    agy_subcommands = {
+        "acp", "agent", "agents", "changelog", "help", "install",
+        "mcp", "mic-serve", "models", "plugin", "plugins",
+    }
+    if cmd_bin == "codex" and (not rest or rest[0] not in codex_subcommands):
+        resume_cmd = " ".join([shlex.quote(tokens[0]), "resume", '"$_rdt_id"', *[shlex.quote(t) for t in rest]])
+        search_roots = '"${CODEX_HOME:-$HOME/.codex}/sessions"'
+        file_pattern = "'rollout-*.jsonl'"
+        strip_suffix = ".jsonl"
+    elif cmd_bin in ("agy", "antigravity") and (not rest or (rest[0] not in agy_subcommands and not any(t in ("-c", "--continue", "--conversation") or t.startswith("--conversation=") for t in rest))):
+        resume_cmd = " ".join([shlex.quote(tokens[0]), "--conversation", '"$_rdt_id"', *[shlex.quote(t) for t in rest]])
+        search_roots = '"${AGY_HOME:-$HOME/.gemini/antigravity-cli}/conversations" "$HOME/.agy-homes"'
+        file_pattern = "'*.db'"
+        strip_suffix = ".db"
+    else:
+        return agent
+    sid = str(session_id).replace("-", "").lower()
+    return (
+        f'_rdt_dir="$HOME/.remote-dev-terminal/agent-sessions"; '
+        f'_rdt_f="$_rdt_dir/{sid}"; '
+        f'mkdir -p "$_rdt_dir"; '
+        f'if [ -s "$_rdt_f" ]; then '
+        f'_rdt_id=$(cat "$_rdt_f"); '
+        f'{resume_cmd}; '
+        f'else '
+        f'_rdt_mark="$_rdt_dir/.mark_{sid}"; : > "$_rdt_mark"; '
+        f'(_i=0; while [ $_i -lt 120 ]; do sleep 1; '
+        f'_rdt_n=$(find {search_roots} -maxdepth 4 -type f -name {file_pattern} -newer "$_rdt_mark" 2>/dev/null | head -n 1); '
+        f'if [ -n "$_rdt_n" ]; then '
+        f'_rdt_id=$(basename "$_rdt_n" {strip_suffix} | grep -oE "[0-9a-f]{{8}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{12}}" | tail -n 1); '
+        f'if [ -n "$_rdt_id" ]; then printf "%s" "$_rdt_id" > "$_rdt_f"; break; fi; '
+        f'fi; _i=$((_i + 1)); done; rm -f "$_rdt_mark") >/dev/null 2>&1 & '
+        f'{text}; fi'
+    )
+
+
 def ssh_argv(host, directory, agent, session_id=None, control_path=None, restore_only=False):
     session_id = session_id or uuid.uuid4().hex
     if not session_id or any(c not in "0123456789abcdef" for c in session_id):
         raise ValueError("无效的会话 ID")
     name = "rdt_" + session_id[:18]
     directory = shlex.quote(directory)
-    command = shlex.quote(agent)
+    command = shlex.quote(wrap_agent_command(session_id, agent))
     # tmux receives one shell command; the user's configured command runs in a login shell.
     inner = f'"${{SHELL:-/bin/bash}}" -l -i -c {command}; code=$?; printf "\\n[命令已退出，状态 %s；Shell 仍然可用]\\n" "$code"; exec "${{SHELL:-/bin/bash}}" -l -i'
     remote = (f"cd -- {directory} && if command -v tmux >/dev/null 2>&1; then "
