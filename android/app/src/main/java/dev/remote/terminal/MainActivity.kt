@@ -1712,7 +1712,7 @@ private fun HomeScreen(
                 Icon(Icons.Default.SmartToy, contentDescription = "编辑开发者", tint = Muted)
             }
             IconButton(onClick = onOpenLogs) {
-                Icon(Icons.Default.History, contentDescription = "操作日志", tint = Muted)
+                Icon(Icons.Default.History, contentDescription = "历史记录", tint = Muted)
             }
             IconButton(onClick = onOpenSettings) {
                 Icon(Icons.Default.Settings, contentDescription = "设置", tint = Muted)
