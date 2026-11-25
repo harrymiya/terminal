@@ -511,8 +511,9 @@ function renderWorkspaces() {
     open.innerHTML=`<span class="workspace-icon" aria-hidden="true">📁</span><span class="workspace-name">${escapeHtml(workspace.name || workspace.path)}</span>`;
     open.title=workspace.path || ''; open.addEventListener('click',()=>openSession(index)); row.append(open);
     const actions=document.createElement('span'); actions.className='workspace-edit';
-    const up=document.createElement('button'); up.textContent='↑';up.title='上移工作区';up.disabled=index===0;up.addEventListener('click',()=>moveWorkspace(index,-1));
-    const down=document.createElement('button'); down.textContent='↓';down.title='下移工作区';down.disabled=index===workspaces.length-1;down.addEventListener('click',()=>moveWorkspace(index,1));
+    const bindMove=(button,offset,toTop)=>{let timer=0;button.addEventListener('click',()=>{clearTimeout(timer);timer=setTimeout(()=>{timer=0;moveWorkspace(index,offset);},220);});button.addEventListener('dblclick',(event)=>{event.preventDefault();clearTimeout(timer);timer=0;moveWorkspaceToEdge(index,toTop);});};
+    const up=document.createElement('button'); up.textContent='↑';up.title='上移工作区（双击置顶）';up.disabled=index===0;bindMove(up,-1,true);
+    const down=document.createElement('button'); down.textContent='↓';down.title='下移工作区（双击置底）';down.disabled=index===workspaces.length-1;bindMove(down,1,false);
     const edit=document.createElement('button'); edit.textContent='✎'; edit.title='编辑工作区'; edit.addEventListener('click',()=>editWorkspace(index));
     const remove=document.createElement('button'); remove.textContent='×'; remove.title='删除工作区'; remove.addEventListener('click',()=>deleteWorkspace(index));
     actions.append(up,down,edit,remove); row.append(actions); workspaceList.append(row);
@@ -1117,6 +1118,7 @@ function editWorkspace(index=-1) {
 }
 function deleteWorkspace(index){const host=currentHost(), item=host?.directories[index];if(!item||!confirm(`删除工作区“${item.name}”？`))return;host.directories.splice(index,1);sendConfig();render();}
 function moveWorkspace(index,offset){const host=currentHost(),items=host?.directories;if(!items||index<0||index+offset<0||index+offset>=items.length)return;[items[index],items[index+offset]]=[items[index+offset],items[index]];sendConfig();render();}
+function moveWorkspaceToEdge(index,toTop){const host=currentHost(),items=host?.directories;if(!items||index<0||index>=items.length)return;const target=toTop?0:items.length-1;if(index===target)return;const[item]=items.splice(index,1);if(toTop)items.unshift(item);else items.push(item);sendConfig();render();}
 function moveAgentAt(index,offset){const host=currentHost(),items=agentsForHost(host),target=index+offset;if(index<0||target<0||target>=items.length)return;[items[index],items[target]]=[items[target],items[index]];if(host)host.selected_agent=target;sendConfig();render();}
 
 function createTerminalSession({ id, remoteId = id, title, host, workspace, agent, restoreOnly = false, activate = true }) {
@@ -1244,6 +1246,7 @@ function connectSession(session, automatic = false) {
     cols:session.term.cols,
     rows:session.term.rows,
     restore_only:restoring,
+    force_reprobe: session.attempt > 1,
   });
   return true;
 }
@@ -1264,6 +1267,12 @@ function onConnectionClosed(session, { code, remote_session_missing }) {
   const delay = retryDelays[session.retryCount++];
   session.term.writeln(`\x1b[90m[${delay / 1000} 秒后自动尝试恢复远端会话]\x1b[0m`);
   session.retryTimer = setTimeout(() => connectSession(session, true), delay);
+}
+
+function triggerImmediateReconnectForWaitingSessions() {
+  for (const session of sessions.values()) {
+    if (session.retryTimer !== null) connectSession(session, true);
+  }
 }
 
 function closeSession(id, { syncDeletion = true, terminateRemote = true, skipRender = false } = {}) {
@@ -1407,6 +1416,10 @@ function handleNativeMessage(event) {
     $('image-send').disabled=!selectedImage;
     return;
   }
+  if (msg.type === 'network-resume') {
+    triggerImmediateReconnectForWaitingSessions();
+    return;
+  }
   const session=sessions.get(msg.id);
   if (msg.attempt !== undefined && msg.attempt !== session?.attempt) return;
   if(msg.type==='output'&&session){session.lastOutputAt=performance.now();session.card?.querySelector('.terminal-head')?.classList.add('running');const raw=atob(msg.data);const bytes=Uint8Array.from(raw,c=>c.charCodeAt(0));session.term.write(bytes,()=>watchAutoEnter(session));}
@@ -1419,7 +1432,7 @@ function handleNativeMessage(event) {
 }
 
 function renderAdminUsers(users){const root=$('admin-users-list');root.replaceChildren();for(const user of users){const row=document.createElement('div');row.className='settings-row';const label=document.createElement('span');label.textContent=`${user.username} · ${user.is_admin?'管理员':'普通用户'}`;const actions=document.createElement('span');const edit=document.createElement('button');edit.className='button';edit.type='button';edit.textContent='编辑';edit.addEventListener('click',()=>adminUserForm(user));const del=document.createElement('button');del.className='button';del.type='button';del.textContent='删除';del.addEventListener('click',()=>{if(confirm(`删除账号 ${user.username} 及其同步资料？`))post({action:'admin-user-delete',user_id:user.id});});actions.append(edit,del);row.append(label,actions);root.append(row);}$('admin-users-dialog').showModal();}
-function adminUserForm(user=null){showForm(user?'编辑同步账号':'添加同步账号',[{key:'username',label:'用户名'},{key:'password',label:'密码（编辑时留空以保留）',type:'password'},{key:'is_admin',label:'管理员',type:'checkbox'}],user,(v)=>{if(!/^[a-z0-9_.-]{3,64}$/i.test(v.username))return '用户名需为 3–64 位字母、数字、点、下划线或连字符。';if(!user&&v.password.length<8)return '密码至少 8 个字符。';post({action:'admin-user-save',user_id:user?.id,username:v.username,password:v.password,is_admin:v.is_admin});return '';});}
+function adminUserForm(user=null){showForm(user?'编辑同步账号':'添加同步账号',[{key:'username',label:'用户名'},{key:'password',label:'密码（编辑时留空以保留）',type:'password'},{key:'is_admin',label:'管理员',type:'checkbox'}],user,(v)=>{if(!/^[a-z0-9_.-]{3,64}$/i.test(v.username))return '用户名需为 3–64 位字母、数字、点、下划线或连字符。';if(!user&&v.password.length<6)return '密码至少 6 个字符。';post({action:'admin-user-save',user_id:user?.id,username:v.username,password:v.password,is_admin:v.is_admin});return '';});}
 function openDirectoryBrowser(host, target) {
   directoryBrowser = {host, target, current:null, requested:null, requestId:null};
   browseDialog.showModal();
@@ -1873,6 +1886,7 @@ function restoreFromOperationLog(entry) {
 }
 
 window.chrome?.webview?.addEventListener('message',handleNativeMessage);
+window.addEventListener('online', triggerImmediateReconnectForWaitingSessions);
 window.addEventListener('resize',()=>{
   const stageRect = stage.getBoundingClientRect();
   for(const s of sessions.values()){

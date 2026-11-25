@@ -972,11 +972,33 @@ def build_theme_css(theme_name):
         .primary:hover {{ background: {t["accent_bg_hover"]}; color: {t["accent_fg"]}; border: 1px solid {t["accent"]}; }}
         .tile-grid {{ background: {t["tile_grid_bg"]}; }}
         .tile {{ background: {t["surface"]}; }}
-        .tile-header {{ padding: 0 8px; background: {t["tile_header_bg"]}; border-bottom: 1px solid {t["border_subtle"]}; min-height: 25px; color: {t["fg"]}; }}
+        .tile-header {{ padding: 0 8px; background-color: {t["tile_header_bg"]}; background-image: linear-gradient(105deg, rgba(0, 0, 0, 0) 0%, rgba(0, 0, 0, 0) 100%); border-bottom: 1px solid {t["border_subtle"]}; box-shadow: inset 0 0 0 rgba(0, 0, 0, 0); min-height: 25px; color: {t["fg"]}; transition: background-image 380ms ease-in-out, box-shadow 380ms ease-in-out, border-color 380ms ease-in-out; }}
         .running-outline {{ margin: 3px; }}
         .tile-header button {{ background-image: none; background-color: transparent; border: none; box-shadow: none; min-height: 0; padding: 1px 3px; color: {t["tab_fg"]}; }}
         .tile-header button:hover {{ background-image: none; background-color: {t["hover_overlay"]}; color: {t["fg"]}; }}
-        .tile-focused .tile-header {{ background: {t["tile_focused_bg"]}; border-bottom-color: {t["accent"]}; }}
+        .tile-focused .tile-header {{ background-color: {t["tile_focused_bg"]}; border-bottom-color: {t["accent"]}; }}
+        @keyframes running_shimmer {{
+            0% {{ background-position: 200% center; }}
+            100% {{ background-position: -100% center; }}
+        }}
+        @keyframes running_neon_shimmer {{
+            0% {{
+                background-position: 200% center;
+                border-bottom-color: #00f0ff;
+                box-shadow: inset 0 -2px 8px rgba(0, 240, 255, 0.55);
+            }}
+            50% {{
+                background-position: 50% center;
+                border-bottom-color: #ff2eec;
+                box-shadow: inset 0 -2px 12px rgba(255, 46, 236, 0.72);
+            }}
+            100% {{
+                background-position: -100% center;
+                border-bottom-color: #00f0ff;
+                box-shadow: inset 0 -2px 8px rgba(0, 240, 255, 0.55);
+            }}
+        }}
+        {".tile-header.running, .tile-focused .tile-header.running, button.running { background-image: linear-gradient(105deg, rgba(0, 0, 0, 0) 12%, rgba(0, 240, 255, 0.38) 32%, rgba(244, 234, 255, 0.48) 50%, rgba(255, 46, 236, 0.42) 68%, rgba(0, 0, 0, 0) 88%); background-size: 200% 100%; border-bottom-color: #00f0ff; box-shadow: inset 0 -2px 8px rgba(0, 240, 255, 0.55); animation: running_neon_shimmer 1.8s linear infinite; }" if theme_name in ("neon", "neon_glow") else f'.tile-header.running, .tile-focused .tile-header.running, button.running {{ background-image: linear-gradient(105deg, rgba(0, 0, 0, 0) 15%, alpha({t["accent"]}, 0.28) 35%, alpha(#ffffff, 0.36) 50%, alpha({t["accent"]}, 0.28) 65%, rgba(0, 0, 0, 0) 85%); background-size: 200% 100%; border-bottom-color: {t["accent"]}; box-shadow: inset 0 -2px 8px alpha({t["accent"]}, 0.55); animation: running_shimmer 1.8s linear infinite; }}'}
         .tile-dragging {{ opacity: 0.55; }}
         .tile-drop-target {{ border: 1px solid {t["drop_border"]}; background: {t["drop_bg"]}; }}
         .tile-drop-target .tile-header {{ background: {t["drop_header"]}; }}
@@ -1304,6 +1326,7 @@ class App(Gtk.Window):
         self.tabs.connect("switch-page", self.on_tab_switched)
         tab_view = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         tab_header = Gtk.EventBox()
+        self.tab_header = tab_header
         tab_header.get_style_context().add_class("tile-header")
         tab_header.set_size_request(-1, 25)
         tab_heading = Gtk.Box(spacing=6)
@@ -2067,6 +2090,7 @@ class App(Gtk.Window):
         header.get_style_context().add_class("tile-header")
         header.set_size_request(-1, 25)
         header.add(self.make_session_header(session))
+        terminal._running_header = header
         def on_header_press(_widget, event):
             btn = getattr(event, "button", None)
             btn_num = getattr(btn, "button", btn) if btn is not None else 0
@@ -2084,11 +2108,13 @@ class App(Gtk.Window):
 
     def _animate_running_headers(self):
         now = time.monotonic()
+        active_tab_running = False
         for session in self.sessions:
             terminal = session.get("terminal")
-            outline = getattr(terminal, "_running_outline", None)
             state = session.get("state", {})
             is_active = now - state.get("last_output_at", 0) < 2.5
+            if terminal is getattr(self, "active_terminal", None) and is_active:
+                active_tab_running = True
             dot = session.get("minimized_dot")
             if dot is not None:
                 status = "waiting" if state.get("needs_action") else "running" if is_active else "idle"
@@ -2105,19 +2131,27 @@ class App(Gtk.Window):
                 dimmed = status == "running" and now % 1.0 >= 0.55
                 if dimmed != (dot.get_opacity() < 0.5):
                     dot.set_opacity(0.28 if dimmed else 1.0)
-            if outline:
-                if is_active and not outline.get_visible():
-                    outline.show()
-                elif not is_active and outline.get_visible():
-                    outline.hide()
-                if is_active:
-                    outline.queue_draw()
+            header = getattr(terminal, "_running_header", None)
+            if header is not None:
+                ctx = header.get_style_context()
+                if is_active and not ctx.has_class("running"):
+                    ctx.add_class("running")
+                elif not is_active and ctx.has_class("running"):
+                    ctx.remove_class("running")
             tab_button = getattr(terminal, "_running_tab_button", None)
             if tab_button is not None:
-                was_active = getattr(tab_button, "_running_active", False)
-                tab_button._running_active = is_active
-                if is_active or was_active:
-                    tab_button.queue_draw()
+                ctx = tab_button.get_style_context()
+                if is_active and not ctx.has_class("running"):
+                    ctx.add_class("running")
+                elif not is_active and ctx.has_class("running"):
+                    ctx.remove_class("running")
+        tab_header = getattr(self, "tab_header", None)
+        if tab_header is not None:
+            ctx = tab_header.get_style_context()
+            if active_tab_running and not ctx.has_class("running"):
+                ctx.add_class("running")
+            elif not active_tab_running and ctx.has_class("running"):
+                ctx.remove_class("running")
         return True
 
     def rebuild_view(self, selected=None):
@@ -2451,14 +2485,61 @@ class App(Gtk.Window):
             ctx = button.get_style_context()
             (ctx.add_class if terminal is page else ctx.remove_class)("host-selected")
 
+    @staticmethod
+    def _parse_hex_rgb(value, fallback=(0.0, 0.94, 1.0)):
+        raw = str(value or "").strip().lstrip("#")
+        if len(raw) == 6:
+            try:
+                return tuple(int(raw[i : i + 2], 16) / 255.0 for i in (0, 2, 4))
+            except ValueError:
+                pass
+        return fallback
+
     def draw_running_outline(self, widget, cr, inset=0.0):
         allocation = widget.get_allocation()
         width, height = allocation.width, allocation.height
-        if width > 2 * inset + 2 and height > 2 * inset + 2:
-            cr.set_source_rgb(0.12, 0.65, 1.0)
-            cr.set_line_width(1.0)
-            cr.set_dash([4.0, 4.0], -(time.monotonic() * 16.0 % 8.0))
-            cr.rectangle(inset + 0.5, inset + 0.5, width - 2 * inset - 1.0, height - 2 * inset - 1.0)
+        x = inset
+        y = inset
+        w = width - 2 * inset
+        h = height - 2 * inset
+        if w > 4 and h > 4:
+            theme_name = self.current_theme()
+            theme = THEMES.get(theme_name, THEMES["cyberpunk"])
+            accent = self._parse_hex_rgb(theme.get("accent"), (0.0, 0.94, 1.0))
+            is_neon = theme_name in ("neon", "neon_glow")
+            brand = self._parse_hex_rgb(theme.get("brand"), (1.0, 0.18, 0.925))
+            phase = (time.monotonic() % 1.8) / 1.8
+            band = max(w * 0.75, 90.0)
+            start_x = x - band + (w + band) * phase
+            grad = cairo.LinearGradient(start_x, y, start_x + band, y + h * 0.35)
+            grad.add_color_stop_rgba(0.0, accent[0], accent[1], accent[2], 0.0)
+            if is_neon:
+                grad.add_color_stop_rgba(0.28, accent[0], accent[1], accent[2], 0.36)
+                grad.add_color_stop_rgba(0.50, 0.957, 0.918, 1.0, 0.48)
+                grad.add_color_stop_rgba(0.72, brand[0], brand[1], brand[2], 0.40)
+                grad.add_color_stop_rgba(1.0, brand[0], brand[1], brand[2], 0.0)
+            else:
+                grad.add_color_stop_rgba(0.30, accent[0], accent[1], accent[2], 0.22)
+                grad.add_color_stop_rgba(
+                    0.50,
+                    min(1.0, accent[0] * 0.75 + 0.25),
+                    min(1.0, accent[1] * 0.75 + 0.25),
+                    min(1.0, accent[2] * 0.75 + 0.25),
+                    0.42,
+                )
+                grad.add_color_stop_rgba(0.70, accent[0], accent[1], accent[2], 0.22)
+                grad.add_color_stop_rgba(1.0, accent[0], accent[1], accent[2], 0.0)
+            cr.set_source(grad)
+            cr.rectangle(x, y, w, h)
+            cr.fill()
+            bar_color = brand if is_neon else accent
+            border_grad = cairo.LinearGradient(start_x, y, start_x + band, y)
+            border_grad.add_color_stop_rgba(0.0, accent[0], accent[1], accent[2], 0.45)
+            border_grad.add_color_stop_rgba(0.5, bar_color[0], bar_color[1], bar_color[2], 0.95)
+            border_grad.add_color_stop_rgba(1.0, accent[0], accent[1], accent[2], 0.45)
+            cr.set_source(border_grad)
+            cr.set_line_width(1.5)
+            cr.rectangle(x + 0.75, y + 0.75, w - 1.5, h - 1.5)
             cr.stroke()
         return False
 
@@ -2560,7 +2641,7 @@ class App(Gtk.Window):
             pass_entry = Gtk.Entry()
             pass_entry.set_hexpand(True)
             pass_entry.set_visibility(False)
-            pass_entry.set_placeholder_text("留空保留当前密码" if selected else "至少 8 位")
+            pass_entry.set_placeholder_text("留空保留当前密码" if selected else "至少 6 位")
             admin_check = Gtk.CheckButton(label="管理员")
             admin_check.set_active(bool(selected and selected.get("is_admin")))
             grid.attach(Gtk.Label(label="账号", xalign=0), 0, 0, 1, 1); grid.attach(name_entry, 1, 0, 1, 1)
@@ -2587,7 +2668,13 @@ class App(Gtk.Window):
                         sync_data_request(self.data, "POST", "/v1/admin/users", payload)
                     reload_users()
                 except Exception as exc:
-                    status.set_text(str(exc))
+                    msg = str(exc)
+                    if hasattr(exc, "read"):
+                        try:
+                            msg = json.loads(exc.read().decode("utf-8", errors="replace")).get("error") or msg
+                        except Exception:
+                            pass
+                    status.set_text(msg)
             form.destroy()
         def delete_user(_button):
             selected = selected_user()
@@ -2602,7 +2689,13 @@ class App(Gtk.Window):
                     sync_data_request(self.data, "DELETE", "/v1/admin/users/" + str(selected["id"]))
                     reload_users()
                 except Exception as exc:
-                    status.set_text(str(exc))
+                    msg = str(exc)
+                    if hasattr(exc, "read"):
+                        try:
+                            msg = json.loads(exc.read().decode("utf-8", errors="replace")).get("error") or msg
+                        except Exception:
+                            pass
+                    status.set_text(msg)
         add_button.connect("clicked", edit_user, None)
         edit_button.connect("clicked", edit_user)
         delete_button.connect("clicked", delete_user)
@@ -3151,12 +3244,16 @@ class App(Gtk.Window):
             if self.edit_mode:
                 actions = Gtk.Box(spacing=4)
                 actions.set_halign(Gtk.Align.END)
-                for symbol, offset, tooltip in (("↑", -1, "上移工作区"), ("↓", 1, "下移工作区")):
+                for symbol, offset, tooltip in (("↑", -1, "上移工作区（双击置顶）"), ("↓", 1, "下移工作区（双击置底）")):
                     move = Gtk.Button(label=symbol)
                     move.set_tooltip_text(tooltip)
                     move.set_sensitive(0 <= index + offset < len(directories))
                     move.get_style_context().add_class("manage-button")
-                    move.connect("clicked", self.move_directory, index, offset)
+                    move.connect("clicked", self.on_move_directory_clicked, index, offset)
+                    gesture = Gtk.GestureMultiPress.new(move)
+                    gesture.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+                    gesture.connect("pressed", self.on_move_directory_gesture_pressed, move, index, offset < 0)
+                    move._move_gesture = gesture
                     actions.pack_start(move, False, False, 0)
                 for label, action in [("✎", "edit"), ("×", "delete")]:
                     edit = Gtk.Button(label=label)
@@ -3172,6 +3269,49 @@ class App(Gtk.Window):
             hint.get_style_context().add_class("subtitle")
             self.directories_list.pack_start(hint, False, False, 0)
         self.directories_list.show_all()
+
+    def _cancel_pending_move_directory(self):
+        timer_id = getattr(self, "_pending_move_directory_timer", 0)
+        if timer_id:
+            GLib.source_remove(timer_id)
+            self._pending_move_directory_timer = 0
+
+    def on_move_directory_clicked(self, button, index, offset):
+        if getattr(button, "_suppress_click", False):
+            button._suppress_click = False
+            return
+        self._cancel_pending_move_directory()
+
+        def run():
+            self._pending_move_directory_timer = 0
+            self.move_directory(button, index, offset)
+            return False
+
+        settings = Gtk.Settings.get_default()
+        delay = int(settings.get_property("gtk-double-click-time")) if settings else 400
+        delay = max(250, min(delay, 400))
+        self._pending_move_directory_timer = GLib.timeout_add(delay, run)
+
+    def on_move_directory_gesture_pressed(self, _gesture, n_press, _x, _y, button, index, to_top):
+        if n_press >= 2:
+            self._cancel_pending_move_directory()
+            button._suppress_click = True
+            self.move_directory_to_edge(index, to_top)
+
+    def move_directory_to_edge(self, index, to_top):
+        host = self.current_host()
+        directories = host.get("directories", []) if host else []
+        if not (0 <= index < len(directories)):
+            return
+        target = 0 if to_top else len(directories) - 1
+        if index == target:
+            return
+        item = directories.pop(index)
+        directories.insert(target, item)
+        self.persist()
+        self.refresh_directories()
+        self.directories.set_active(target)
+        self.push_workspace_list(host)
 
     def move_directory(self, _button, index, offset):
         host = self.current_host()

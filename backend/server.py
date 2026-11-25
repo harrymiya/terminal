@@ -393,7 +393,7 @@ def create_server(address, database, token=None):
                     username, password = data.get("username", "").strip().lower(), data.get("password", "")
                     is_admin = bool(data.get("is_admin", False))
                     if not isinstance(username, str) or not re.fullmatch(r"[a-z0-9_.-]{3,64}", username): raise ValueError("用户名需为 3–64 位字母、数字、点、下划线或连字符")
-                    if not isinstance(password, str) or not 8 <= len(password) <= 1024: raise ValueError("密码至少 8 个字符")
+                    if not isinstance(password, str) or not 6 <= len(password) <= 1024: raise ValueError("密码至少 6 个字符")
                 except (ValueError, AttributeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
                     return self.reply(400, {"error": str(exc) or "invalid user"})
                 salt = secrets.token_bytes(16)
@@ -614,7 +614,7 @@ def create_server(address, database, token=None):
                     password = data.get("password", "")
                     is_admin = bool(data.get("is_admin", False))
                     if user_id < 1 or not re.fullmatch(r"[a-z0-9_.-]{3,64}", username): raise ValueError("用户信息无效")
-                    if password and (not isinstance(password, str) or not 8 <= len(password) <= 1024): raise ValueError("密码至少 8 个字符")
+                    if password and (not isinstance(password, str) or not 6 <= len(password) <= 1024): raise ValueError("密码至少 6 个字符")
                 except (ValueError, AttributeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
                     return self.reply(400, {"error": str(exc) or "invalid user"})
                 try:
