@@ -432,8 +432,9 @@ function renderWorkspaces() {
     open.innerHTML=`<span class="workspace-icon" aria-hidden="true">📁</span><span class="workspace-name">${escapeHtml(workspace.name || workspace.path)}</span>`;
     open.title=workspace.path || ''; open.addEventListener('click',()=>openSession(index)); row.append(open);
     const actions=document.createElement('span'); actions.className='workspace-edit';
-    const up=document.createElement('button'); up.textContent='↑';up.title='上移工作区';up.disabled=index===0;up.addEventListener('click',()=>moveWorkspace(index,-1));
-    const down=document.createElement('button'); down.textContent='↓';down.title='下移工作区';down.disabled=index===workspaces.length-1;down.addEventListener('click',()=>moveWorkspace(index,1));
+    const bindMove=(button,offset,toTop)=>{let timer=0;button.addEventListener('click',()=>{clearTimeout(timer);timer=setTimeout(()=>{timer=0;moveWorkspace(index,offset);},220);});button.addEventListener('dblclick',(event)=>{event.preventDefault();clearTimeout(timer);timer=0;moveWorkspaceToEdge(index,toTop);});};
+    const up=document.createElement('button'); up.textContent='↑';up.title='上移工作区（双击置顶）';up.disabled=index===0;bindMove(up,-1,true);
+    const down=document.createElement('button'); down.textContent='↓';down.title='下移工作区（双击置底）';down.disabled=index===workspaces.length-1;bindMove(down,1,false);
     const edit=document.createElement('button'); edit.textContent='✎'; edit.title='编辑工作区'; edit.addEventListener('click',()=>editWorkspace(index));
     const remove=document.createElement('button'); remove.textContent='×'; remove.title='删除工作区'; remove.addEventListener('click',()=>deleteWorkspace(index));
     actions.append(up,down,edit,remove); row.append(actions); workspaceList.append(row);
@@ -1031,6 +1032,7 @@ function editWorkspace(index=-1) {
 }
 function deleteWorkspace(index){const host=currentHost(), item=host?.directories[index];if(!item||!confirm(`删除工作区“${item.name}”？`))return;host.directories.splice(index,1);sendConfig();render();}
 function moveWorkspace(index,offset){const host=currentHost(),items=host?.directories;if(!items||index<0||index+offset<0||index+offset>=items.length)return;[items[index],items[index+offset]]=[items[index+offset],items[index]];sendConfig();render();}
+function moveWorkspaceToEdge(index,toTop){const host=currentHost(),items=host?.directories;if(!items||index<0||index>=items.length)return;const target=toTop?0:items.length-1;if(index===target)return;const[item]=items.splice(index,1);if(toTop)items.unshift(item);else items.push(item);sendConfig();render();}
 function moveAgentAt(index,offset){const host=currentHost(),items=agentsForHost(host),target=index+offset;if(index<0||target<0||target>=items.length)return;[items[index],items[target]]=[items[target],items[index]];if(host)host.selected_agent=target;sendConfig();render();}
 
 function createTerminalSession({ id, remoteId = id, title, host, workspace, agent, restoreOnly = false, activate = true }) {

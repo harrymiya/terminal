@@ -3206,12 +3206,13 @@ class App(Gtk.Window):
             if self.edit_mode:
                 actions = Gtk.Box(spacing=4)
                 actions.set_halign(Gtk.Align.END)
-                for symbol, offset, tooltip in (("↑", -1, "上移工作区"), ("↓", 1, "下移工作区")):
+                for symbol, offset, tooltip in (("↑", -1, "上移工作区（双击置顶）"), ("↓", 1, "下移工作区（双击置底）")):
                     move = Gtk.Button(label=symbol)
                     move.set_tooltip_text(tooltip)
                     move.set_sensitive(0 <= index + offset < len(directories))
                     move.get_style_context().add_class("manage-button")
-                    move.connect("clicked", self.move_directory, index, offset)
+                    move.connect("clicked", self.on_move_directory_clicked, index, offset)
+                    move.connect("button-press-event", self.on_move_directory_press, index, offset < 0)
                     actions.pack_start(move, False, False, 0)
                 for label, action in [("✎", "edit"), ("×", "delete")]:
                     edit = Gtk.Button(label=label)
@@ -3227,6 +3228,48 @@ class App(Gtk.Window):
             hint.get_style_context().add_class("subtitle")
             self.directories_list.pack_start(hint, False, False, 0)
         self.directories_list.show_all()
+
+    def _cancel_pending_move_directory(self):
+        timer_id = getattr(self, "_pending_move_directory_timer", 0)
+        if timer_id:
+            GLib.source_remove(timer_id)
+            self._pending_move_directory_timer = 0
+
+    def on_move_directory_clicked(self, button, index, offset):
+        if getattr(self, "_suppress_next_move_directory_click", False):
+            self._suppress_next_move_directory_click = False
+            return
+        self._cancel_pending_move_directory()
+
+        def run():
+            self._pending_move_directory_timer = 0
+            self.move_directory(button, index, offset)
+            return False
+
+        self._pending_move_directory_timer = GLib.timeout_add(220, run)
+
+    def on_move_directory_press(self, _button, event, index, to_top):
+        if event.type == Gdk.EventType._2BUTTON_PRESS:
+            self._cancel_pending_move_directory()
+            self._suppress_next_move_directory_click = True
+            self.move_directory_to_edge(index, to_top)
+            return True
+        return False
+
+    def move_directory_to_edge(self, index, to_top):
+        host = self.current_host()
+        directories = host.get("directories", []) if host else []
+        if not (0 <= index < len(directories)):
+            return
+        target = 0 if to_top else len(directories) - 1
+        if index == target:
+            return
+        item = directories.pop(index)
+        directories.insert(target, item)
+        self.persist()
+        self.refresh_directories()
+        self.directories.set_active(target)
+        self.push_workspace_list(host)
 
     def move_directory(self, _button, index, offset):
         host = self.current_host()
