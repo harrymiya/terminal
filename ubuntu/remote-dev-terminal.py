@@ -972,11 +972,11 @@ def build_theme_css(theme_name):
         .primary:hover {{ background: {t["accent_bg_hover"]}; color: {t["accent_fg"]}; border: 1px solid {t["accent"]}; }}
         .tile-grid {{ background: {t["tile_grid_bg"]}; }}
         .tile {{ background: {t["surface"]}; }}
-        .tile-header {{ padding: 0 8px; background: {t["tile_header_bg"]}; border-bottom: 1px solid {t["border_subtle"]}; min-height: 25px; color: {t["fg"]}; }}
+        .tile-header {{ padding: 0 8px; background-color: {t["tile_header_bg"]}; background-image: linear-gradient(105deg, rgba(0, 0, 0, 0) 0%, rgba(0, 0, 0, 0) 100%); border-bottom: 1px solid {t["border_subtle"]}; box-shadow: inset 0 0 0 rgba(0, 0, 0, 0); min-height: 25px; color: {t["fg"]}; transition: background-image 380ms ease-in-out, box-shadow 380ms ease-in-out, border-color 380ms ease-in-out; }}
         .running-outline {{ margin: 3px; }}
         .tile-header button {{ background-image: none; background-color: transparent; border: none; box-shadow: none; min-height: 0; padding: 1px 3px; color: {t["tab_fg"]}; }}
         .tile-header button:hover {{ background-image: none; background-color: {t["hover_overlay"]}; color: {t["fg"]}; }}
-        .tile-focused .tile-header {{ background: {t["tile_focused_bg"]}; border-bottom-color: {t["accent"]}; }}
+        .tile-focused .tile-header {{ background-color: {t["tile_focused_bg"]}; border-bottom-color: {t["accent"]}; }}
         @keyframes running_shimmer {{
             0% {{ background-position: 200% center; }}
             100% {{ background-position: -100% center; }}
@@ -998,7 +998,7 @@ def build_theme_css(theme_name):
                 box-shadow: inset 0 -2px 8px rgba(0, 240, 255, 0.55);
             }}
         }}
-        {".tile-header.running, .tile-focused .tile-header.running, button.running { background-image: linear-gradient(105deg, rgba(0, 0, 0, 0) 12%, rgba(0, 240, 255, 0.38) 32%, rgba(244, 234, 255, 0.48) 50%, rgba(255, 46, 236, 0.42) 68%, rgba(0, 0, 0, 0) 88%); background-size: 200% 100%; border-bottom: 2px solid #00f0ff; animation: running_neon_shimmer 1.8s linear infinite; }" if theme_name in ("neon", "neon_glow") else f'.tile-header.running, .tile-focused .tile-header.running, button.running {{ background-image: linear-gradient(105deg, rgba(0, 0, 0, 0) 15%, alpha({t["accent"]}, 0.28) 35%, alpha(#ffffff, 0.36) 50%, alpha({t["accent"]}, 0.28) 65%, rgba(0, 0, 0, 0) 85%); background-size: 200% 100%; border-bottom: 2px solid {t["accent"]}; animation: running_shimmer 1.8s linear infinite; }}'}
+        {".tile-header.running, .tile-focused .tile-header.running, button.running { background-image: linear-gradient(105deg, rgba(0, 0, 0, 0) 12%, rgba(0, 240, 255, 0.38) 32%, rgba(244, 234, 255, 0.48) 50%, rgba(255, 46, 236, 0.42) 68%, rgba(0, 0, 0, 0) 88%); background-size: 200% 100%; border-bottom-color: #00f0ff; box-shadow: inset 0 -2px 8px rgba(0, 240, 255, 0.55); animation: running_neon_shimmer 1.8s linear infinite; }" if theme_name in ("neon", "neon_glow") else f'.tile-header.running, .tile-focused .tile-header.running, button.running {{ background-image: linear-gradient(105deg, rgba(0, 0, 0, 0) 15%, alpha({t["accent"]}, 0.28) 35%, alpha(#ffffff, 0.36) 50%, alpha({t["accent"]}, 0.28) 65%, rgba(0, 0, 0, 0) 85%); background-size: 200% 100%; border-bottom-color: {t["accent"]}; box-shadow: inset 0 -2px 8px alpha({t["accent"]}, 0.55); animation: running_shimmer 1.8s linear infinite; }}'}
         .tile-dragging {{ opacity: 0.55; }}
         .tile-drop-target {{ border: 1px solid {t["drop_border"]}; background: {t["drop_bg"]}; }}
         .tile-drop-target .tile-header {{ background: {t["drop_header"]}; }}
