@@ -3212,7 +3212,10 @@ class App(Gtk.Window):
                     move.set_sensitive(0 <= index + offset < len(directories))
                     move.get_style_context().add_class("manage-button")
                     move.connect("clicked", self.on_move_directory_clicked, index, offset)
-                    move.connect("button-press-event", self.on_move_directory_press, index, offset < 0)
+                    gesture = Gtk.GestureMultiPress.new(move)
+                    gesture.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+                    gesture.connect("pressed", self.on_move_directory_gesture_pressed, move, index, offset < 0)
+                    move._move_gesture = gesture
                     actions.pack_start(move, False, False, 0)
                 for label, action in [("✎", "edit"), ("×", "delete")]:
                     edit = Gtk.Button(label=label)
@@ -3236,8 +3239,8 @@ class App(Gtk.Window):
             self._pending_move_directory_timer = 0
 
     def on_move_directory_clicked(self, button, index, offset):
-        if getattr(self, "_suppress_next_move_directory_click", False):
-            self._suppress_next_move_directory_click = False
+        if getattr(button, "_suppress_click", False):
+            button._suppress_click = False
             return
         self._cancel_pending_move_directory()
 
@@ -3246,15 +3249,16 @@ class App(Gtk.Window):
             self.move_directory(button, index, offset)
             return False
 
-        self._pending_move_directory_timer = GLib.timeout_add(220, run)
+        settings = Gtk.Settings.get_default()
+        delay = int(settings.get_property("gtk-double-click-time")) if settings else 400
+        delay = max(250, min(delay, 400))
+        self._pending_move_directory_timer = GLib.timeout_add(delay, run)
 
-    def on_move_directory_press(self, _button, event, index, to_top):
-        if event.type == Gdk.EventType._2BUTTON_PRESS:
+    def on_move_directory_gesture_pressed(self, _gesture, n_press, _x, _y, button, index, to_top):
+        if n_press >= 2:
             self._cancel_pending_move_directory()
-            self._suppress_next_move_directory_click = True
+            button._suppress_click = True
             self.move_directory_to_edge(index, to_top)
-            return True
-        return False
 
     def move_directory_to_edge(self, index, to_top):
         host = self.current_host()
