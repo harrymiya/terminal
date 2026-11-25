@@ -198,6 +198,13 @@ public partial class MainWindow : Window
         Send(new { type = "saved" });
         if (message.TryGetProperty("ssh_password_change", out _)) SendConfig();
         ConfigureSyncTimer();
+        if (StringSet(node["dirty_workspaces"]).Count > 0
+            && Bool(node, "auto_sync_enabled")
+            && !Bool(node, "offline_mode")
+            && Text(node, "sync_token").Length > 0)
+        {
+            _ = SyncNowAsync(manual: false);
+        }
         ConfigureRefreshTimers();
     }
 
@@ -750,6 +757,7 @@ public partial class MainWindow : Window
         var hosts = config["hosts"] as JsonArray ?? new JsonArray();
         var mergedHosts = new JsonArray();
         var matchedProfiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var initialDirsByHostId = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var originalHostIds = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var remappedHostIds = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var syncedSessionsByHost = new Dictionary<string, JsonArray>(StringComparer.OrdinalIgnoreCase);
@@ -814,6 +822,7 @@ public partial class MainWindow : Window
             var hostIdNow = Text(host, "id");
             if (mergedHosts.OfType<JsonObject>().Any(h => string.Equals(Text(h, "id"), hostIdNow, StringComparison.OrdinalIgnoreCase)))
                 continue;
+            initialDirsByHostId[hostIdNow] = (host["directories"] as JsonArray)?.ToJsonString() ?? "[]";
             host["directories"] = await SyncWorkspacesAsync(host, config, url, token, username).ConfigureAwait(false);
             originalHostIds.TryGetValue(hostIdNow, out var originalIdForHost);
             var hostSessions = await SyncHostSessionsAsync(host, originalIdForHost, config, url, token, account, completedMutationIds).ConfigureAwait(false);
@@ -844,6 +853,8 @@ public partial class MainWindow : Window
             if (_disposed) return;
             var latest = ConfigStore.Load();
             var localHosts = (latest["hosts"] as JsonArray ?? new JsonArray()).OfType<JsonObject>().ToList();
+            var latestDirtyWorkspaces = StringSet(latest["dirty_workspaces"]);
+            var pushedDirtyWorkspaces = StringSet(config["dirty_workspaces"]);
             foreach (var host in mergedHosts.OfType<JsonObject>())
             {
                 var id = Text(host, "id");
@@ -852,6 +863,14 @@ public partial class MainWindow : Window
                 {
                     local = localHosts.FirstOrDefault(item => Text(item, "id") == originalId);
                     if (Text(latest, "current_host_id") == originalId) latest["current_host_id"] = id;
+                }
+                var latestDirsJson = (local?["directories"] as JsonArray)?.ToJsonString() ?? "[]";
+                var modifiedInFlight = local is not null && latestDirtyWorkspaces.Contains(id)
+                    && (!initialDirsByHostId.TryGetValue(id, out var initialDirsJson) || latestDirsJson != initialDirsJson);
+                if (modifiedInFlight)
+                {
+                    if (local!["directories"] is JsonArray localDirs) host["directories"] = localDirs.DeepClone();
+                    pushedDirtyWorkspaces.Add(id);
                 }
                 // A password can be saved or cleared while the sync requests are running.
                 host.Remove("credential_id");
@@ -875,7 +894,7 @@ public partial class MainWindow : Window
             latest["sync_is_admin"] = config["sync_is_admin"]?.DeepClone();
             latest["dirty_host_profiles"] = JsonArrayFrom(dirtyHosts);
             latest["deleted_host_profiles"] = new JsonArray();
-            latest["dirty_workspaces"] = config["dirty_workspaces"]?.DeepClone() ?? new JsonArray();
+            latest["dirty_workspaces"] = JsonArrayFrom(pushedDirtyWorkspaces);
             latest["agents_dirty"] = config["agents_dirty"]?.DeepClone() ?? JsonValue.Create(false);
             latest["workspace_sync_revisions"] = config["workspace_sync_revisions"]?.DeepClone() ?? new JsonObject();
             latest["agent_sync_revisions"] = config["agent_sync_revisions"]?.DeepClone() ?? new JsonObject();
