@@ -977,6 +977,28 @@ def build_theme_css(theme_name):
         .tile-header button {{ background-image: none; background-color: transparent; border: none; box-shadow: none; min-height: 0; padding: 1px 3px; color: {t["tab_fg"]}; }}
         .tile-header button:hover {{ background-image: none; background-color: {t["hover_overlay"]}; color: {t["fg"]}; }}
         .tile-focused .tile-header {{ background: {t["tile_focused_bg"]}; border-bottom-color: {t["accent"]}; }}
+        @keyframes running_shimmer {{
+            0% {{ background-position: 200% center; }}
+            100% {{ background-position: -100% center; }}
+        }}
+        @keyframes running_neon_shimmer {{
+            0% {{
+                background-position: 200% center;
+                border-bottom-color: #00f0ff;
+                box-shadow: inset 0 -2px 8px rgba(0, 240, 255, 0.55);
+            }}
+            50% {{
+                background-position: 50% center;
+                border-bottom-color: #ff2eec;
+                box-shadow: inset 0 -2px 12px rgba(255, 46, 236, 0.72);
+            }}
+            100% {{
+                background-position: -100% center;
+                border-bottom-color: #00f0ff;
+                box-shadow: inset 0 -2px 8px rgba(0, 240, 255, 0.55);
+            }}
+        }}
+        {".tile-header.running, .tile-focused .tile-header.running, button.running { background-image: linear-gradient(105deg, rgba(0, 0, 0, 0) 12%, rgba(0, 240, 255, 0.38) 32%, rgba(244, 234, 255, 0.48) 50%, rgba(255, 46, 236, 0.42) 68%, rgba(0, 0, 0, 0) 88%); background-size: 200% 100%; border-bottom: 2px solid #00f0ff; animation: running_neon_shimmer 1.8s linear infinite; }" if theme_name in ("neon", "neon_glow") else f'.tile-header.running, .tile-focused .tile-header.running, button.running {{ background-image: linear-gradient(105deg, rgba(0, 0, 0, 0) 15%, alpha({t["accent"]}, 0.28) 35%, alpha(#ffffff, 0.36) 50%, alpha({t["accent"]}, 0.28) 65%, rgba(0, 0, 0, 0) 85%); background-size: 200% 100%; border-bottom: 2px solid {t["accent"]}; animation: running_shimmer 1.8s linear infinite; }}'}
         .tile-dragging {{ opacity: 0.55; }}
         .tile-drop-target {{ border: 1px solid {t["drop_border"]}; background: {t["drop_bg"]}; }}
         .tile-drop-target .tile-header {{ background: {t["drop_header"]}; }}
@@ -1304,6 +1326,7 @@ class App(Gtk.Window):
         self.tabs.connect("switch-page", self.on_tab_switched)
         tab_view = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         tab_header = Gtk.EventBox()
+        self.tab_header = tab_header
         tab_header.get_style_context().add_class("tile-header")
         tab_header.set_size_request(-1, 25)
         tab_heading = Gtk.Box(spacing=6)
@@ -2067,6 +2090,7 @@ class App(Gtk.Window):
         header.get_style_context().add_class("tile-header")
         header.set_size_request(-1, 25)
         header.add(self.make_session_header(session))
+        terminal._running_header = header
         def on_header_press(_widget, event):
             btn = getattr(event, "button", None)
             btn_num = getattr(btn, "button", btn) if btn is not None else 0
@@ -2084,11 +2108,13 @@ class App(Gtk.Window):
 
     def _animate_running_headers(self):
         now = time.monotonic()
+        active_tab_running = False
         for session in self.sessions:
             terminal = session.get("terminal")
-            outline = getattr(terminal, "_running_outline", None)
             state = session.get("state", {})
             is_active = now - state.get("last_output_at", 0) < 2.5
+            if terminal is getattr(self, "active_terminal", None) and is_active:
+                active_tab_running = True
             dot = session.get("minimized_dot")
             if dot is not None:
                 status = "waiting" if state.get("needs_action") else "running" if is_active else "idle"
@@ -2105,19 +2131,27 @@ class App(Gtk.Window):
                 dimmed = status == "running" and now % 1.0 >= 0.55
                 if dimmed != (dot.get_opacity() < 0.5):
                     dot.set_opacity(0.28 if dimmed else 1.0)
-            if outline:
-                if is_active and not outline.get_visible():
-                    outline.show()
-                elif not is_active and outline.get_visible():
-                    outline.hide()
-                if is_active:
-                    outline.queue_draw()
+            header = getattr(terminal, "_running_header", None)
+            if header is not None:
+                ctx = header.get_style_context()
+                if is_active and not ctx.has_class("running"):
+                    ctx.add_class("running")
+                elif not is_active and ctx.has_class("running"):
+                    ctx.remove_class("running")
             tab_button = getattr(terminal, "_running_tab_button", None)
             if tab_button is not None:
-                was_active = getattr(tab_button, "_running_active", False)
-                tab_button._running_active = is_active
-                if is_active or was_active:
-                    tab_button.queue_draw()
+                ctx = tab_button.get_style_context()
+                if is_active and not ctx.has_class("running"):
+                    ctx.add_class("running")
+                elif not is_active and ctx.has_class("running"):
+                    ctx.remove_class("running")
+        tab_header = getattr(self, "tab_header", None)
+        if tab_header is not None:
+            ctx = tab_header.get_style_context()
+            if active_tab_running and not ctx.has_class("running"):
+                ctx.add_class("running")
+            elif not active_tab_running and ctx.has_class("running"):
+                ctx.remove_class("running")
         return True
 
     def rebuild_view(self, selected=None):
