@@ -2451,15 +2451,61 @@ class App(Gtk.Window):
             ctx = button.get_style_context()
             (ctx.add_class if terminal is page else ctx.remove_class)("host-selected")
 
+    @staticmethod
+    def _parse_hex_rgb(value, fallback=(0.0, 0.94, 1.0)):
+        raw = str(value or "").strip().lstrip("#")
+        if len(raw) == 6:
+            try:
+                return tuple(int(raw[i : i + 2], 16) / 255.0 for i in (0, 2, 4))
+            except ValueError:
+                pass
+        return fallback
+
     def draw_running_outline(self, widget, cr, inset=0.0):
         allocation = widget.get_allocation()
         width, height = allocation.width, allocation.height
-        if width > 2 * inset + 2 and height > 2 * inset + 2:
-            cr.set_source_rgb(0.12, 0.65, 1.0)
-            cr.set_line_width(1.0)
-            cr.set_dash([4.0, 4.0], -(time.monotonic() * 16.0 % 8.0))
-            cr.rectangle(inset + 0.5, inset + 0.5, width - 2 * inset - 1.0, height - 2 * inset - 1.0)
-            cr.stroke()
+        x = inset
+        y = inset
+        w = width - 2 * inset
+        h = height - 2 * inset
+        if w > 4 and h > 4:
+            theme_name = self.current_theme()
+            theme = THEMES.get(theme_name, THEMES["cyberpunk"])
+            accent = self._parse_hex_rgb(theme.get("accent"), (0.0, 0.94, 1.0))
+            is_neon = theme_name in ("neon", "neon_glow")
+            brand = self._parse_hex_rgb(theme.get("brand"), (1.0, 0.18, 0.925))
+            phase = (time.monotonic() % 2.1) / 2.1
+            band = max(w * 0.85, 80.0)
+            start_x = x - band + (w + band) * phase
+            grad = cairo.LinearGradient(start_x, y, start_x + band, y + h * 0.35)
+            grad.add_color_stop_rgba(0.0, accent[0], accent[1], accent[2], 0.0)
+            if is_neon:
+                grad.add_color_stop_rgba(0.28, accent[0], accent[1], accent[2], 0.24)
+                grad.add_color_stop_rgba(0.50, 0.957, 0.918, 1.0, 0.32)
+                grad.add_color_stop_rgba(0.72, brand[0], brand[1], brand[2], 0.26)
+                grad.add_color_stop_rgba(1.0, brand[0], brand[1], brand[2], 0.0)
+            else:
+                grad.add_color_stop_rgba(0.30, accent[0], accent[1], accent[2], 0.14)
+                grad.add_color_stop_rgba(
+                    0.50,
+                    min(1.0, accent[0] * 0.75 + 0.25),
+                    min(1.0, accent[1] * 0.75 + 0.25),
+                    min(1.0, accent[2] * 0.75 + 0.25),
+                    0.28,
+                )
+                grad.add_color_stop_rgba(0.70, accent[0], accent[1], accent[2], 0.14)
+                grad.add_color_stop_rgba(1.0, accent[0], accent[1], accent[2], 0.0)
+            cr.set_source(grad)
+            cr.rectangle(x, y, w, h)
+            cr.fill()
+            bar_color = brand if is_neon else accent
+            bar_grad = cairo.LinearGradient(start_x, y, start_x + band, y)
+            bar_grad.add_color_stop_rgba(0.0, accent[0], accent[1], accent[2], 0.28)
+            bar_grad.add_color_stop_rgba(0.5, bar_color[0], bar_color[1], bar_color[2], 0.90)
+            bar_grad.add_color_stop_rgba(1.0, accent[0], accent[1], accent[2], 0.28)
+            cr.set_source(bar_grad)
+            cr.rectangle(x, y + h - 2.0, w, 2.0)
+            cr.fill()
         return False
 
     def draw_tab_running_outline(self, widget, cr):

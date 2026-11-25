@@ -646,23 +646,41 @@ body.resizing-tiles-y * {
   inset: 0;
   width: 100%;
   height: 100%;
-  overflow: visible;
+  border-radius: inherit;
+  overflow: hidden;
   z-index: 0;
   opacity: 0;
   pointer-events: none;
+  background-image: linear-gradient(
+    105deg,
+    transparent 5%,
+    color-mix(in srgb, var(--accent) 14%, transparent) 30%,
+    color-mix(in srgb, var(--accent) 32%, #ffffff 18%) 50%,
+    color-mix(in srgb, var(--accent) 14%, transparent) 70%,
+    transparent 95%
+  );
+  background-size: 220% 100%;
+  background-position: 100% center;
+  box-shadow: inset 0 -2px 0 color-mix(in srgb, var(--accent) 65%, transparent);
+  transition: opacity .18s ease;
 }
 
 .terminal-running-outline rect {
-  x: 2.5px;
-  y: 2.5px;
-  width: calc(100% - 5px);
-  height: calc(100% - 5px);
-  rx: 2px;
-  fill: none;
-  stroke: var(--accent);
-  stroke-width: 1;
-  stroke-dasharray: 4 4;
-  vector-effect: non-scaling-stroke;
+  display: none;
+}
+
+:root:is([data-theme="neon"], [data-theme="neon_glow"]) .terminal-running-outline {
+  background-image: linear-gradient(
+    105deg,
+    transparent 5%,
+    color-mix(in srgb, var(--accent) 26%, transparent) 28%,
+    color-mix(in srgb, #f4eaff 34%, transparent) 48%,
+    color-mix(in srgb, var(--brand) 30%, transparent) 68%,
+    transparent 95%
+  );
+  box-shadow:
+    inset 0 -2px 0 color-mix(in srgb, var(--brand) 75%, transparent),
+    inset 0 0 12px color-mix(in srgb, var(--accent) 18%, transparent);
 }
 
 .image-dialog {
@@ -720,11 +738,7 @@ body.resizing-tiles-y * {
 .terminal-head.running .terminal-running-outline,
 .flat-list-button.running .terminal-running-outline {
   opacity: 1;
-}
-
-.terminal-head.running .terminal-running-outline rect,
-.flat-list-button.running .terminal-running-outline rect {
-  animation: terminal-running-dash .5s linear infinite;
+  animation: terminal-running-shimmer 2.1s linear infinite;
 }
 
 .terminal-head > :not(.terminal-running-outline) {
@@ -732,8 +746,9 @@ body.resizing-tiles-y * {
   z-index: 1;
 }
 
-@keyframes terminal-running-dash {
-  to { stroke-dashoffset: -8; }
+@keyframes terminal-running-shimmer {
+  0% { background-position: 100% center; }
+  100% { background-position: 0% center; }
 }
 
 .terminal-card-title {
