@@ -32,6 +32,7 @@ const browseDialog = $('browse-dialog');
 const imageDialog = $('image-dialog');
 let imageTargetSession = null;
 let selectedImage = null;
+let selectedFile = null;
 let imageUploadBusy = false;
 let clipboardReadPending = false;
 let config = { hosts: [], agents: [], tiled: true, ui_scale: 100 };
@@ -779,7 +780,7 @@ function renderSessions({ focus = true } = {}) {
     card.className='terminal-card';
     card.classList.toggle('active', s.id === activeSession);
     card.classList.toggle('inactive', !row && !s.floating);
-    card.innerHTML=`<div class="terminal-head"><svg class="terminal-running-outline" aria-hidden="true"><rect x="2.5" y="2.5" width="calc(100% - 5px)" height="calc(100% - 5px)" rx="2"></rect></svg><span class="terminal-card-title agent-label" title="双击重命名"><span class="terminal-card-name">${escapeHtml(s.title)}</span><button class="terminal-close rename-session" title="编辑实例名称">✎</button></span><span class="terminal-quota quota-batteries" hidden></span><span class="terminal-tools"><button type="button" class="terminal-close reconnect-session" title="重新连接 SSH">重新连接</button><button class="terminal-close image-session" title="发送图片">▧</button><button class="terminal-close minimize-session" title="最小化">−</button><button class="terminal-close float-session" title="${s.floating ? '还原到工作区' : '浮动窗口'}">□</button><button class="terminal-close close-session" title="关闭终端">×</button></span></div><div class="terminal-body"></div>`;
+    card.innerHTML=`<div class="terminal-head"><svg class="terminal-running-outline" aria-hidden="true"><rect x="2.5" y="2.5" width="calc(100% - 5px)" height="calc(100% - 5px)" rx="2"></rect></svg><span class="terminal-card-title agent-label" title="双击重命名"><span class="terminal-card-name">${escapeHtml(s.title)}</span><button class="terminal-close rename-session" title="编辑实例名称">✎</button></span><span class="terminal-quota quota-batteries" hidden></span><span class="terminal-tools"><button type="button" class="terminal-close reconnect-session" title="重新连接 SSH">重新连接</button><button class="terminal-close image-session" title="发送图片或文件">▧</button><button class="terminal-close minimize-session" title="最小化">−</button><button class="terminal-close float-session" title="${s.floating ? '还原到工作区' : '浮动窗口'}">□</button><button class="terminal-close close-session" title="关闭终端">×</button></span></div><div class="terminal-body"></div>`;
     const head = card.querySelector('.terminal-head');
     const title = card.querySelector('.terminal-card-title');
     const icon = sessionAgentIcon(s);
@@ -1445,7 +1446,7 @@ function handleNativeMessage(event) {
     void selectImageFile(new File([bytes],'clipboard.png',{type:'image/png'}),'剪贴板图片');
     return;
   }
-  if(msg.type==='image-uploaded'&&msg.id===imageTargetSession?.id){
+  if((msg.type==='image-uploaded'||msg.type==='file-uploaded')&&msg.id===imageTargetSession?.id){
     const session=imageTargetSession;
     imageUploadBusy=false;
     imageDialog.close();
@@ -1456,7 +1457,7 @@ function handleNativeMessage(event) {
     imageUploadBusy=false;
     setImageDialogControlsDisabled(false);
     setImageStatus(`上传失败：${msg.message}`,true);
-    $('image-send').disabled=!selectedImage;
+    $('image-send').disabled=!selectedImage&&!selectedFile;
     return;
   }
   if (msg.type === 'network-resume') {
@@ -1659,15 +1660,26 @@ $('image-file').addEventListener('change',event=>{
   input.value='';
   if(file)void selectImageFile(file,file.name||'本地图片');
 });
+$('file-file').addEventListener('change',event=>{
+  const input=event.target,file=input.files?.[0];
+  input.value='';
+  if(file)void selectFile(file);
+});
 $('image-choose').addEventListener('click',()=>{$('image-file').value='';$('image-file').click();});
+$('file-choose').addEventListener('click',()=>{$('file-file').value='';$('file-file').click();});
 $('image-paste').addEventListener('click',readClipboardImage);
 $('image-send').addEventListener('click',()=>{
-  if(imageUploadBusy||!imageTargetSession||!selectedImage)return;
+  if(imageUploadBusy||!imageTargetSession||(!selectedImage&&!selectedFile))return;
   if(!imageTargetSession.connected){setImageStatus('终端已断开，请重新连接后再发送。',true);return;}
   imageUploadBusy=true;
   setImageDialogControlsDisabled(true);
-  setImageStatus('正在上传图片…');
-  post({action:'upload-image',id:imageTargetSession.id,data:selectedImage.data});
+  if(selectedFile){
+    setImageStatus('正在上传文件…');
+    post({action:'upload-file',id:imageTargetSession.id,file_name:selectedFile.name,data:selectedFile.data});
+  }else{
+    setImageStatus('正在上传图片…');
+    post({action:'upload-image',id:imageTargetSession.id,data:selectedImage.data});
+  }
 });
 imageDialog.addEventListener('keydown',event=>{
   if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='v'){
@@ -1681,26 +1693,31 @@ imageDialog.addEventListener('cancel',event=>{if(imageUploadBusy)event.preventDe
 imageDialog.addEventListener('close',()=>{
   imageTargetSession=null;
   selectedImage=null;
+  selectedFile=null;
+  $('image-file').value='';
+  $('file-file').value='';
   imageUploadBusy=false;
   clipboardReadPending=false;
   clearSelectedImage();
-  setImageStatus('尚未选择图片');
+  setImageStatus('尚未选择图片或文件');
   setImageDialogControlsDisabled(false);
 });
 function openImageDialog(session){
   if(!session.connected){showError('请先等待该终端连接成功。');return;}
   imageTargetSession=session;
   selectedImage=null;
+  selectedFile=null;
   imageUploadBusy=false;
   clipboardReadPending=false;
   clearSelectedImage();
-  setImageStatus('尚未选择图片');
+  setImageStatus('尚未选择图片或文件');
   setImageDialogControlsDisabled(false);
   imageDialog.showModal();
   $('image-paste').focus();
 }
 function clearSelectedImage(){
   selectedImage=null;
+  selectedFile=null;
   $('image-preview').removeAttribute('src');
   $('image-preview').hidden=true;
   document.querySelector('.image-preview-frame').classList.remove('visible');
@@ -1713,14 +1730,16 @@ function setImageStatus(text,error=false){
 }
 function setImageDialogControlsDisabled(disabled){
   $('image-choose').disabled=disabled||clipboardReadPending;
+  $('file-choose').disabled=disabled||clipboardReadPending;
   $('image-paste').disabled=disabled||clipboardReadPending;
   for(const button of imageDialog.querySelectorAll('[data-close-dialog]'))button.disabled=disabled;
-  $('image-send').disabled=disabled||!selectedImage;
+  $('image-send').disabled=disabled||(!selectedImage&&!selectedFile);
 }
 function readClipboardImage(){
   if(!imageDialog.open||!imageTargetSession||imageUploadBusy||clipboardReadPending)return;
   clipboardReadPending=true;
   $('image-choose').disabled=true;
+  $('file-choose').disabled=true;
   $('image-paste').disabled=true;
   setImageStatus('正在读取剪贴板图片…');
   post({action:'read-clipboard-image',id:imageTargetSession.id});
@@ -1733,15 +1752,48 @@ async function selectImageFile(file,description){
     const prepared=await imageData(file);
     if(!imageDialog.open||!imageTargetSession)return;
     selectedImage={...prepared,description};
-    $('image-preview').src=`data:image/jpeg;base64,${prepared.data}`;
+    $('image-preview').src='data:image/jpeg;base64,'+prepared.data;
     $('image-preview').hidden=false;
     document.querySelector('.image-preview-frame').classList.add('visible');
-    setImageStatus(`${description} · ${prepared.width} × ${prepared.height}`);
+    setImageStatus(description+' · '+prepared.width+' × '+prepared.height);
     $('image-send').disabled=false;
   }catch(error){
     clearSelectedImage();
-    setImageStatus(error.message,true);
+    setImageStatus(error instanceof Error?error.message:'无法读取图片',true);
   }
+}
+async function selectFile(file){
+  if(!imageDialog.open||!imageTargetSession||imageUploadBusy)return;
+  clearSelectedImage();
+  setImageStatus('正在读取文件…');
+  try{
+    if(file.size===0)throw new Error('文件不能为空');
+    if(file.size>20*1024*1024)throw new Error('文件超过 20 MB');
+    const data=await fileBase64(file);
+    if(!imageDialog.open||!imageTargetSession)return;
+    selectedFile={data,name:file.name};
+    setImageStatus(file.name+' · '+formatFileSize(file.size));
+    $('image-send').disabled=false;
+  }catch(error){
+    clearSelectedImage();
+    setImageStatus(error instanceof Error?error.message:'无法读取文件',true);
+  }
+}
+function formatFileSize(bytes){
+  return bytes>=1024*1024?(bytes/(1024*1024)).toFixed(1)+' MB':Math.max(1,Math.round(bytes/1024))+' KB';
+}
+function fileBase64(file){
+  return new Promise((resolve,reject)=>{
+    const reader=new FileReader();
+    reader.onload=()=>{
+      const result=String(reader.result||'');
+      const separator=result.indexOf(',');
+      if(separator<0){reject(new Error('无法读取所选文件'));return;}
+      resolve(result.slice(separator+1));
+    };
+    reader.onerror=()=>reject(reader.error||new Error('读取文件失败'));
+    reader.readAsDataURL(file);
+  });
 }
 async function imageData(file){
   const objectUrl=URL.createObjectURL(file);

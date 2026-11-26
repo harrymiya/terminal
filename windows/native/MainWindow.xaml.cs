@@ -95,6 +95,7 @@ public partial class MainWindow : Window
                 case "close": CloseSession(Text(message, "id"), terminateRemote: !message.TryGetProperty("terminate_remote", out var terminateProp) || terminateProp.ValueKind != JsonValueKind.False); break;
                 case "clear-host-password": ClearHostPassword(message); break;
                 case "upload-image": _ = UploadImageAsync(message); break;
+                case "upload-file": _ = UploadFileAsync(message); break;
                 case "read-clipboard-image": ReadClipboardImage(message); break;
                 case "upload-image-path": _ = UploadImagePathAsync(message); break;
                 case "get-ssh-public-key": _ = GetSshPublicKeyAsync(message); break;
@@ -1565,6 +1566,28 @@ public partial class MainWindow : Window
         catch (Exception ex) { Dispatcher.BeginInvoke(() => Send(new { type = "error", id, message = ex.Message })); }
     }
 
+    private async Task UploadFileAsync(JsonElement message)
+    {
+        var id = Text(message, "id");
+        try
+        {
+            if (!_sessions.TryGetValue(id, out var session) || !_sessionHosts.TryGetValue(id, out var host)) throw new InvalidOperationException("终端会话已关闭。");
+            var rawFileName = Text(message, "file_name").Replace('\\', '/');
+            var fileName = rawFileName.Split('/').LastOrDefault() ?? "";
+            if (string.IsNullOrWhiteSpace(fileName) || fileName.Length > 255 || fileName.Any(char.IsControl)) throw new InvalidDataException("文件名为空或格式无效。");
+            var encoded = Text(message, "data");
+            if (encoded.Length == 0 || encoded.Length > 28_000_000) throw new InvalidDataException("文件为空或超过 20 MB。");
+            var bytes = Convert.FromBase64String(encoded);
+            if (bytes.Length == 0 || bytes.Length > 20 * 1024 * 1024) throw new InvalidDataException("文件为空或超过 20 MB。");
+            var extension = Path.GetExtension(fileName).ToLowerInvariant();
+            if (extension.Length < 2 || extension.Length > 16 || extension.Skip(1).Any(character => !((character >= 'a' && character <= 'z') || (character >= '0' && character <= '9')))) extension = "";
+            var path = await UploadFileBytesAsync(host, bytes, extension).ConfigureAwait(false);
+            session.Write("请查看文件 " + QuoteShell(fileName) + "，路径：" + QuoteShell(path) + "\r");
+            Dispatcher.BeginInvoke(() => Send(new { type = "file-uploaded", id, path, file_name = fileName }));
+        }
+        catch (Exception ex) { Dispatcher.BeginInvoke(() => Send(new { type = "error", id, message = ex.Message })); }
+    }
+
     private void ReadClipboardImage(JsonElement message)
     {
         var id = Text(message, "id");
@@ -1605,6 +1628,19 @@ public partial class MainWindow : Window
         var pathLine = output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).LastOrDefault(line => line.StartsWith("RDT_IMAGE_PATH ", StringComparison.Ordinal));
         var path = pathLine?.Substring("RDT_IMAGE_PATH ".Length).Trim() ?? "";
         if (!path.StartsWith("/", StringComparison.Ordinal)) throw new InvalidDataException("远端没有返回有效图片路径。");
+        return path;
+    }
+
+    private async Task<string> UploadFileBytesAsync(JsonObject host, byte[] bytes, string extension)
+    {
+        if (bytes.Length == 0 || bytes.Length > 20 * 1024 * 1024) throw new InvalidDataException("文件为空或超过 20 MB。");
+        var pathName = Guid.NewGuid().ToString("N") + extension;
+        var remote = "umask 077; dir=\"$HOME/.remote-dev-terminal/files\"; mkdir -p -- \"$dir\" || exit 1; tmp=\"$dir/." + pathName + ".tmp\"; target=\"$dir/" + pathName + "\"; cat > \"$tmp\" && mv -- \"$tmp\" \"$target\" && printf '\\nRDT_FILE_PATH %s\\n' \"$target\"";
+        var (exitCode, output, error) = await RunSshCommandAsync(host, remote, bytes, 60_000).ConfigureAwait(false);
+        if (exitCode != 0) throw new InvalidOperationException(error.Trim().Length > 0 ? error.Trim() : "远程文件上传失败。");
+        var pathLine = output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).LastOrDefault(line => line.StartsWith("RDT_FILE_PATH ", StringComparison.Ordinal));
+        var path = pathLine?.Substring("RDT_FILE_PATH ".Length).Trim() ?? "";
+        if (!path.StartsWith("/", StringComparison.Ordinal)) throw new InvalidDataException("远端没有返回有效文件路径。");
         return path;
     }
 
