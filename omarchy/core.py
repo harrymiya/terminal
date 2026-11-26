@@ -356,6 +356,54 @@ def clear_sync_password(username):
         pass
 
 
+def _agent_session_id_recovery_script():
+    return r'''import glob, json, os, re, sys
+kind, rdt_id, workspace = sys.argv[1:4]
+workspace = os.path.realpath(workspace) if workspace else ""
+ids = []
+if kind == "codex":
+    homes = [os.environ.get("CODEX_HOME", ""), os.path.expanduser("~/.codex")]
+    homes.extend(glob.glob(os.path.expanduser("~/.codex-*")))
+    for home in dict.fromkeys(os.path.realpath(os.path.expanduser(p)) for p in homes if p):
+        path = os.path.join(home, "session_index.jsonl")
+        try:
+            with open(path, encoding="utf-8") as handle:
+                for line in handle:
+                    try: row = json.loads(line)
+                    except (ValueError, TypeError): continue
+                    sid = str(row.get("id", "")).replace("-", "").lower()
+                    cwd = row.get("cwd") or row.get("project_root") or ""
+                    if re.fullmatch(r"[0-9a-f]{32}", sid) and workspace and cwd and os.path.realpath(cwd) == workspace:
+                        ids.append((str(row.get("updated_at", "")), sid))
+        except OSError: pass
+else:
+    roots = [os.environ.get("AGY_HOME", ""), os.path.expanduser("~/.gemini/antigravity-cli")]
+    roots.extend(glob.glob(os.path.expanduser("~/.gemini/antigravity*")))
+    for root in dict.fromkeys(os.path.realpath(os.path.expanduser(p)) for p in roots if p):
+        path = os.path.join(root, "conversation_summaries.db")
+        try:
+            import sqlite3
+            db = sqlite3.connect("file:" + path + "?mode=ro", uri=True, timeout=.2)
+            cols = {row[1] for row in db.execute("PRAGMA table_info(conversation_summaries)")}
+            idcol = next((c for c in ("conversation_id", "id") if c in cols), None)
+            wcol = next((c for c in ("workspace_uris", "workspace_uri", "workspace") if c in cols), None)
+            tcol = next((c for c in ("last_modified_time", "updated_at", "modified_at") if c in cols), None)
+            if idcol and wcol:
+                query = "SELECT " + idcol + "," + wcol + ("," + tcol if tcol else "") + " FROM conversation_summaries"
+                for row in db.execute(query):
+                    raw = row[1]
+                    try: raw = json.loads(raw)
+                    except (ValueError, TypeError): pass
+                    vals = raw if isinstance(raw, list) else [raw]
+                    paths = [v.get("uri", v.get("path", "")) if isinstance(v, dict) else v for v in vals]
+                    if workspace and any(os.path.realpath(str(v).replace("file://", "")) == workspace for v in paths):
+                        sid = str(row[0]).replace("-", "").lower()
+                        if re.fullmatch(r"[0-9a-f]{32}", sid): ids.append((str(row[2] if tcol else ""), sid))
+            db.close()
+        except Exception: pass
+if ids: print(sorted(ids)[-1][1], end="")'''
+
+
 def wrap_agent_command(session_id, agent):
     text = (agent or "").strip()
     if not text:
@@ -382,14 +430,19 @@ def wrap_agent_command(session_id, agent):
         search_roots = '"${CODEX_HOME:-$HOME/.codex}/sessions"'
         file_pattern = "'rollout-*.jsonl'"
         strip_suffix = ".jsonl"
+        title_kind = "codex"
     elif cmd_bin in ("agy", "antigravity") and (not rest or (rest[0] not in agy_subcommands and not any(t in ("-c", "--continue", "--conversation") or t.startswith("--conversation=") for t in rest))):
         resume_cmd = " ".join([shlex.quote(tokens[0]), "--conversation", '"$_rdt_id"', *[shlex.quote(t) for t in rest]])
         search_roots = '"${AGY_HOME:-$HOME/.gemini/antigravity-cli}/conversations" "$HOME/.agy-homes"'
         file_pattern = "'*.db'"
         strip_suffix = ".db"
+        title_kind = "agy"
     else:
         return agent
     sid = str(session_id).replace("-", "").lower()
+    recovery_script = base64.b64encode(_agent_session_id_recovery_script().encode("utf-8")).decode("ascii")
+    recovery_command = "import base64;exec(compile(base64.b64decode('" + recovery_script + "'),'<rdt-id-recovery>','exec'))"
+    recovery_argv = "python3 -c " + shlex.quote(recovery_command) + " " + shlex.quote(title_kind) + " " + shlex.quote(sid) + " \"$PWD\""
     return (
         f'_rdt_dir="$HOME/.remote-dev-terminal/agent-sessions"; '
         f'_rdt_f="$_rdt_dir/{sid}"; '
@@ -399,13 +452,17 @@ def wrap_agent_command(session_id, agent):
         f'{resume_cmd}; '
         f'else '
         f'_rdt_mark="$_rdt_dir/.mark_{sid}"; : > "$_rdt_mark"; '
+        f'_rdt_id=$({recovery_argv} 2>/dev/null); '
+        f'if [ -n "$_rdt_id" ]; then printf "%s" "$_rdt_id" > "$_rdt_f"; '
+        f'{resume_cmd}; '
+        f'else '
         f'(_i=0; while [ $_i -lt 120 ]; do sleep 1; '
         f'_rdt_n=$(find {search_roots} -maxdepth 4 -type f -name {file_pattern} -newer "$_rdt_mark" 2>/dev/null | head -n 1); '
         f'if [ -n "$_rdt_n" ]; then '
         f'_rdt_id=$(basename "$_rdt_n" {strip_suffix} | grep -oE "[0-9a-f]{{8}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{12}}" | tail -n 1); '
         f'if [ -n "$_rdt_id" ]; then printf "%s" "$_rdt_id" > "$_rdt_f"; break; fi; '
         f'fi; _i=$((_i + 1)); done; rm -f "$_rdt_mark") >/dev/null 2>&1 & '
-        f'{text}; fi'
+        f'{text}; fi; fi'
     )
 
 

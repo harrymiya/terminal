@@ -272,6 +272,30 @@ class SyncServerTest(unittest.TestCase):
                 db.execute("INSERT INTO threads VALUES (?, ?, ?, ?)", (session_id, "Stale SQLite title", "/work", 1))
                 legacy_thread_id = "f" * 32
                 db.execute("INSERT INTO threads VALUES (?, ?, ?, ?)", (legacy_thread_id, "Legacy title", "/work", 2))
+            recovery_session_id = "9" * 32
+            recovery_workspace = Path(temp_dir) / "workspace"
+            recovery_workspace.mkdir()
+            recovery_home = Path(temp_dir) / "recovery-codex"
+            recovery_home.mkdir()
+            (recovery_home / "session_index.jsonl").write_text(
+                json.dumps({"id": legacy_thread_id, "thread_name": "Existing workspace title", "cwd": str(recovery_workspace), "updated_at": "5"}) + "\n",
+                encoding="utf-8")
+            recovery_command = omarchy_core.wrap_agent_command(recovery_session_id, "codex")
+            capture_bin = Path(temp_dir) / "capture-bin"
+            capture_bin.mkdir()
+            fake_codex = capture_bin / "codex"
+            fake_codex.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$RDT_CAPTURE\"\n", encoding="utf-8")
+            fake_codex.chmod(0o700)
+            recovery_store = Path(temp_dir) / ".remote-dev-terminal/agent-sessions"
+            recovery_store.mkdir(parents=True, exist_ok=True)
+            recovery_env = {**os.environ, "CODEX_HOME": str(recovery_home), "HOME": temp_dir,
+                            "PATH": str(capture_bin) + os.pathsep + os.environ.get("PATH", ""),
+                            "RDT_CAPTURE": str(Path(temp_dir) / "capture.txt")}
+            result = subprocess.run(["bash", "-c", recovery_command], cwd=recovery_workspace, env=recovery_env,
+                                    text=True, capture_output=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("resume " + legacy_thread_id, (Path(temp_dir) / "capture.txt").read_text(encoding="utf-8"))
+            self.assertEqual((recovery_store / recovery_session_id).read_text(encoding="utf-8"), legacy_thread_id)
             (codex_home / "session_index.jsonl").write_text(
                 json.dumps({"id": session_id, "thread_name": "Old Codex title", "updated_at": "1"}) + "\n"
                 + json.dumps({"id": legacy_thread_id, "thread_name": "Recovered Codex title", "updated_at": "2"}) + "\n"
