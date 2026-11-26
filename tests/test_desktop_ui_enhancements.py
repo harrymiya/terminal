@@ -431,7 +431,8 @@ class DesktopThemeBuildTest(unittest.TestCase):
                     "session_id": "sess-1", "session_name": "Original Name",
                     "title_source": "default", "account": "",
                 }]
-                app.sync_operation_logs_async = lambda *args, **kwargs: None
+                history_sync_calls = []
+                app.sync_operation_logs_async = lambda *args, **kwargs: history_sync_calls.append(True)
 
                 # Agent titles update the instance and matching history rows, while defaults cannot overwrite them.
                 Path(sess["socket_path"]).touch()
@@ -448,6 +449,8 @@ class DesktopThemeBuildTest(unittest.TestCase):
                 self.assertEqual(sess["item"]["title_source"], "agent")
                 self.assertEqual(app.data["operation_logs"][0]["session_name"], "Agent Generated Title")
                 self.assertEqual(app.data["operation_logs"][0]["title_source"], "agent")
+                self.assertTrue(history_sync_calls)
+                history_sync_calls.clear()
                 self.assertFalse(app.agent_session_title_needs_sync(sess, agent_title))
                 app.set_session_name(sess, "Stale synchronized title", sync=False, title_source="agent")
                 self.assertTrue(app.agent_session_title_needs_sync(sess, agent_title))
@@ -514,6 +517,17 @@ class DesktopThemeBuildTest(unittest.TestCase):
                 tab_btn = rows[0].get_children()[0]
                 self.assertEqual(tab_btn.get_child().get_text(), "Remote Updated Name")
                 self.assertEqual(len(sync_calls), 0)
+
+                # A title change schedules history sync even before the matching log row is loaded.
+                app.data["operation_logs"] = []
+                unloaded_history_session = {
+                    "id": "session-without-local-history",
+                    "item": {"display_name": "Old title", "title_source": "agent"},
+                    "display_name": "Old title",
+                    "title_source": "agent",
+                }
+                app.set_session_name(unloaded_history_session, "Current title", sync=False, title_source="agent")
+                self.assertTrue(history_sync_calls)
             finally:
                 for session in app.sessions:
                     stop = session.get("title_watcher_stop")

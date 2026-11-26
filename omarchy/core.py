@@ -194,8 +194,49 @@ def merge_operation_logs(local_logs, remote_logs, limit=200, account=None):
             entry = dict(item)
             if target is not None:
                 entry["account"] = target
-            merged[str(entry["id"])] = entry
+            log_id = str(entry["id"])
+            current = merged.get(log_id)
+            current_updated = int(current.get("updated_at", current.get("created_at", 0))) if current else -1
+            entry_updated = int(entry.get("updated_at", entry.get("created_at", 0)))
+            if current is None or entry_updated >= current_updated:
+                merged[log_id] = entry
     return sorted(merged.values(), key=lambda x: int(x.get("created_at", 0)), reverse=True)[:limit]
+
+
+def apply_active_session_titles_to_operation_logs(logs, active_titles, account=None, now=None):
+    target_account = str(account).strip().casefold() if account is not None else None
+    titles = {}
+    for active in active_titles or []:
+        if not isinstance(active, dict):
+            continue
+        session_id = str(active.get("session_id", "")).replace("-", "").casefold()
+        session_name = str(active.get("session_name", "")).strip()
+        title_source = active.get("title_source", "default")
+        if session_id and session_name and title_source in ("agent", "manual"):
+            titles[session_id] = (session_name, title_source)
+
+    result = []
+    changed = []
+    current_time = int(now if now is not None else time.time() * 1000)
+    for item in logs or []:
+        if not isinstance(item, dict):
+            continue
+        entry = dict(item)
+        session_id = str(entry.get("session_id", "")).replace("-", "").casefold()
+        active_title = titles.get(session_id)
+        if active_title and (target_account is None or operation_log_account(entry) == target_account):
+            session_name, title_source = active_title
+            old_source = entry.get("title_source", "default")
+            # An agent title must never replace a name the user edited manually.
+            if not (title_source == "agent" and old_source == "manual") and (
+                    entry.get("session_name") != session_name or old_source != title_source):
+                previous_updated = int(entry.get("updated_at", entry.get("created_at", 0)))
+                entry["session_name"] = session_name
+                entry["title_source"] = title_source
+                entry["updated_at"] = max(current_time, previous_updated + 1)
+                changed.append(entry)
+        result.append(entry)
+    return result, changed
 
 
 def sync_operation_logs(config, local_logs=None, limit=200):

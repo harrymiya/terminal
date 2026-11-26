@@ -209,6 +209,43 @@ class SyncServerTest(unittest.TestCase):
         self.assertEqual([x["id"] for x in ubuntu_core.filter_operation_logs(merged, "alice")], [alice_log["id"]])
         self.assertEqual([x["id"] for x in ubuntu_core.filter_operation_logs(merged, "bob_logs")], [log2["id"]])
 
+        newer_local = {**alice_log, "updated_at": 30, "session_name": "Current title", "title_source": "agent"}
+        older_remote = {**alice_log, "updated_at": 20, "session_name": "Stale title", "title_source": "default"}
+        self.assertEqual(
+            ubuntu_core.merge_operation_logs([newer_local], [older_remote])[0]["session_name"],
+            "Current title",
+        )
+        synced, changed = ubuntu_core.apply_active_session_titles_to_operation_logs(
+            [older_remote],
+            [{"session_id": "-".join(("a" * 8, "a" * 8, "a" * 8, "a" * 8)),
+              "session_name": "Generated title", "title_source": "agent"}],
+            account="alice",
+            now=40,
+        )
+        self.assertEqual(synced[0]["session_name"], "Generated title")
+        self.assertEqual(synced[0]["title_source"], "agent")
+        self.assertEqual(synced[0]["updated_at"], 40)
+        self.assertEqual(len(changed), 1)
+
+        manually_named = {**older_remote, "session_name": "Manual title", "title_source": "manual"}
+        unchanged, changed = ubuntu_core.apply_active_session_titles_to_operation_logs(
+            [manually_named],
+            [{"session_id": "a" * 32, "session_name": "Generated title", "title_source": "agent"}],
+            account="alice",
+            now=50,
+        )
+        self.assertEqual(unchanged[0]["session_name"], "Manual title")
+        self.assertEqual(changed, [])
+        renamed, changed = ubuntu_core.apply_active_session_titles_to_operation_logs(
+            [manually_named],
+            [{"session_id": "a" * 32, "session_name": "Edited again", "title_source": "manual"}],
+            account="alice",
+            now=60,
+        )
+        self.assertEqual(renamed[0]["session_name"], "Edited again")
+        self.assertEqual(renamed[0]["title_source"], "manual")
+        self.assertEqual(len(changed), 1)
+
     def test_theme_preference_sync_per_user(self):
         status, bob_user = self.request("POST", "/v1/admin/users", {"username": "bob_theme", "password": "bob-password-1"})
         self.assertEqual(status, 201)

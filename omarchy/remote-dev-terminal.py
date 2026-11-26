@@ -20,7 +20,7 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("Vte", "2.91")
 gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Gtk, Vte, GLib, Gdk, GdkPixbuf, Pango
-from core import load_config, save_config, ssh_argv, close_remote_session_command, should_close_missing_shared_session, auto_enter_signature, confirmation_pending, AutoEnterController, quota_agent, quota_key, read_agent_quota, hourly_quota, upload_image, MAX_IMAGE_BYTES, sync_request, sync_data_request, sync_operation_logs, merge_operation_logs, filter_operation_logs, sync_host_key, legacy_sync_keys, ssh_address, ssh_port, ssh_host_fingerprint, sync_auth_request, save_sync_password, load_sync_password, clear_sync_password, render_battery_pixbuf, save_host_password, clear_host_password, ssh_auth_environment, agent_session_title_command
+from core import load_config, save_config, ssh_argv, close_remote_session_command, should_close_missing_shared_session, auto_enter_signature, confirmation_pending, AutoEnterController, quota_agent, quota_key, read_agent_quota, hourly_quota, upload_image, MAX_IMAGE_BYTES, sync_request, sync_data_request, sync_operation_logs, merge_operation_logs, filter_operation_logs, apply_active_session_titles_to_operation_logs, sync_host_key, legacy_sync_keys, ssh_address, ssh_port, ssh_host_fingerprint, sync_auth_request, save_sync_password, load_sync_password, clear_sync_password, render_battery_pixbuf, save_host_password, clear_host_password, ssh_auth_environment, agent_session_title_command
 from version import VERSION
 from host_metrics import metrics_key, read_host_metrics
 from mcp_server import EmbeddedMCPServer
@@ -2535,6 +2535,7 @@ class App(Gtk.Window):
                     GLib.idle_add(self.apply_agent_session_title, session, title)
                 elif title:
                     self.set_agent_title_sync_status(session, "已同步")
+                    GLib.idle_add(self.sync_active_session_history, session)
                 stop.wait(3)
 
         thread = threading.Thread(target=watch, daemon=True)
@@ -2555,6 +2556,17 @@ class App(Gtk.Window):
             self.set_session_name(session, title, sync=True, title_source="agent")
         return False
 
+    def sync_active_session_history(self, _session=None, force=False):
+        if self.is_offline_mode() or not self.data.get("sync_url") or not self.data.get("sync_token"):
+            return False
+        now = time.monotonic()
+        last_sync = getattr(self, "operation_logs_title_sync_at", 0)
+        if not force and now - last_sync < 15:
+            return False
+        self.operation_logs_title_sync_at = now
+        self.sync_operation_logs_async()
+        return False
+
     def set_session_name(self, session, new_name, sync=True, title_source="manual"):
         new_name = " ".join(re.sub(r"[\x00-\x1f\x7f]", " ", str(new_name)).split())[:512]
         if not new_name:
@@ -2572,6 +2584,7 @@ class App(Gtk.Window):
         logs_to_update = [entry for entry in self.data.get("operation_logs", [])
                           if session_id and isinstance(entry, dict)
                           and str(entry.get("session_id", "")).replace("-", "").casefold() == session_id
+                          and not (title_source == "agent" and entry.get("title_source", "default") == "manual")
                           and (entry.get("session_name") != new_name or entry.get("title_source", "default") != title_source)]
         if not name_changed and not source_changed and not logs_to_update:
             return
@@ -2611,8 +2624,9 @@ class App(Gtk.Window):
             render_logs = getattr(self, "operation_logs_render", None)
             if callable(render_logs):
                 render_logs()
-            if not self.is_offline_mode() and self.data.get("sync_url") and self.data.get("sync_token"):
-                self.sync_operation_logs_async()
+
+        if name_changed or source_changed or logs_to_update:
+            self.sync_active_session_history(session, force=True)
 
         if sync and (name_changed or source_changed) and session.get("host") and session.get("id"):
             key = self.shared_host_key(self.canonical_session_host(session["host"]))
@@ -4752,6 +4766,9 @@ class App(Gtk.Window):
     def _apply_merged_operation_logs(self, merged):
         self.data["operation_logs"] = merge_operation_logs(self.data.get("operation_logs", []), merged, limit=500)
         save_config(self.data)
+        render_logs = getattr(self, "operation_logs_render", None)
+        if callable(render_logs):
+            render_logs()
         return False
 
     def sync_operation_logs_async(self, on_done=None):
@@ -4761,10 +4778,24 @@ class App(Gtk.Window):
             return
         snapshot = dict(self.data)
         local_logs = filter_operation_logs(self.data.get("operation_logs", []), snapshot.get("sync_username", ""))
+        active_titles = []
+        for session in getattr(self, "sessions", []):
+            item = session.get("item") if isinstance(session.get("item"), dict) else {}
+            active_titles.append({
+                "session_id": session.get("id", ""),
+                "session_name": item.get("display_name") or session.get("display_name", ""),
+                "title_source": session.get("title_source", item.get("title_source", "default")),
+            })
         def worker():
             err = None
             try:
                 merged = sync_operation_logs(snapshot, local_logs)
+                merged, changed = apply_active_session_titles_to_operation_logs(
+                    merged, active_titles, account=snapshot.get("sync_username", ""))
+                for start in range(0, len(changed), 50):
+                    response = sync_data_request(snapshot, "POST", "/v1/operation-logs", {"logs": changed[start:start + 50]})
+                    merged = merge_operation_logs(merged, response.get("logs", []), limit=500,
+                                                  account=snapshot.get("sync_username", ""))
                 GLib.idle_add(self._apply_merged_operation_logs, merged)
             except Exception as exc:
                 err = str(exc)
