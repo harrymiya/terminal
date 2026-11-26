@@ -409,6 +409,58 @@ def wrap_agent_command(session_id, agent):
     )
 
 
+def agent_session_title_command(session_id, kind):
+    if kind not in ("codex", "agy"):
+        raise ValueError("unsupported agent title source")
+    sid = re.sub(r"[^0-9a-f]", "", str(session_id).replace("-", "").lower())
+    if not sid:
+        raise ValueError("invalid session ID")
+    script = r'''import glob, os, sqlite3, sys
+from urllib.parse import quote
+kind, rdt_session_id = sys.argv[1:3]
+session_file = os.path.join(os.path.expanduser("~"), ".remote-dev-terminal", "agent-sessions", rdt_session_id)
+try:
+    wanted = open(session_file, encoding="utf-8").read().strip().replace("-", "").lower()
+except OSError:
+    raise SystemExit(0)
+if not wanted:
+    raise SystemExit(0)
+def clean(value):
+    return " ".join(str(value or "").replace("\x00", " ").split())[:512]
+if kind == "codex":
+    home = os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex")
+    paths = glob.glob(os.path.join(home, "state_*.sqlite"))
+    paths += glob.glob(os.path.join(home, "sqlite", "state_*.sqlite"))
+    paths += [os.path.join(home, "state.sqlite")]
+else:
+    home = os.environ.get("AGY_HOME") or os.path.expanduser("~/.gemini/antigravity-cli")
+    paths = [os.path.join(home, "conversation_summaries.db")]
+for path in sorted(set(paths), key=lambda item: os.path.getmtime(item) if os.path.exists(item) else 0, reverse=True):
+    if not os.path.isfile(path):
+        continue
+    try:
+        uri = "file:" + quote(os.path.abspath(path), safe="/") + "?mode=ro"
+        db = sqlite3.connect(uri, uri=True, timeout=0.2)
+        db.execute("PRAGMA busy_timeout=200")
+        table = "threads" if kind == "codex" else "conversation_summaries"
+        columns = {row[1] for row in db.execute("PRAGMA table_info(" + table + ")")}
+        id_col = next((name for name in (("id", "thread_id") if kind == "codex" else ("conversation_id", "id")) if name in columns), None)
+        title_col = next((name for name in (("title", "name") if kind == "codex" else ("title", "conversation_title")) if name in columns), None)
+        if id_col and title_col:
+            query = "SELECT " + title_col + " FROM " + table + " WHERE lower(replace(" + id_col + ", '-', '')) = lower(replace(?, '-', '')) LIMIT 1"
+            row = db.execute(query, (wanted,)).fetchone()
+            title = clean(row[0]) if row else ""
+            db.close()
+            if title:
+                print("RDT_TITLE:" + title, end="")
+                break
+        else:
+            db.close()
+    except Exception:
+        pass'''
+    return f"python3 - {shlex.quote(kind)} {shlex.quote(sid)} <<'RDT_PY' 2>/dev/null\n{script}\nRDT_PY"
+
+
 def ssh_argv(host, directory, agent, session_id=None, control_path=None, restore_only=False):
     session_id = session_id or uuid.uuid4().hex
     if not session_id or any(c not in "0123456789abcdef" for c in session_id):

@@ -2,10 +2,13 @@ import http.client
 import importlib.util
 import json
 import os
-from pathlib import Path
+import shlex
+import sqlite3
+import subprocess
 import tempfile
 import threading
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location("sync_server", Path(__file__).resolve().parents[1] / "backend/server.py")
@@ -236,6 +239,9 @@ class SyncServerTest(unittest.TestCase):
         from pathlib import Path
         sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ubuntu"))
         import core as ubuntu_core
+        omarchy_spec = importlib.util.spec_from_file_location("omarchy_core", Path(__file__).resolve().parents[1] / "omarchy/core.py")
+        omarchy_core = importlib.util.module_from_spec(omarchy_spec)
+        omarchy_spec.loader.exec_module(omarchy_core)
 
         wrapped_codex = ubuntu_core.wrap_agent_command("a" * 32, "codex --dangerously-bypass-approvals-and-sandbox")
         self.assertIn("codex resume \"$_rdt_id\" --dangerously-bypass-approvals-and-sandbox", wrapped_codex)
@@ -247,6 +253,46 @@ class SyncServerTest(unittest.TestCase):
 
         self.assertEqual(ubuntu_core.wrap_agent_command("c" * 32, "bash -l"), "bash -l")
         self.assertEqual(ubuntu_core.wrap_agent_command("d" * 32, "codex resume 1234"), "codex resume 1234")
+
+        wrapped_omarchy_codex = omarchy_core.wrap_agent_command("e" * 32, "codex")
+        wrapped_omarchy_agy = omarchy_core.wrap_agent_command("f" * 32, "agy")
+        self.assertIn("codex resume", wrapped_omarchy_codex)
+        self.assertIn("agy --conversation", wrapped_omarchy_agy)
+        for wrapped in (wrapped_omarchy_codex, wrapped_omarchy_agy):
+            result = subprocess.run(["bash", "-n"], input=wrapped, text=True, capture_output=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_id = "e" * 32
+            session_store = Path(temp_dir) / ".remote-dev-terminal/agent-sessions"
+            session_store.mkdir(parents=True)
+            (session_store / session_id).write_text(session_id, encoding="utf-8")
+            codex_home = Path(temp_dir) / "codex"
+            codex_home.mkdir()
+            with sqlite3.connect(codex_home / "state_5.sqlite") as db:
+                db.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, title TEXT)")
+                db.execute("INSERT INTO threads VALUES (?, ?)", (session_id, "Codex title from DB"))
+            codex_env = {**os.environ, "CODEX_HOME": str(codex_home)}
+            codex_env["HOME"] = temp_dir
+            codex_command = omarchy_core.agent_session_title_command(session_id, "codex")
+            codex_remote = f'"${{SHELL:-/bin/bash}}" -l -c {shlex.quote(codex_command)}'
+            result = subprocess.run(["bash", "-c", codex_remote],
+                                    env=codex_env, text=True, capture_output=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "RDT_TITLE:Codex title from DB")
+
+            agy_home = Path(temp_dir) / "agy"
+            agy_home.mkdir()
+            with sqlite3.connect(agy_home / "conversation_summaries.db") as db:
+                db.execute("CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, title TEXT)")
+                db.execute("INSERT INTO conversation_summaries VALUES (?, ?)", (session_id, "AGY title from DB"))
+            agy_env = {**os.environ, "AGY_HOME": str(agy_home)}
+            agy_env["HOME"] = temp_dir
+            agy_command = omarchy_core.agent_session_title_command(session_id, "agy")
+            agy_remote = f'"${{SHELL:-/bin/bash}}" -l -c {shlex.quote(agy_command)}'
+            result = subprocess.run(["bash", "-c", agy_remote],
+                                    env=agy_env, text=True, capture_output=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "RDT_TITLE:AGY title from DB")
 
 
 if __name__ == "__main__":

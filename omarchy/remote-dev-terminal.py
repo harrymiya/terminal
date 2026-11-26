@@ -20,7 +20,7 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("Vte", "2.91")
 gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Gtk, Vte, GLib, Gdk, GdkPixbuf, Pango
-from core import load_config, save_config, ssh_argv, close_remote_session_command, should_close_missing_shared_session, auto_enter_signature, confirmation_pending, AutoEnterController, quota_agent, quota_key, read_agent_quota, hourly_quota, upload_image, MAX_IMAGE_BYTES, sync_request, sync_data_request, sync_operation_logs, merge_operation_logs, filter_operation_logs, sync_host_key, legacy_sync_keys, ssh_address, ssh_port, ssh_host_fingerprint, sync_auth_request, save_sync_password, load_sync_password, clear_sync_password, render_battery_pixbuf, save_host_password, clear_host_password, ssh_auth_environment
+from core import load_config, save_config, ssh_argv, close_remote_session_command, should_close_missing_shared_session, auto_enter_signature, confirmation_pending, AutoEnterController, quota_agent, quota_key, read_agent_quota, hourly_quota, upload_image, MAX_IMAGE_BYTES, sync_request, sync_data_request, sync_operation_logs, merge_operation_logs, filter_operation_logs, sync_host_key, legacy_sync_keys, ssh_address, ssh_port, ssh_host_fingerprint, sync_auth_request, save_sync_password, load_sync_password, clear_sync_password, render_battery_pixbuf, save_host_password, clear_host_password, ssh_auth_environment, agent_session_title_command
 from version import VERSION
 from host_metrics import metrics_key, read_host_metrics
 from mcp_server import EmbeddedMCPServer
@@ -2437,38 +2437,117 @@ class App(Gtk.Window):
         if response == Gtk.ResponseType.OK and new_name and new_name != current_name:
             self.set_session_name(session, new_name, sync=True)
 
-    def set_session_name(self, session, new_name, sync=True):
-        new_name = str(new_name).strip()
+    def read_agent_session_title(self, session, kind):
+        if kind not in ("codex", "agy"):
+            return ""
+        socket_path = session.get("socket_path", "")
+        host = session.get("host", {})
+        address = ssh_address(host)
+        port = ssh_port(host)
+        if (not socket_path or not os.path.exists(socket_path) or not address or not port
+                or session.get("state", {}).get("closed")):
+            return ""
+        remote = agent_session_title_command(session.get("id", ""), kind)
+        remote = f'"${{SHELL:-/bin/bash}}" -l -c {shlex.quote(remote)}'
+        argv = ["ssh", "-S", socket_path, "-o", "ControlMaster=no", "-o", "BatchMode=yes",
+                "-o", "ConnectTimeout=3", "-p", str(port), "-l", host["username"], "--", address, remote]
+        try:
+            result = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                    stderr=subprocess.DEVNULL, text=True, timeout=8)
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        if result.returncode != 0:
+            return ""
+        return next((line[len("RDT_TITLE:"):].strip()
+                     for line in reversed(result.stdout.splitlines()) if line.startswith("RDT_TITLE:")), "")
+
+    def watch_agent_session_title(self, session, kind):
+        stop = threading.Event()
+        session["title_watcher_stop"] = stop
+
+        def watch():
+            last_title = ""
+            while not stop.is_set() and not session.get("state", {}).get("closed"):
+                title = self.read_agent_session_title(session, kind)
+                if title and title != last_title:
+                    last_title = title
+                    GLib.idle_add(self.apply_agent_session_title, session, title)
+                stop.wait(3)
+
+        thread = threading.Thread(target=watch, daemon=True)
+        session["title_watcher_thread"] = thread
+        thread.start()
+
+    def apply_agent_session_title(self, session, title):
+        if not session.get("state", {}).get("closed"):
+            self.set_session_name(session, title, sync=True, title_source="agent")
+        return False
+
+    def set_session_name(self, session, new_name, sync=True, title_source="manual"):
+        new_name = " ".join(re.sub(r"[\x00-\x1f\x7f]", " ", str(new_name)).split())[:512]
         if not new_name:
+            return
+        if title_source not in ("default", "agent", "manual"):
+            title_source = "default"
+        item = session.get("item") if isinstance(session.get("item"), dict) else {}
+        current_source = session.get("title_source", item.get("title_source", "default"))
+        if (current_source == "manual" and title_source != "manual") or (
+                current_source == "agent" and title_source == "default"):
+            return
+        name_changed = new_name != item.get("display_name")
+        source_changed = title_source != current_source
+        session_id = str(session.get("id", "")).replace("-", "").casefold()
+        logs_to_update = [entry for entry in self.data.get("operation_logs", [])
+                          if session_id and isinstance(entry, dict)
+                          and str(entry.get("session_id", "")).replace("-", "").casefold() == session_id
+                          and (entry.get("session_name") != new_name or entry.get("title_source", "default") != title_source)]
+        if not name_changed and not source_changed and not logs_to_update:
             return
         if "item" not in session or not isinstance(session["item"], dict):
             session["item"] = {}
         session["item"]["display_name"] = new_name
+        session["item"]["title_source"] = title_source
         session["display_name"] = new_name
+        session["title_source"] = title_source
 
-        session_title = session.get("session_title")
-        if session_title is not None and hasattr(session_title, "set_text"):
-            session_title.set_text(new_name)
-            if hasattr(session_title, "set_tooltip_text"):
-                session_title.set_tooltip_text(new_name)
+        if name_changed:
+            session_title = session.get("session_title")
+            if session_title is not None and hasattr(session_title, "set_text"):
+                session_title.set_text(new_name)
+                if hasattr(session_title, "set_tooltip_text"):
+                    session_title.set_tooltip_text(new_name)
 
-        minimized_label = session.get("minimized_label")
-        if minimized_label is not None and hasattr(minimized_label, "set_text"):
-            minimized_label.set_text(new_name)
-            if hasattr(minimized_label, "set_tooltip_text"):
-                minimized_label.set_tooltip_text(new_name)
-        if session.get("minimized_button") is not None and hasattr(session["minimized_button"], "set_tooltip_text"):
-            session["minimized_button"].set_tooltip_text(new_name)
+            minimized_label = session.get("minimized_label")
+            if minimized_label is not None and hasattr(minimized_label, "set_text"):
+                minimized_label.set_text(new_name)
+                if hasattr(minimized_label, "set_tooltip_text"):
+                    minimized_label.set_tooltip_text(new_name)
+            if session.get("minimized_button") is not None and hasattr(session["minimized_button"], "set_tooltip_text"):
+                session["minimized_button"].set_tooltip_text(new_name)
 
-        if not self.tiled:
-            self.update_tab_header(self.tabs.get_nth_page(self.tabs.get_current_page()))
-        self.rebuild_instances_sidebar()
+            if not self.tiled:
+                self.update_tab_header(self.tabs.get_nth_page(self.tabs.get_current_page()))
+            self.rebuild_instances_sidebar()
 
-        if sync and session.get("host") and session.get("id"):
+        if logs_to_update:
+            updated_at = int(time.time() * 1000)
+            for entry in logs_to_update:
+                entry["session_name"] = new_name
+                entry["title_source"] = title_source
+                entry["updated_at"] = updated_at
+            self.persist()
+            render_logs = getattr(self, "operation_logs_render", None)
+            if callable(render_logs):
+                render_logs()
+            if not self.is_offline_mode() and self.data.get("sync_url") and self.data.get("sync_token"):
+                self.sync_operation_logs_async()
+
+        if sync and (name_changed or source_changed) and session.get("host") and session.get("id"):
             key = self.shared_host_key(self.canonical_session_host(session["host"]))
             for item in self.shared_by_host.get(key, []):
                 if item.get("id") == session["id"]:
                     item["display_name"] = new_name
+                    item["title_source"] = title_source
             self.sync_async(session["host"], "PUT", session["id"], session["item"])
 
     def activate_instance_tab(self, _button, terminal):
@@ -3913,8 +3992,11 @@ class App(Gtk.Window):
                                 if matching_item and matching_item.get("id"):
                                     session["id"] = matching_item["id"]
                                     remote_name = session_display_name(matching_item, session.get("agent"))
-                                    if remote_name and remote_name != (session.get("item") or {}).get("display_name"):
-                                        self.set_session_name(session, remote_name, sync=False)
+                                    remote_source = matching_item.get("title_source", "default")
+                                    current_item = session.get("item") or {}
+                                    if remote_name and (remote_name != current_item.get("display_name")
+                                                        or remote_source != session.get("title_source", current_item.get("title_source", "default"))):
+                                        self.set_session_name(session, remote_name, sync=False, title_source=remote_source)
                                 elif should_close_missing_shared_session(session, remote_ids):
                                     state = session.get("state")
                                     if isinstance(state, dict):
@@ -4559,11 +4641,13 @@ class App(Gtk.Window):
             GLib.idle_add(show)
         self.sync_executor.submit(worker)
 
-    def record_operation_log(self, host, directory, agent, session_id, display_name, action="open"):
+    def record_operation_log(self, host, directory, agent, session_id, display_name, action="open", title_source="default"):
         account = str(self.data.get("sync_username", "")).strip().casefold()
+        created_at = int(time.time() * 1000)
         entry = {
             "id": uuid.uuid4().hex,
-            "created_at": int(time.time() * 1000),
+            "created_at": created_at,
+            "updated_at": created_at,
             "account": account,
             "host_id": str(host.get("id", "")),
             "host_name": str(host.get("name", "")),
@@ -4577,6 +4661,7 @@ class App(Gtk.Window):
             "agent_icon": str(agent.get("icon", "")),
             "session_id": str(session_id),
             "session_name": str(display_name),
+            "title_source": title_source,
             "client": "omarchy",
             "action": action,
         }
@@ -4657,6 +4742,7 @@ class App(Gtk.Window):
             "agent_name": entry.get("agent_name") or entry.get("agent_command", ""),
             "agent_command": entry.get("agent_command", ""),
             "display_name": entry.get("session_name") or f"{entry.get('agent_name', '')} · {entry.get('directory_name', '')}",
+            "title_source": entry.get("title_source", "default"),
         }
         self.open_terminal(None, shared_host=host, shared_item=item, activate=True, attach_or_create=True, log_action="resume")
 
@@ -4718,7 +4804,7 @@ class App(Gtk.Window):
                     status_text = " · ● 已打开" if is_open else ""
                     top_lbl = Gtk.Label(label=f"[{ts}] [{client}] {action_label}{status_text}", xalign=0)
                     top_lbl.get_style_context().add_class("subtitle")
-                    main_lbl = Gtk.Label(label=f"{entry.get('agent_name') or entry.get('agent_command', '')} · {entry.get('directory_name') or entry.get('directory_path', '')}", xalign=0)
+                    main_lbl = Gtk.Label(label=entry.get("session_name") or f"{entry.get('agent_name') or entry.get('agent_command', '')} · {entry.get('directory_name') or entry.get('directory_path', '')}", xalign=0)
                     main_lbl.set_ellipsize(Pango.EllipsizeMode.END)
                     sub_lbl = Gtk.Label(label=f"主机: {entry.get('host_name', '')} · 目录: {entry.get('directory_path', '')} · 会话: {entry.get('session_name') or entry.get('session_id', '')[:12]}", xalign=0)
                     sub_lbl.get_style_context().add_class("subtitle")
@@ -4739,6 +4825,12 @@ class App(Gtk.Window):
                     card.pack_start(restore_btn, False, False, 0)
                     list_box.pack_start(card, False, False, 0)
             list_box.show_all()
+
+        self.operation_logs_render = render_rows
+        def clear_operation_logs_renderer(*_):
+            if getattr(self, "operation_logs_render", None) is render_rows:
+                self.operation_logs_render = None
+        dialog.connect("destroy", clear_operation_logs_renderer)
 
         def on_refresh(_btn):
             refresh_btn.set_sensitive(False)
@@ -4794,11 +4886,14 @@ class App(Gtk.Window):
         session_id = shared_item["id"] if shared_item else uuid.uuid4().hex
         argv, _ = ssh_argv(host, directory["path"], agent["command"], session_id=session_id, control_path=socket_path, restore_only=(shared_item is not None and not attach_or_create))
         display_name = session_display_name(shared_item, agent) if shared_item else f"{agent['name']} · {directory['name']}"
+        title_source = shared_item.get("title_source", "default") if shared_item else "default"
         item = {"id": session_id, "directory_path": directory["path"], "directory_name": directory["name"],
-                "agent_name": agent["name"], "agent_command": agent["command"], "display_name": display_name}
+                "agent_name": agent["name"], "agent_command": agent["command"], "display_name": display_name,
+                "title_source": title_source}
         if not shared_item or attach_or_create:
             self.sync_async(host, "PUT", session_id, item)
-            self.record_operation_log(host, directory, agent, session_id, display_name, action=log_action)
+            self.record_operation_log(host, directory, agent, session_id, display_name,
+                                      action=log_action, title_source=title_source)
         terminal = Vte.Terminal()
         self.apply_terminal_theme(terminal)
         def copy_selection(widget):
@@ -4916,6 +5011,9 @@ class App(Gtk.Window):
         image_button.connect("clicked", lambda *_: self.send_image_dialog(host, socket_path, terminal, state))
         def close_tab(*_):
             state["closed"] = True
+            title_stop = session.get("title_watcher_stop")
+            if title_stop is not None:
+                title_stop.set()
             if not state.get("closed_by_sync"):
                 self.sync_async(host, "DELETE", session_id)
             if state["watchdog_timer"]:
@@ -4966,7 +5064,7 @@ class App(Gtk.Window):
         session = {"terminal": terminal, "label": label, "key": key, "id": session_id, "host": host, "state": state,
                    "agent": dict(session_agent), "title_icon": title_icon,
                    "item": item, "socket_path": socket_path, "close_button": close, "image_button": image_button,
-                   "edit_button": edit_button, "session_title": session_title,
+                   "edit_button": edit_button, "session_title": session_title, "title_source": title_source,
                    "started_at": time.monotonic(),
                    "quota_indicators": (hourly_img, weekly_img) if kind else (),
                    "quota_snapshot": None,
@@ -4978,6 +5076,8 @@ class App(Gtk.Window):
         float_button.connect("clicked", lambda *_: self.toggle_floating_session(session))
         edit_button.connect("clicked", lambda *_: self.prompt_edit_session_name(session))
         self.sessions.append(session)
+        if kind in ("codex", "agy"):
+            self.watch_agent_session_title(session, kind)
         if activate:
             self.set_active_terminal(terminal)
         self.rebuild_view(selected=terminal if activate else None)

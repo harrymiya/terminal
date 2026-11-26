@@ -2,6 +2,7 @@ import importlib
 from pathlib import Path
 import sys
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -425,12 +426,36 @@ class DesktopThemeBuildTest(unittest.TestCase):
                 self.assertIn("session_title", sess)
                 self.assertEqual(sess["session_title"].get_text(), "Original Name")
                 self.assertEqual(sess["edit_button"].get_tooltip_text(), "编辑实例名称")
+                app.data["operation_logs"] = [{
+                    "id": "log-1", "created_at": 1, "updated_at": 1,
+                    "session_id": "sess-1", "session_name": "Original Name",
+                    "title_source": "default", "account": "",
+                }]
+                app.sync_operation_logs_async = lambda *args, **kwargs: None
+
+                # Agent titles update the instance and matching history rows, while defaults cannot overwrite them.
+                Path(sess["socket_path"]).touch()
+                with patch.object(mod.subprocess, "run", return_value=SimpleNamespace(
+                        returncode=0, stdout="login notice\nRDT_TITLE:Agent Generated Title\n")) as ssh_run:
+                    agent_title = app.read_agent_session_title(sess, "codex")
+                self.assertEqual(agent_title, "Agent Generated Title")
+                self.assertIn(sess["socket_path"], ssh_run.call_args.args[0])
+                app.apply_agent_session_title(sess, agent_title)
+                self.assertEqual(sess["session_title"].get_text(), "Agent Generated Title")
+                self.assertEqual(sess["item"]["title_source"], "agent")
+                self.assertEqual(app.data["operation_logs"][0]["session_name"], "Agent Generated Title")
+                self.assertEqual(app.data["operation_logs"][0]["title_source"], "agent")
+                app.set_session_name(sess, "Stale Default Name", sync=False, title_source="default")
+                self.assertEqual(sess["session_title"].get_text(), "Agent Generated Title")
 
                 # Test set_session_name updates label and syncs PUT
                 app.set_session_name(sess, "Renamed Instance", sync=True)
                 self.assertEqual(sess["session_title"].get_text(), "Renamed Instance")
                 self.assertEqual(sess["item"]["display_name"], "Renamed Instance")
+                self.assertEqual(sess["item"]["title_source"], "manual")
                 self.assertEqual(sess["display_name"], "Renamed Instance")
+                self.assertEqual(app.data["operation_logs"][0]["session_name"], "Renamed Instance")
+                self.assertEqual(app.data["operation_logs"][0]["title_source"], "manual")
                 self.assertTrue(any(call[0] == "PUT" and call[1] == "sess-1" and call[2]["display_name"] == "Renamed Instance" for call in sync_calls))
 
                 # 2. Tab mode keeps only close in the instance row; header owns the other actions.
@@ -460,7 +485,7 @@ class DesktopThemeBuildTest(unittest.TestCase):
                 matching = remote_sessions[0]
                 remote_name = matching.get("display_name")
                 if remote_name and remote_name != sess.get("item", {}).get("display_name"):
-                    app.set_session_name(sess, remote_name, sync=False)
+                    app.set_session_name(sess, remote_name, sync=False, title_source="manual")
                 self.assertEqual(sess["session_title"].get_text(), "Remote Updated Name")
                 self.assertEqual(sess["item"]["display_name"], "Remote Updated Name")
                 rows = app.instances_list.get_children()
@@ -469,6 +494,10 @@ class DesktopThemeBuildTest(unittest.TestCase):
                 self.assertEqual(tab_btn.get_child().get_text(), "Remote Updated Name")
                 self.assertEqual(len(sync_calls), 0)
             finally:
+                for session in app.sessions:
+                    stop = session.get("title_watcher_stop")
+                    if stop is not None:
+                        stop.set()
                 app.sessions = []
                 app.sync_executor.shutdown(wait=True)
                 app.disconnect_by_func(mod.Gtk.main_quit)
