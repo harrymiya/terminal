@@ -15,6 +15,7 @@ from urllib.parse import parse_qsl, urlsplit
 
 MAX_BODY = 65536
 FIELDS = ("id", "directory_path", "directory_name", "agent_name", "agent_command", "display_name")
+OPTIONAL_SESSION_FIELDS = ("title_source",)
 WORKSPACE_FIELDS = ("id", "name", "path", "icon")
 AGENT_FIELDS = ("id", "name", "command", "icon")
 
@@ -452,9 +453,13 @@ def create_server(address, database, token=None):
                         created_at = int(entry.get("created_at", 0))
                         if created_at <= 0:
                             created_at = int(time.time() * 1000)
+                        updated_at = int(entry.get("updated_at", created_at))
+                        if updated_at <= 0:
+                            updated_at = created_at
                         clean = {
                             "id": log_id,
                             "created_at": created_at,
+                            "updated_at": updated_at,
                             "host_id": str(entry.get("host_id", ""))[:256],
                             "host_name": str(entry.get("host_name", ""))[:256],
                             "ssh_username": str(entry.get("ssh_username", ""))[:256],
@@ -467,6 +472,7 @@ def create_server(address, database, token=None):
                             "agent_icon": str(entry.get("agent_icon", ""))[:128],
                             "session_id": str(entry.get("session_id", ""))[:256],
                             "session_name": str(entry.get("session_name", ""))[:512],
+                            "title_source": entry.get("title_source") if isinstance(entry.get("title_source"), str) and entry.get("title_source") in {"default", "agent", "manual"} else "default",
                             "client": str(entry.get("client", ""))[:64],
                             "action": str(entry.get("action", "open"))[:64] or "open",
                         }
@@ -476,9 +482,22 @@ def create_server(address, database, token=None):
                 except (ValueError, TypeError, UnicodeDecodeError, json.JSONDecodeError):
                     return self.reply(400, {"error": "invalid operation log"})
                 with sqlite3.connect(database) as db:
+                    db.execute("BEGIN IMMEDIATE")
                     for item in normalized:
+                        existing = db.execute(
+                            "SELECT payload FROM account_operation_logs WHERE user_id = ? AND id = ?",
+                            (self.user_id, item["id"]),
+                        ).fetchone()
+                        if existing:
+                            try:
+                                old = json.loads(existing[0])
+                                if int(old.get("updated_at", old.get("created_at", 0))) > item["updated_at"]:
+                                    continue
+                            except (TypeError, ValueError, json.JSONDecodeError):
+                                pass
                         db.execute(
-                            "INSERT OR IGNORE INTO account_operation_logs(user_id, id, created_at, payload) VALUES (?, ?, ?, ?)",
+                            "INSERT INTO account_operation_logs(user_id, id, created_at, payload) VALUES (?, ?, ?, ?) "
+                            "ON CONFLICT(user_id, id) DO UPDATE SET created_at=excluded.created_at, payload=excluded.payload",
                             (self.user_id, item["id"], item["created_at"], json.dumps(item, ensure_ascii=False)),
                         )
                     db.execute(
@@ -673,10 +692,16 @@ def create_server(address, database, token=None):
                     if length < 0 or length > MAX_BODY:
                         raise ValueError()
                     item = json.loads(self.rfile.read(length))
-                    if not isinstance(item, dict) or set(item) != set(FIELDS) or item["id"] != session_id:
+                    if (not isinstance(item, dict) or not set(FIELDS).issubset(item)
+                            or set(item) - set(FIELDS) - set(OPTIONAL_SESSION_FIELDS)
+                            or item["id"] != session_id):
                         raise ValueError()
                     if any(not isinstance(item[field], str) or not item[field] or len(item[field]) > 4096 for field in FIELDS):
                         raise ValueError()
+                    title_source = item.get("title_source", "default")
+                    if not isinstance(title_source, str) or title_source not in {"default", "agent", "manual"}:
+                        raise ValueError()
+                    item["title_source"] = title_source
                 except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
                     return self.reply(400, {"error": "invalid session"})
                 with sqlite3.connect(database) as db:
@@ -802,10 +827,16 @@ def create_server(address, database, token=None):
                 if length < 0 or length > MAX_BODY:
                     raise ValueError()
                 item = json.loads(self.rfile.read(length))
-                if not isinstance(item, dict) or set(item) != set(FIELDS) or item["id"] != session_id:
+                if (not isinstance(item, dict) or not set(FIELDS).issubset(item)
+                        or set(item) - set(FIELDS) - set(OPTIONAL_SESSION_FIELDS)
+                        or item["id"] != session_id):
                     raise ValueError()
                 if any(not isinstance(item[field], str) or not item[field] or len(item[field]) > 4096 for field in FIELDS):
                     raise ValueError()
+                title_source = item.get("title_source", "default")
+                if not isinstance(title_source, str) or title_source not in {"default", "agent", "manual"}:
+                    raise ValueError()
+                item["title_source"] = title_source
             except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
                 return self.reply(400, {"error": "invalid session"})
             with sqlite3.connect(database) as db:

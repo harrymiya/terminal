@@ -45,7 +45,7 @@ export function groupSessionsByDeveloper(sessions) {
   return [...groups].map(([key, groupedSessions]) => ({ key, sessions: groupedSessions }));
 }
 
-export function buildSessionSyncItem({ id, workspace, agent, title }) {
+export function buildSessionSyncItem({ id, workspace, agent, title, titleSource = 'default' }) {
   const normalizedId = normalizeSessionId(id);
   const directoryPath = String(workspace?.path ?? '');
   const directoryName = String(workspace?.name || directoryPath);
@@ -59,6 +59,7 @@ export function buildSessionSyncItem({ id, workspace, agent, title }) {
     agent_name: agentName,
     agent_command: agentCommand,
     display_name: displayName,
+    title_source: titleSource,
   };
 }
 
@@ -173,18 +174,26 @@ export function planSyncedSessionChanges({
 
     if (matched) {
       const nextRemoteId = normalizeSessionId(matched.id) || sessionRemoteId;
+      const keepLocalTitle = (session.titleSource === 'manual' && matched.title_source !== 'manual')
+        || (session.titleSource === 'agent' && (!matched.title_source || matched.title_source === 'default'));
       const nextTitle = formatSessionTitle({
         workspace: session.workspace,
         agent: session.agent,
-        title: matched.display_name || session.title,
+        title: keepLocalTitle
+          ? session.title
+          : matched.display_name || session.title,
       });
-      if (nextRemoteId !== sessionRemoteId || (matched.display_name && matched.display_name !== session.title)) {
-        renames.push({ sessionId: session.id, remoteId: nextRemoteId, title: nextTitle });
+      const nextTitleSource = keepLocalTitle
+        ? session.titleSource
+        : matched.title_source || 'default';
+      if (nextRemoteId !== sessionRemoteId || (matched.display_name && matched.display_name !== session.title) || nextTitleSource !== session.titleSource) {
+        renames.push({ sessionId: session.id, remoteId: nextRemoteId, title: nextTitle, titleSource: nextTitleSource });
       }
       remainingSessions.push({
         ...session,
         remoteId: nextRemoteId,
         title: nextTitle,
+        titleSource: nextTitleSource,
         host: { ...latestHost },
       });
     } else if (!remoteIds.has(sessionRemoteId) && now - (session.startedAt || 0) > gracePeriodMs) {

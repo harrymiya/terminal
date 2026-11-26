@@ -39,6 +39,7 @@ assert.deepEqual(syncItem, {
   agent_name: 'codex',
   agent_command: 'codex',
   display_name: 'codex · /home/dev/app',
+  title_source: 'default',
 });
 assert.equal(formatSessionTitle({
   workspace: { name: 'project', path: '/project' },
@@ -157,11 +158,43 @@ const plan = planSyncedSessionChanges({
 assert.equal(plan.hostUpdates.length, 1);
 assert.equal(plan.hostUpdates[0].sessionId, id1);
 assert.equal(plan.hostUpdates[0].host.id, 'canon-host');
-assert.deepEqual(plan.renames, [{ sessionId: id1, remoteId: id1, title: 'Remote Renamed' }]);
+assert.deepEqual(plan.renames, [{ sessionId: id1, remoteId: id1, title: 'Remote Renamed', titleSource: 'default' }]);
 assert.deepEqual(plan.toClose, [id2]);
 assert.equal(plan.toOpen.length, 1);
 assert.equal(plan.toOpen[0].host.id, 'canon-host');
 assert.equal(plan.toOpen[0].item.id, id4);
+
+const manualTitlePlan = planSyncedSessionChanges({
+  currentSessions: [{
+    id: id1,
+    remoteId: id1,
+    host: hostCanon,
+    workspace: { path: '/proj/a', name: 'a' },
+    agent: { command: 'codex', name: 'Codex' },
+    title: 'My instance name',
+    titleSource: 'manual',
+    startedAt: now - 30_000,
+  }],
+  hosts: [hostCanon],
+  syncedHosts: {
+    'canon-host': [{
+      id: id1,
+      directory_path: '/proj/a',
+      directory_name: 'a',
+      agent_name: 'Codex',
+      agent_command: 'codex',
+      display_name: 'Agent generated title',
+      title_source: 'agent',
+    }],
+  },
+  now,
+});
+assert.deepEqual(manualTitlePlan.renames, [{
+  sessionId: id1,
+  remoteId: id1,
+  title: 'My instance name',
+  titleSource: 'manual',
+}]);
 
 // 5. Respects maxSessions = 8 when closing + opening in the same sync pass
 const eightIds = Array.from({ length: 8 }, (_, idx) => String(idx + 1).repeat(32));
@@ -205,6 +238,7 @@ assert.equal(capacityPlan.toOpen[0].item.id, '9'.repeat(32));
 // 6. CSS checks for top-right zoom step buttons and floating header drag cursor
 const layoutCss = fs.readFileSync(path.join(rootDir, 'windows/native/www/layout.css'), 'utf8');
 const windowsUi = fs.readFileSync(path.join(rootDir, 'windows/native/web/src/main.js'), 'utf8');
+const windowsSsh = fs.readFileSync(path.join(rootDir, 'windows/native/SshTerminalSession.cs'), 'utf8');
 const scaleCss = fs.readFileSync(path.join(rootDir, 'windows/native/www/scale.css'), 'utf8');
 assert.match(layoutCss, /\.scale-control\s+\.scale-step\s*\{[^}]*display:\s*inline-flex;[^}]*align-items:\s*center;[^}]*justify-content:\s*center;[^}]*padding:\s*0;/s);
 assert.match(scaleCss, /\.toolbar\s+\.scale-control\s+\.scale-step\s*\{[^}]*padding:\s*0;/s);
@@ -217,6 +251,10 @@ assert.match(windowsUi, /if \(viewMode === 'grid'\) actionItems\.push\(\['✎', 
 assert.match(windowsUi, /actionItems\.push\(\['×', '关闭终端'/);
 assert.match(windowsUi, /for \(const group of groupSessionsByDeveloper\(items\)\)/);
 assert.match(windowsUi, /name\.textContent = grouped \? sessionWorkspaceLabel\(session\) : session\.title/);
+assert.match(windowsUi, /term\.onTitleChange/);
+assert.match(windowsUi, /applyAgentSessionTitle\(session, title\)/);
+assert.match(windowsUi, /titleSource='manual'/);
+assert.match(windowsSsh, /conversation_summaries\.db/);
 assert.match(layoutCss, /body\.view-tabs \.terminal-quota:not\(\[hidden\]\)\s*\{[^}]*display:\s*inline-flex;/s);
 assert.match(layoutCss, /\.instance-developer-children\s*\{[^}]*border-left:\s*1px dotted/s);
 assert.match(layoutCss, /\.instance-developer-children\s*\{[^}]*gap:\s*4px;/s);

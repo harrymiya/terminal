@@ -869,6 +869,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 action = action,
                 account = account,
                 agentIcon = task.agent.icon,
+                titleSource = task.titleSource,
             )
             val merged = store.appendOperationLog(entry)
             operationLogs.clear()
@@ -902,6 +903,43 @@ private fun RemoteTerminalApp(store: LocalStore) {
             }
         }
 
+        fun applySessionTitle(session: TerminalSessionState, title: String, source: String) {
+            val cleanTitle = title.trim().replace(Regex("[\\u0000-\\u001f\\u007f]"), " ").take(512)
+            if (cleanTitle.isBlank()
+                || (session.task.titleSource == "manual" && source != "manual")
+                || (session.task.titleSource == "agent" && source == "default")) return
+            if (cleanTitle == session.task.displayName && source == session.task.titleSource) return
+            val updated = session.task.copy(displayName = cleanTitle, titleSource = source)
+            session.task = updated
+            sessionStore.save(updated)
+            if (!offlineMode) store.enqueueSessionSync(updated, "PUT", SyncClient.sessionItem(updated))
+            if (!offlineMode && autoSyncEnabled && syncUrl.isNotBlank() && syncToken.isNotBlank()) {
+                scope.launch {
+                    runCatching {
+                        val account = store.loadSyncUsername()
+                        val pending = store.loadPendingSessionSync(account, updated.host)
+                        withContext(SyncClient.dispatcher) { SyncClient.syncSessions(updated.host, pending) }
+                    }
+                }
+            }
+            val updatedLogs = store.updateOperationLogSessionTitle(updated.id, cleanTitle, source)
+            operationLogs.clear()
+            operationLogs.addAll(store.loadOperationLogs())
+            if (!offlineMode && syncUrl.isNotBlank() && syncToken.isNotBlank() && updatedLogs.isNotEmpty()) {
+                val account = store.loadSyncUsername().trim().lowercase()
+                scope.launch {
+                    runCatching {
+                        val remote = withContext(SyncClient.dispatcher) { SyncClient.pushOperationLogs(updatedLogs.filter { it.sessionId.replace("-", "").equals(updated.id.replace("-", ""), true) }) }
+                        val synced = store.mergeOperationLogs(remote)
+                        if (store.loadSyncUsername().trim().lowercase() == account) {
+                            operationLogs.clear()
+                            operationLogs.addAll(synced)
+                        }
+                    }
+                }
+            }
+        }
+
         fun openTask(
             host: HostProfile,
             directory: ProjectDirectory,
@@ -923,6 +961,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
             val state = TerminalSessionState(task, mainHandler, appContext) { sessionTask ->
                 quotaKey(sessionTask.host, sessionTask.agent.command)?.let(quotas::get)
             }
+            state.buffer.onAgentTitle = { title -> mainHandler.post { applySessionTitle(state, title, "agent") } }
             state.controller = SshTerminalController(
                 task = task, store = store, restoreOnly = restoredTask != null && !attachOrCreate,
                 onStatus = { value ->
@@ -995,7 +1034,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 )
             val targetId = entry.sessionId.ifBlank { UUID.randomUUID().toString() }
             val displayName = entry.sessionName.ifBlank { "${dir.name} · ${agent.name}" }
-            val task = TerminalTask(targetId, host, dir, agent, displayName)
+            val task = TerminalTask(targetId, host, dir, agent, displayName, entry.titleSource)
             recordOperationLog(task, "resume")
             openTask(host, dir, agent, restoredTask = task, attachOrCreate = true)
         }
@@ -1011,11 +1050,8 @@ private fun RemoteTerminalApp(store: LocalStore) {
             }
             if (existing >= 0) {
                 val remoteName = item.optString("display_name")
-                if (remoteName.isNotBlank() && remoteName != sessions[existing].task.displayName) {
-                    val updatedTask = sessions[existing].task.copy(displayName = remoteName)
-                    sessions[existing].task = updatedTask
-                    sessionStore.save(updatedTask)
-                }
+                val remoteSource = item.optString("title_source", "default").takeIf { it in setOf("default", "agent", "manual") } ?: "default"
+                if (remoteName.isNotBlank()) applySessionTitle(sessions[existing], remoteName, remoteSource)
                 if (activate) { activePage = existing; route = AppRoute.TERMINAL }
                 return
             }
@@ -1029,7 +1065,8 @@ private fun RemoteTerminalApp(store: LocalStore) {
             val displayName = item.optString("display_name").ifBlank {
                 if (directory.name.isNotBlank()) "${directory.name} · ${agent.name}" else agent.name
             }
-            val task = TerminalTask(id, updatedHost, directory, agent, displayName)
+            val titleSource = item.optString("title_source", "default").takeIf { it in setOf("default", "agent", "manual") } ?: "default"
+            val task = TerminalTask(id, updatedHost, directory, agent, displayName, titleSource)
             sessionStore.save(task)
             openTask(updatedHost, directory, agent, task)
             if (activate) { activePage = sessions.lastIndex; route = AppRoute.TERMINAL }
@@ -1066,11 +1103,8 @@ private fun RemoteTerminalApp(store: LocalStore) {
         fun renameTask(session: TerminalSessionState, newName: String) {
             val trimmed = newName.trim()
             if (trimmed.isNotBlank() && trimmed != session.task.displayName) {
-                val updated = session.task.copy(displayName = trimmed)
-                session.task = updated
-                sessionStore.save(updated)
-                if (!offlineMode) store.enqueueSessionSync(updated, "PUT", SyncClient.sessionItem(updated))
-                refreshShared(updated.host)
+                applySessionTitle(session, trimmed, "manual")
+                refreshShared(session.task.host)
             }
         }
 
@@ -2300,7 +2334,7 @@ private fun OperationLogsScreen(
                             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 AgentMark(iconValue, 20.dp)
                                 Text(
-                                    "${entry.agentName.ifBlank { entry.agentCommand }} · ${entry.directoryName.ifBlank { entry.directoryPath }}",
+                                    entry.sessionName.ifBlank { "${entry.agentName.ifBlank { entry.agentCommand }} · ${entry.directoryName.ifBlank { entry.directoryPath }}" },
                                     color = White,
                                     fontSize = 14.sp,
                                     fontWeight = FontWeight.SemiBold,
@@ -2311,7 +2345,7 @@ private fun OperationLogsScreen(
                             }
                             Spacer(Modifier.height(4.dp))
                             Text(
-                                "主机: ${entry.hostName}  ·  目录: ${entry.directoryPath}",
+                                "主机: ${entry.hostName}  ·  ${entry.agentName.ifBlank { entry.agentCommand }}  ·  目录: ${entry.directoryPath}",
                                 color = Muted,
                                 fontSize = 12.sp,
                                 maxLines = 1,
@@ -3143,7 +3177,7 @@ private fun sessionDisplayLabel(task: TerminalTask): String {
     val name = task.displayName.trim()
     if (workspace.isEmpty()) return name
     if (name.isEmpty()) return workspace
-    return if (name.contains(workspace)) name else "$workspace · $name"
+    return name
 }
 
 private fun statusTint(status: String): Color = when {

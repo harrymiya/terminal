@@ -284,7 +284,7 @@ internal sealed class SshTerminalSession : IDisposable
         var codexSubs = new HashSet<string>(StringComparer.Ordinal) { "resume", "exec", "e", "login", "logout", "mcp", "plugin", "app-server", "remote-control", "completion", "update", "doctor", "sandbox", "debug", "apply", "a", "archive", "delete", "unarchive", "fork", "cloud", "agents" };
         var agySubs = new HashSet<string>(StringComparer.Ordinal) { "acp", "agent", "agents", "changelog", "help", "install", "mcp", "mic-serve", "models", "plugin", "plugins" };
 
-        string resumeCmd, searchRoots, filePattern, stripSuffix;
+        string resumeCmd, searchRoots, filePattern, stripSuffix, titleKind;
         if (cmdBin == "codex" && (rest.Length == 0 || !codexSubs.Contains(rest[0])))
         {
             var restArgs = string.Join(" ", rest.Select(ShellQuote));
@@ -292,6 +292,7 @@ internal sealed class SshTerminalSession : IDisposable
             searchRoots = "\"${CODEX_HOME:-$HOME/.codex}/sessions\"";
             filePattern = "'rollout-*.jsonl'";
             stripSuffix = ".jsonl";
+            titleKind = "codex";
         }
         else if ((cmdBin == "agy" || cmdBin == "antigravity") && (rest.Length == 0 || (!agySubs.Contains(rest[0]) && !rest.Any(t => t == "-c" || t == "--continue" || t == "--conversation" || t.StartsWith("--conversation=", StringComparison.Ordinal)))))
         {
@@ -300,6 +301,7 @@ internal sealed class SshTerminalSession : IDisposable
             searchRoots = "\"${AGY_HOME:-$HOME/.gemini/antigravity-cli}/conversations\" \"$HOME/.agy-homes\"";
             filePattern = "'*.db'";
             stripSuffix = ".db";
+            titleKind = "agy";
         }
         else
         {
@@ -308,10 +310,11 @@ internal sealed class SshTerminalSession : IDisposable
 
         var sid = new string(sessionId.Where(Uri.IsHexDigit).ToArray()).ToLowerInvariant();
         if (sid.Length == 0) sid = Guid.NewGuid().ToString("N");
-        return
+        return BuildTitleWatcher() + "\n" +
             $"_rdt_dir=\"$HOME/.remote-dev-terminal/agent-sessions\"; " +
             $"_rdt_f=\"$_rdt_dir/{sid}\"; " +
             $"mkdir -p \"$_rdt_dir\"; " +
+            $"_rdt_title_watch {ShellQuote(titleKind)} \"$_rdt_f\" & _rdt_title_watch_pid=$!; trap 'kill \"$_rdt_title_watch_pid\" 2>/dev/null || true' EXIT; " +
             $"if [ -s \"$_rdt_f\" ]; then " +
             $"_rdt_id=$(cat \"$_rdt_f\"); " +
             $"{resumeCmd}; " +
@@ -325,6 +328,65 @@ internal sealed class SshTerminalSession : IDisposable
             $"fi; _i=$((_i + 1)); done; rm -f \"$_rdt_mark\") >/dev/null 2>&1 & " +
             $"{text}; fi";
     }
+
+    private static string BuildTitleWatcher() => $$"""
+        _rdt_read_title() {
+          python3 - "$1" "$2" <<'RDT_PY' 2>/dev/null
+import glob, os, sqlite3, sys
+from urllib.parse import quote
+kind, wanted = sys.argv[1:3]
+def clean(value):
+    return " ".join(str(value or "").replace("\x00", " ").split())[:512]
+paths = []
+if kind == "codex":
+    home = os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex")
+    paths = glob.glob(os.path.join(home, "state_*.sqlite"))
+    paths += glob.glob(os.path.join(home, "sqlite", "state_*.sqlite"))
+    paths += [os.path.join(home, "state.sqlite")]
+else:
+    home = os.environ.get("AGY_HOME") or os.path.expanduser("~/.gemini/antigravity-cli")
+    paths = [os.path.join(home, "conversation_summaries.db")]
+for path in sorted(set(paths), key=lambda item: os.path.getmtime(item) if os.path.exists(item) else 0, reverse=True):
+    if not os.path.isfile(path):
+        continue
+    try:
+        uri = "file:" + quote(os.path.abspath(path), safe="/") + "?mode=ro"
+        db = sqlite3.connect(uri, uri=True, timeout=0.2)
+        db.execute("PRAGMA busy_timeout=200")
+        table = "threads" if kind == "codex" else "conversation_summaries"
+        columns = {row[1] for row in db.execute("PRAGMA table_info(" + table + ")")}
+        id_col = next((name for name in (("id", "thread_id") if kind == "codex" else ("conversation_id", "id")) if name in columns), None)
+        title_col = next((name for name in (("title", "name") if kind == "codex" else ("title", "conversation_title")) if name in columns), None)
+        if id_col and title_col:
+            query = "SELECT " + title_col + " FROM " + table + " WHERE lower(replace(" + id_col + ", '-', '')) = lower(replace(?, '-', '')) LIMIT 1"
+            row = db.execute(query, (wanted,)).fetchone()
+            title = clean(row[0]) if row else ""
+            db.close()
+            if title:
+                print(title, end="")
+                break
+        else:
+            db.close()
+    except Exception:
+        pass
+RDT_PY
+        }
+        _rdt_title_watch() {
+          _rdt_kind="$1"; _rdt_file="$2"; _rdt_last=""
+          while :; do
+            if [ -s "$_rdt_file" ]; then
+              _rdt_id=$(cat "$_rdt_file")
+              _rdt_title=$(_rdt_read_title "$_rdt_kind" "$_rdt_id")
+              if [ -n "$_rdt_title" ] && [ "$_rdt_title" != "$_rdt_last" ]; then
+                _rdt_b64=$(printf "%s" "$_rdt_title" | base64 | tr -d '\r\n')
+                if [ -n "$_rdt_b64" ]; then printf '\033]0;RDT_TITLE:%s\007' "$_rdt_b64"; fi
+                _rdt_last="$_rdt_title"
+              fi
+            fi
+            sleep 3
+          done
+        }
+        """;
 
     private static string BuildRemoteCommand(string id, string directory, string agent, bool restoreOnly, string readyMarker)
     {

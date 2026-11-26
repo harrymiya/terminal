@@ -969,16 +969,44 @@ function renameSession(session){
   const name=prompt('终端会话名称',session.title);
   if(name?.trim()){
     session.title=name.trim();
+    session.titleSource='manual';
     const syncId=session.remoteId||session.id;
     post({
       action:'session-sync',
       method:'PUT',
       host:session.host,
       id:syncId,
-      item:buildSessionSyncItem({id:syncId,workspace:session.workspace,agent:session.agent,title:session.title}),
+      item:buildSessionSyncItem({id:syncId,workspace:session.workspace,agent:session.agent,title:session.title,titleSource:session.titleSource}),
     });
+    updateOperationLogTitles(session,session.title,'manual');
     renderSessions();
   }
+}
+
+function applyAgentSessionTitle(session, rawTitle) {
+  const title=String(rawTitle||'').replace(/[\u0000-\u001f\u007f]/g,' ').trim().slice(0,512);
+  if(!title||session.titleSource==='manual'||(title===session.title&&session.titleSource==='agent'))return;
+  session.title=title;
+  session.titleSource='agent';
+  const nameEl=session.card?.querySelector('.terminal-card-name');
+  if(nameEl)nameEl.textContent=title;
+  post({action:'session-sync',method:'PUT',host:session.host,id:session.remoteId||session.id,item:buildSessionSyncItem(session)});
+  updateOperationLogTitles(session,title,'agent');
+  renderInstances();
+  renderMinimized();
+}
+
+function updateOperationLogTitles(session, title, titleSource) {
+  const ids=new Set([session.id,session.remoteId].filter(Boolean).map(normalizeSessionId));
+  const changed=[];
+  config.operation_logs=(Array.isArray(config.operation_logs)?config.operation_logs:[]).map(entry=>{
+    if(!ids.has(normalizeSessionId(entry.session_id||'')))return entry;
+    const updated={...entry,session_name:title,title_source:titleSource,updated_at:Date.now()};
+    changed.push(updated);
+    return updated;
+  });
+  for(const entry of changed)post({action:'record-operation-log',entry});
+  if($('operation-logs-dialog')?.open)renderOperationLogs();
 }
 function moveSession(sourceId,targetId){if(!sourceId||sourceId===targetId)return;const items=[...sessions.entries()];const from=items.findIndex(([,s])=>s.id===sourceId),to=items.findIndex(([,s])=>s.id===targetId);if(from<0||to<0)return;const [item]=items.splice(from,1);items.splice(to,0,item);sessions.clear();for(const [id,s] of items)sessions.set(id,s);renderSessions();}
 function toggleFloat(session){
@@ -1121,7 +1149,7 @@ function moveWorkspace(index,offset){const host=currentHost(),items=host?.direct
 function moveWorkspaceToEdge(index,toTop){const host=currentHost(),items=host?.directories;if(!items||index<0||index>=items.length)return;const target=toTop?0:items.length-1;if(index===target)return;const[item]=items.splice(index,1);if(toTop)items.unshift(item);else items.push(item);sendConfig();render();}
 function moveAgentAt(index,offset){const host=currentHost(),items=agentsForHost(host),target=index+offset;if(index<0||target<0||target>=items.length)return;[items[index],items[target]]=[items[target],items[index]];if(host)host.selected_agent=target;sendConfig();render();}
 
-function createTerminalSession({ id, remoteId = id, title, host, workspace, agent, restoreOnly = false, activate = true }) {
+function createTerminalSession({ id, remoteId = id, title, titleSource = 'default', host, workspace, agent, restoreOnly = false, activate = true }) {
   const normalizedId = normalizeSessionId(id);
   const term = new Terminal({cursorBlink:true,fontFamily:'Cascadia Code,Consolas,monospace',fontSize:terminalFontSize(),scrollback:5000,convertEol:false,allowProposedApi:true,theme:terminalTheme()});
   const fit = new FitAddon();
@@ -1135,6 +1163,7 @@ function createTerminalSession({ id, remoteId = id, title, host, workspace, agen
     host: { ...host },
     workspace: { ...workspace },
     agent: { ...agent },
+    titleSource,
     restoreOnly: Boolean(restoreOnly),
     startedAt: Date.now(),
     lastOutputAt: 0,
@@ -1147,6 +1176,16 @@ function createTerminalSession({ id, remoteId = id, title, host, workspace, agen
     opened: false,
   };
   session.autoState = createAutoConfirmState();
+  session.term.onTitleChange((terminalTitle) => {
+    const marker = 'RDT_TITLE:';
+    if (!String(terminalTitle || '').startsWith(marker)) return;
+    try {
+      const raw = atob(String(terminalTitle).slice(marker.length));
+      const title = new TextDecoder().decode(Uint8Array.from(raw, char => char.charCodeAt(0)));
+      applyAgentSessionTitle(session, title);
+    } catch {}
+    session.term.write('\x1b]0;\x07');
+  });
   term.onData((data) => { resetAutoConfirm(session.autoState); post({ action: 'input', id: normalizedId, data }); });
   term.onResize(({ cols, rows }) => post({ action: 'resize', id: normalizedId, cols, rows }));
   session.autoTimer = setInterval(() => watchAutoEnter(session), 250);
@@ -1203,16 +1242,18 @@ function openSyncedSession(host, item) {
     hostAgents.find((preset) => preset.command === item.agent_command) ||
     { name: item.agent_name || item.agent_command, command: item.agent_command };
   const title = formatSessionTitle({workspace,agent,title:item.display_name});
-  return createTerminalSession({
+  const session = createTerminalSession({
     id,
     remoteId: id,
     title,
+    titleSource: ['default', 'agent', 'manual'].includes(item.title_source) ? item.title_source : 'default',
     host,
     workspace,
     agent,
     restoreOnly: true,
     activate: !activeSession || !sessions.has(activeSession),
   });
+  return session;
 }
 
 function updateConnectionControls(session) {
@@ -1316,6 +1357,7 @@ function reconcileSyncedSessions(syncedHosts, remappedHosts = {}) {
     workspace: session.workspace,
     agent: session.agent,
     title: session.title,
+    titleSource: session.titleSource,
     startedAt: session.startedAt || 0,
   }));
   const { hostUpdates, renames, toClose, toOpen } = planSyncedSessionChanges({
@@ -1334,6 +1376,7 @@ function reconcileSyncedSessions(syncedHosts, remappedHosts = {}) {
     const session = sessions.get(rename.sessionId);
     if (!session) continue;
     session.remoteId = rename.remoteId;
+    session.titleSource = rename.titleSource || session.titleSource || 'default';
     if (rename.title && rename.title !== session.title) {
       session.title = rename.title;
       const nameEl = session.card?.querySelector('.terminal-card-name');
@@ -1733,11 +1776,12 @@ async function imageData(file){
     return {data,width:sourceWidth,height:sourceHeight};
   }finally{URL.revokeObjectURL(objectUrl);}
 }
-function recordOperationLog({ sessionId, sessionName, host, workspace, agent, action = 'open' }) {
+function recordOperationLog({ sessionId, sessionName, titleSource = 'default', host, workspace, agent, action = 'open' }) {
   const account = String(config.sync_username || '').trim().toLowerCase();
   const entry = {
     id: makeId(),
     created_at: Date.now(),
+    updated_at: Date.now(),
     account,
     host_id: String(host?.id || ''),
     host_name: String(host?.name || ''),
@@ -1751,6 +1795,7 @@ function recordOperationLog({ sessionId, sessionName, host, workspace, agent, ac
     agent_icon: String(agent?.icon || ''),
     session_id: String(sessionId || ''),
     session_name: String(sessionName || ''),
+    title_source: titleSource,
     client: 'windows',
     action,
   };
@@ -1816,7 +1861,7 @@ function renderOperationLogs() {
     }
     const title = document.createElement('div');
     title.style.cssText = 'font-weight:600;margin:2px 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
-    title.textContent = `${entry.agent_name || entry.agent_command} · ${entry.directory_name || entry.directory_path}`;
+    title.textContent = entry.session_name || `${entry.agent_name || entry.agent_command} · ${entry.directory_name || entry.directory_path}`;
     const detail = document.createElement('div');
     detail.className = 'muted small';
     detail.style.cssText = 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
@@ -1877,8 +1922,8 @@ function restoreFromOperationLog(entry) {
   };
   const id = sid || makeId();
   const title = entry.session_name || formatSessionTitle({ workspace, agent });
-  const session = createTerminalSession({ id, remoteId: id, title, host, workspace, agent, restoreOnly: false, activate: true });
-  recordOperationLog({ sessionId: id, sessionName: title, host, workspace, agent, action: 'resume' });
+  const session = createTerminalSession({ id, remoteId: id, title, titleSource: entry.title_source || 'default', host, workspace, agent, restoreOnly: false, activate: true });
+  recordOperationLog({ sessionId: id, sessionName: title, titleSource: session.titleSource, host, workspace, agent, action: 'resume' });
   post({ action: 'session-sync', method: 'PUT', host: session.host, id, item: buildSessionSyncItem(session) });
   renderSessions();
   connectSession(session);

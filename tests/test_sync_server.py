@@ -51,7 +51,7 @@ class SyncServerTest(unittest.TestCase):
     def test_authenticated_persistent_session_lifecycle(self):
         session_id = "a" * 32
         path = "/v1/sessions/" + session_id
-        item = {"id": session_id, "directory_path": "/work", "directory_name": "work", "agent_name": "Shell", "agent_command": "bash -l", "display_name": "work"}
+        item = {"id": session_id, "directory_path": "/work", "directory_name": "work", "agent_name": "Shell", "agent_command": "bash -l", "display_name": "work", "title_source": "default"}
         self.assertEqual(self.request("GET", "/v1/sessions", token="wrong")[0], 401)
         self.assertEqual(self.request("PUT", path, item)[0], 200)
         self.assertEqual(self.request("GET", "/v1/sessions")[1]["sessions"], [item])
@@ -67,12 +67,12 @@ class SyncServerTest(unittest.TestCase):
     def test_desktop_clients_use_same_protocol_and_restore_id(self):
         item = {"id": "b" * 32, "directory_path": "/work", "directory_name": "work", "agent_name": "Shell", "agent_command": "bash -l", "display_name": "work"}
         host = {"sync_url": "http://%s:%d" % self.server.server_address, "sync_token": self.token, "address": "127.0.0.1", "port": 22, "username": "user"}
-        for name in ("ubuntu", "windows", "omarchy"):
+        for name in ("ubuntu", "omarchy"):
             spec = importlib.util.spec_from_file_location(name + "_core", Path(__file__).resolve().parents[1] / name / "core.py")
             core = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(core)
             core.sync_request(host, "PUT", item["id"], item)
-            self.assertEqual(core.sync_request(host, "GET")["sessions"], [item])
+            self.assertEqual(core.sync_request(host, "GET")["sessions"], [{**item, "title_source": "default"}])
             command, session_id = core.ssh_argv(host, "/work", "bash -l", session_id=item["id"], restore_only=True)
             self.assertEqual(session_id, item["id"])
             self.assertIn("rdt_" + item["id"][:18], command[-1])
@@ -88,7 +88,7 @@ class SyncServerTest(unittest.TestCase):
         spec.loader.exec_module(core)
 
         core.sync_request(creator, "PUT", item["id"], item, host=creator)
-        self.assertEqual(core.sync_request(receiver, "GET", host=receiver)["sessions"], [item])
+        self.assertEqual(core.sync_request(receiver, "GET", host=receiver)["sessions"], [{**item, "title_source": "default"}])
         core.sync_request(receiver, "DELETE", item["id"], host=receiver)
         self.assertEqual(core.sync_request(creator, "GET", host=creator)["sessions"], [])
 
@@ -167,6 +167,18 @@ class SyncServerTest(unittest.TestCase):
         status, body = self.request("POST", "/v1/operation-logs", {"logs": [log1]})
         self.assertEqual(status, 200)
         self.assertEqual(len(body["logs"]), 2)
+
+        renamed_log = {**log1, "updated_at": log1["created_at"] + 1000, "session_name": "Fix Android title sync", "title_source": "agent"}
+        status, body = self.request("POST", "/v1/operation-logs", {"logs": [renamed_log]})
+        self.assertEqual(status, 200)
+        synced_log = next(item for item in body["logs"] if item["id"] == log1["id"])
+        self.assertEqual(synced_log["session_name"], "Fix Android title sync")
+        self.assertEqual(synced_log["title_source"], "agent")
+        stale_log = {**log1, "session_name": "stale title"}
+        status, body = self.request("POST", "/v1/operation-logs", {"logs": [stale_log]})
+        self.assertEqual(status, 200)
+        synced_log = next(item for item in body["logs"] if item["id"] == log1["id"])
+        self.assertEqual(synced_log["session_name"], "Fix Android title sync")
 
         status, body = self.request("GET", "/v1/operation-logs?limit=1")
         self.assertEqual(status, 200)

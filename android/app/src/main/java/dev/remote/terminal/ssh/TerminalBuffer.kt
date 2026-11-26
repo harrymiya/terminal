@@ -1,5 +1,6 @@
 package dev.remote.terminal.ssh
 
+import android.util.Base64
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import java.util.ArrayDeque
@@ -47,6 +48,7 @@ class TerminalBuffer(initialColumns: Int = 80, initialRows: Int = 32) {
     private var insertMode = false
     private var parser = 0
     private val escape = StringBuilder()
+    var onAgentTitle: ((String) -> Unit)? = null
     private var pendingHighSurrogate: Char? = null
     private val scrollbackRows = ArrayDeque<List<TerminalCell>>()
     private var discardedScrollbackRows = 0L
@@ -189,7 +191,7 @@ class TerminalBuffer(initialColumns: Int = 80, initialRows: Int = 32) {
             when (parser) {
                 1 -> when (char) {
                     '[' -> { parser = 2; escape.setLength(0) }
-                    ']' -> parser = 3
+                    ']' -> { escape.setLength(0); parser = 3 }
                     '(', ')', '*', '+', '-', '.', '/' -> parser = 5
                     'D' -> { lineFeed(); parser = 0 }
                     'E' -> { x = 0; lineFeed(); parser = 0 }
@@ -199,8 +201,16 @@ class TerminalBuffer(initialColumns: Int = 80, initialRows: Int = 32) {
                     else -> parser = 0
                 }
                 2 -> if (char in '@'..'~') { executeCsi(escape.toString(), char); parser = 0 } else escape.append(char)
-                3 -> when (char) { '\u0007' -> parser = 0; '\u001b' -> parser = 4 }
-                4 -> parser = if (char == '\\') 0 else 3
+                3 -> when (char) {
+                    '\u0007' -> { handleOsc(escape.toString()); escape.setLength(0); parser = 0 }
+                    '\u001b' -> parser = 4
+                    else -> escape.append(char)
+                }
+                4 -> if (char == '\\') {
+                    handleOsc(escape.toString()); escape.setLength(0); parser = 0
+                } else {
+                    escape.append('\u001b').append(char); parser = 3
+                }
                 5 -> parser = 0 // Character-set designation consumes one more byte.
                 else -> when (char) {
                     '\u001b' -> parser = 1
@@ -213,6 +223,15 @@ class TerminalBuffer(initialColumns: Int = 80, initialRows: Int = 32) {
             }
         }
         publish()
+    }
+
+    private fun handleOsc(value: String) {
+        val marker = "0;RDT_TITLE:"
+        if (!value.startsWith(marker)) return
+        val title = runCatching {
+            String(Base64.decode(value.removePrefix(marker), Base64.DEFAULT), Charsets.UTF_8)
+        }.getOrNull()?.trim().orEmpty()
+        if (title.isNotEmpty() && title.length <= 512) onAgentTitle?.invoke(title)
     }
 
     private fun executeCsi(raw: String, command: Char) {

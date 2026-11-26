@@ -172,7 +172,8 @@ object SyncClient {
 
     fun sessionItem(task: TerminalTask): JSONObject = JSONObject().put("id", task.id.replace("-", ""))
         .put("directory_path", task.directory.path).put("directory_name", task.directory.name)
-        .put("agent_name", task.agent.name).put("agent_command", task.agent.command).put("display_name", task.displayName)
+        .put("agent_name", task.agent.name).put("agent_command", task.agent.command)
+        .put("display_name", task.displayName).put("title_source", task.titleSource)
 
     fun delete(task: TerminalTask) { request(task.host, "DELETE", sessionPath(task.host) + "/${task.id.replace("-", "")}") }
 
@@ -269,6 +270,7 @@ object SyncClient {
     fun operationLogJson(entry: OperationLogEntry): JSONObject = JSONObject()
         .put("id", entry.id)
         .put("created_at", entry.createdAt)
+        .put("updated_at", entry.updatedAt)
         .put("host_id", entry.hostId)
         .put("host_name", entry.hostName)
         .put("ssh_username", entry.sshUsername)
@@ -280,6 +282,7 @@ object SyncClient {
         .put("agent_command", entry.agentCommand)
         .put("session_id", entry.sessionId)
         .put("session_name", entry.sessionName)
+        .put("title_source", entry.titleSource)
         .put("client", entry.client)
         .put("action", entry.action)
         .put("agent_icon", entry.agentIcon)
@@ -287,6 +290,7 @@ object SyncClient {
     fun operationLogFromJson(obj: JSONObject): OperationLogEntry = OperationLogEntry(
         id = obj.getString("id"),
         createdAt = obj.getLong("created_at"),
+        updatedAt = obj.optLong("updated_at", obj.getLong("created_at")),
         hostId = obj.optString("host_id", ""),
         hostName = obj.optString("host_name", ""),
         sshUsername = obj.optString("ssh_username", ""),
@@ -298,6 +302,7 @@ object SyncClient {
         agentCommand = obj.optString("agent_command", ""),
         sessionId = obj.optString("session_id", ""),
         sessionName = obj.optString("session_name", ""),
+        titleSource = obj.optString("title_source", "default"),
         client = obj.optString("client", ""),
         action = obj.optString("action", "open"),
         agentIcon = obj.optString("agent_icon", ""),

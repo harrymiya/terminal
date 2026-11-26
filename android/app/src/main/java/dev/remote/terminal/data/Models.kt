@@ -25,6 +25,7 @@ data class ProjectDirectory(
 data class OperationLogEntry(
     val id: String,
     val createdAt: Long,
+    val updatedAt: Long = createdAt,
     val hostId: String,
     val hostName: String,
     val sshUsername: String,
@@ -40,6 +41,7 @@ data class OperationLogEntry(
     val action: String = "open",
     val account: String = "",
     val agentIcon: String = "",
+    val titleSource: String = "default",
 )
 
 data class HostProfile(
@@ -181,6 +183,7 @@ data class TerminalTask(
     val directory: ProjectDirectory,
     val agent: AgentPreset,
     val displayName: String,
+    val titleSource: String = "default",
 )
 
 class LocalStore(context: Context) {
@@ -485,6 +488,7 @@ class LocalStore(context: Context) {
             OperationLogEntry(
                 id = obj.getString("id"),
                 createdAt = obj.getLong("created_at"),
+                updatedAt = obj.optLong("updated_at", obj.getLong("created_at")),
                 hostId = obj.optString("host_id", ""),
                 hostName = obj.optString("host_name", ""),
                 sshUsername = obj.optString("ssh_username", ""),
@@ -500,6 +504,7 @@ class LocalStore(context: Context) {
                 action = obj.optString("action", "open"),
                 account = obj.optString("account", "").trim().lowercase(),
                 agentIcon = obj.optString("agent_icon", ""),
+                titleSource = obj.optString("title_source", "default"),
             )
         }.sortedByDescending { it.createdAt }
     }.getOrDefault(emptyList())
@@ -517,6 +522,7 @@ class LocalStore(context: Context) {
                 JSONObject()
                     .put("id", entry.id)
                     .put("created_at", entry.createdAt)
+                    .put("updated_at", entry.updatedAt)
                     .put("account", entry.account.trim().lowercase())
                     .put("host_id", entry.hostId)
                     .put("host_name", entry.hostName)
@@ -531,7 +537,8 @@ class LocalStore(context: Context) {
                     .put("session_name", entry.sessionName)
                     .put("client", entry.client)
                     .put("action", entry.action)
-                    .put("agent_icon", entry.agentIcon),
+                    .put("agent_icon", entry.agentIcon)
+                    .put("title_source", entry.titleSource),
             )
         }
         preferences.edit().putString("operation_logs", array.toString()).apply()
@@ -545,6 +552,18 @@ class LocalStore(context: Context) {
             .take(500)
         saveOperationLogs(merged)
         return merged.filter { it.account == normalized.account }.take(200)
+    }
+
+    fun updateOperationLogSessionTitle(sessionId: String, title: String, titleSource: String): List<OperationLogEntry> {
+        val normalizedId = sessionId.replace("-", "").lowercase()
+        val updatedAt = System.currentTimeMillis()
+        val updated = loadAllOperationLogs().map { entry ->
+            if (entry.sessionId.replace("-", "").lowercase() == normalizedId) {
+                entry.copy(sessionName = title, titleSource = titleSource, updatedAt = updatedAt)
+            } else entry
+        }
+        saveOperationLogs(updated)
+        return updated.filter { it.account == loadSyncUsername().trim().lowercase() }.take(200)
     }
 
     fun mergeOperationLogs(remote: List<OperationLogEntry>, account: String = loadSyncUsername()): List<OperationLogEntry> {
