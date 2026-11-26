@@ -433,10 +433,18 @@ def sort_timestamp(value):
         return (1, float(value))
     except (TypeError, ValueError):
         return (0, str(value or ""))
-def codex_home():
-    return os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex")
+def codex_homes():
+    roots = [os.environ.get("CODEX_HOME", ""), os.path.expanduser("~/.codex")]
+    roots.extend(glob.glob(os.path.expanduser("~/.codex-*")))
+    unique = []
+    for root in roots:
+        if root:
+            root = os.path.realpath(os.path.expanduser(root))
+            if root not in unique:
+                unique.append(root)
+    return unique
 def codex_db_paths():
-    roots = [codex_home(), os.environ.get("CODEX_SQLITE_HOME", "")]
+    roots = codex_homes() + [os.environ.get("CODEX_SQLITE_HOME", "")]
     paths = []
     for root in roots:
         if root:
@@ -445,37 +453,40 @@ def codex_db_paths():
             paths.append(os.path.join(root, "state.sqlite"))
     return sorted(set(paths), key=lambda path: os.path.getmtime(path) if os.path.isfile(path) else 0, reverse=True)
 def codex_title(thread_id):
-    path = os.path.join(codex_home(), "session_index.jsonl")
     wanted_id = str(thread_id).replace("-", "").lower()
-    try:
-        with open(path, "rb") as handle:
-            handle.seek(0, os.SEEK_END)
-            position, pending = handle.tell(), b""
-            while position:
-                size = min(position, 8192)
-                position -= size
-                handle.seek(position)
-                pending = handle.read(size) + pending
-                lines = pending.split(b"\n")
-                pending = lines.pop(0)
-                for line in reversed(lines):
+    for home in codex_homes():
+        path = os.path.join(home, "session_index.jsonl")
+        try:
+            with open(path, "rb") as handle:
+                handle.seek(0, os.SEEK_END)
+                position, pending = handle.tell(), b""
+                while position:
+                    size = min(position, 8192)
+                    position -= size
+                    handle.seek(position)
+                    pending = handle.read(size) + pending
+                    lines = pending.split(b"\n")
+                    pending = lines.pop(0)
+                    for line in reversed(lines):
+                        try:
+                            entry = json.loads(line)
+                        except (UnicodeDecodeError, json.JSONDecodeError):
+                            continue
+                        if isinstance(entry, dict) and str(entry.get("id", "")).replace("-", "").lower() == wanted_id:
+                            title = clean(entry.get("thread_name"))
+                            if title:
+                                return title
+                if pending:
                     try:
-                        entry = json.loads(line)
+                        entry = json.loads(pending)
                     except (UnicodeDecodeError, json.JSONDecodeError):
-                        continue
+                        entry = {}
                     if isinstance(entry, dict) and str(entry.get("id", "")).replace("-", "").lower() == wanted_id:
                         title = clean(entry.get("thread_name"))
                         if title:
                             return title
-            if pending:
-                try:
-                    entry = json.loads(pending)
-                except (UnicodeDecodeError, json.JSONDecodeError):
-                    entry = {}
-                if isinstance(entry, dict) and str(entry.get("id", "")).replace("-", "").lower() == wanted_id:
-                    return clean(entry.get("thread_name"))
-    except OSError:
-        pass
+        except OSError:
+            pass
     return ""
 def active_legacy_agent():
     target = "rdt_" + rdt_session_id[:18]
@@ -519,10 +530,16 @@ def codex_workspace_candidates():
             pass
     return [thread_id for _updated, thread_id in sorted(candidates, key=lambda row: row[0], reverse=True)]
 def agy_db_paths():
-    home = os.environ.get("AGY_HOME") or os.path.expanduser("~/.gemini/antigravity-cli")
-    return list(dict.fromkeys([os.path.join(home, "conversation_summaries.db"),
-                               os.path.expanduser("~/.gemini/antigravity/conversation_summaries.db"),
-                               os.path.expanduser("~/.gemini/antigravity-ide/conversation_summaries.db")]))
+    roots = [os.environ.get("AGY_HOME", ""), os.path.expanduser("~/.gemini/antigravity-cli"),
+             os.path.expanduser("~/.gemini/antigravity"), os.path.expanduser("~/.gemini/antigravity-ide")]
+    roots.extend(glob.glob(os.path.expanduser("~/.gemini/antigravity*")))
+    paths = []
+    for root in roots:
+        if root:
+            path = os.path.join(os.path.realpath(os.path.expanduser(root)), "conversation_summaries.db")
+            if path not in paths:
+                paths.append(path)
+    return paths
 def agy_workspace_matches(value):
     wanted_path = normalized_path(requested_workspace)
     if not wanted_path:

@@ -286,6 +286,19 @@ class SyncServerTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout, "RDT_TITLE:Codex title from index")
 
+            codex_default_home = Path(temp_dir) / ".codex"
+            codex_default_home.mkdir()
+            (codex_default_home / "session_index.jsonl").write_text(
+                json.dumps({"id": session_id, "thread_name": "Codex title from default home"}) + "\n",
+                encoding="utf-8")
+            codex_alternate_home = Path(temp_dir) / ".codex-account2"
+            codex_alternate_home.mkdir()
+            alternate_codex_env = {**codex_env, "CODEX_HOME": str(codex_alternate_home)}
+            result = subprocess.run(["bash", "-c", codex_command],
+                                    env=alternate_codex_env, text=True, capture_output=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "RDT_TITLE:Codex title from default home")
+
             fake_bin = Path(temp_dir) / "bin"
             fake_bin.mkdir()
             fake_tmux = fake_bin / "tmux"
@@ -322,6 +335,19 @@ class SyncServerTest(unittest.TestCase):
                                     env=agy_env, text=True, capture_output=True, check=False)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout, "RDT_TITLE:AGY title from DB")
+
+            agy_default_home = Path(temp_dir) / ".gemini/antigravity-cli"
+            agy_default_home.mkdir(parents=True)
+            with sqlite3.connect(agy_default_home / "conversation_summaries.db") as db:
+                db.execute("CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, title TEXT)")
+                db.execute("INSERT INTO conversation_summaries VALUES (?, ?)", (session_id, "AGY title from default home"))
+            agy_alternate_home = Path(temp_dir) / ".gemini/antigravity-cli-account2"
+            agy_alternate_home.mkdir()
+            alternate_agy_env = {**agy_env, "AGY_HOME": str(agy_alternate_home)}
+            result = subprocess.run(["bash", "-c", agy_command],
+                                    env=alternate_agy_env, text=True, capture_output=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "RDT_TITLE:AGY title from default home")
 
             legacy_agy_session_id = "c" * 32
             legacy_agy_command = omarchy_core.agent_session_title_command(legacy_agy_session_id, "agy", "/work")
