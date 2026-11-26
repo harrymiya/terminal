@@ -24,6 +24,13 @@ DEFAULT_AGENTS = [
 ]
 
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
+MAX_FILE_BYTES = 20 * 1024 * 1024
+
+
+def format_file_size(size):
+    if size >= 1024 * 1024:
+        return f"{size / (1024 * 1024):.1f} MB"
+    return f"{max(1, round(size / 1024))} KB"
 
 
 def image_upload_command():
@@ -53,6 +60,39 @@ def upload_image(host, control_path, image):
         path = ""
     if not path.startswith("/") or "\n" in path or "\r" in path:
         raise RuntimeError("远端未返回有效的图片路径")
+    return path
+
+
+def file_upload_command(extension=""):
+    """Write stdin atomically to a private remote file in ~/.remote-dev-terminal/files and return its absolute path."""
+    name = uuid.uuid4().hex + extension
+    return ("umask 077; dir=\"$HOME/.remote-dev-terminal/files\"; "
+            "mkdir -p -- \"$dir\" || exit 1; "
+            f'tmp="$dir/.{name}.tmp"; target="$dir/{name}"; '
+            "trap 'rm -f -- \"$tmp\"' EXIT HUP INT TERM; "
+            "cat > \"$tmp\" && mv -- \"$tmp\" \"$target\" && printf '\\0%s\\0' \"$target\"")
+
+
+def upload_file(host, control_path, file_bytes, filename=""):
+    if not file_bytes or len(file_bytes) > MAX_FILE_BYTES:
+        raise ValueError("文件为空或超过 20 MB")
+    ext = os.path.splitext(filename)[1].lower() if filename else ""
+    if not (2 <= len(ext) <= 16 and ext[1:].isalnum()):
+        ext = ""
+    address = ssh_address(host)
+    argv = ["ssh", "-S", control_path, "-o", "ControlMaster=no", "-o", "BatchMode=yes",
+            "-o", "ConnectTimeout=5", "-p", str(ssh_port(host)), "-l", host["username"],
+            "--", address, file_upload_command(ext)]
+    result = subprocess.run(argv, input=file_bytes, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+    if result.returncode:
+        raise RuntimeError(result.stderr.decode("utf-8", errors="replace").strip() or "文件上传失败")
+    parts = result.stdout.split(b"\0")
+    try:
+        path = parts[-2].decode("utf-8") if len(parts) >= 3 and parts[-1] == b"" else ""
+    except UnicodeDecodeError:
+        path = ""
+    if not path.startswith("/") or "\n" in path or "\r" in path:
+        raise RuntimeError("远端未返回有效的文件路径")
     return path
 
 
@@ -491,6 +531,26 @@ def close_remote_session_command(session_id):
         f"tmux kill-session -t {name} 2>/dev/null || true; "
         f"fi"
     )
+
+
+def should_close_missing_shared_session(session, remote_ids, now=None):
+    """Only auto-close a shared session after it is absent and locally disconnected."""
+    if session.get("id") in remote_ids:
+        return False
+    current_time = time.monotonic() if now is None else now
+    if current_time - session.get("started_at", 0) <= 15:
+        return False
+    state = session.get("state")
+    if isinstance(state, dict) and (state.get("connected") or state.get("retry_source")):
+        return False
+    reconnect_button = session.get("reconnect_button")
+    if reconnect_button is not None:
+        try:
+            if reconnect_button.get_visible():
+                return False
+        except (AttributeError, RuntimeError):
+            pass
+    return True
 
 
 def _normalize_signature(sig):

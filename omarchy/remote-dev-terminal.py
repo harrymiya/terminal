@@ -20,7 +20,7 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("Vte", "2.91")
 gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Gtk, Vte, GLib, Gdk, GdkPixbuf, Pango
-from core import load_config, save_config, ssh_argv, close_remote_session_command, should_close_missing_shared_session, auto_enter_signature, confirmation_pending, AutoEnterController, quota_agent, quota_key, read_agent_quota, hourly_quota, upload_image, MAX_IMAGE_BYTES, sync_request, sync_data_request, sync_operation_logs, merge_operation_logs, filter_operation_logs, apply_active_session_titles_to_operation_logs, sync_host_key, legacy_sync_keys, ssh_address, ssh_port, ssh_host_fingerprint, sync_auth_request, save_sync_password, load_sync_password, clear_sync_password, render_battery_pixbuf, save_host_password, clear_host_password, ssh_auth_environment, agent_session_title_command
+from core import load_config, save_config, ssh_argv, close_remote_session_command, should_close_missing_shared_session, auto_enter_signature, confirmation_pending, AutoEnterController, quota_agent, quota_key, read_agent_quota, hourly_quota, upload_image, MAX_IMAGE_BYTES, upload_file, MAX_FILE_BYTES, format_file_size, sync_request, sync_data_request, sync_operation_logs, merge_operation_logs, filter_operation_logs, apply_active_session_titles_to_operation_logs, sync_host_key, legacy_sync_keys, ssh_address, ssh_port, ssh_host_fingerprint, sync_auth_request, save_sync_password, load_sync_password, clear_sync_password, render_battery_pixbuf, save_host_password, clear_host_password, ssh_auth_environment, agent_session_title_command
 from version import VERSION
 from host_metrics import metrics_key, read_host_metrics
 from mcp_server import EmbeddedMCPServer
@@ -1362,7 +1362,7 @@ class App(Gtk.Window):
         self.tab_header_image_button = Gtk.Button.new_from_icon_name("image-x-generic-symbolic", Gtk.IconSize.MENU)
         self.tab_header_image_button.set_relief(Gtk.ReliefStyle.NONE)
         self.tab_header_image_button.get_style_context().add_class("session-header-action")
-        self.tab_header_image_button.set_tooltip_text("发送图片给此终端的 Agent")
+        self.tab_header_image_button.set_tooltip_text("发送图片或文件给此终端的 Agent")
         self.tab_header_image_button.set_no_show_all(True)
         self.tab_header_image_button.connect("clicked", lambda *_: self._click_tab_header_action("image_button"))
         self.tab_header_actions.pack_start(self.tab_header_image_button, False, False, 0)
@@ -3802,29 +3802,32 @@ class App(Gtk.Window):
 
     def send_image_dialog(self, host, socket_path, terminal, state):
         if not state["connected"] or state["closed"]:
-            self.message("无法发送图片", "请先等待该终端连接成功。")
+            self.message("无法发送图片或文件", "请先等待该终端连接成功。")
             return
-        dialog = Gtk.Dialog(title="发送图片给 Agent", transient_for=self, modal=True)
+        dialog = Gtk.Dialog(title="发送图片或文件给 Agent", transient_for=self, modal=True)
         dialog.add_buttons("取消", Gtk.ResponseType.CANCEL, "上传并发送", Gtk.ResponseType.OK)
         box = dialog.get_content_area()
         box.set_spacing(10)
         box.set_border_width(16)
-        box.add(Gtk.Label(label="选择图片或粘贴剪贴板中的图片（Ctrl+V）。", xalign=0))
-        box.add(Gtk.Label(label="路径会发送到此终端并提交，请确认 Agent 正在等待输入且输入框为空。", xalign=0, wrap=True))
+        box.add(Gtk.Label(label="选择图片、文件或粘贴剪贴板中的图片（Ctrl+V）。", xalign=0))
+        box.add(Gtk.Label(label="路径会发送到此终端并提交，请确认 Agent 正在等待输入且输入框为空。文件最大 20 MB。", xalign=0, wrap=True))
         preview = Gtk.Image()
         box.add(preview)
-        status = Gtk.Label(label="尚未选择图片", xalign=0, wrap=True)
+        status = Gtk.Label(label="尚未选择图片或文件", xalign=0, wrap=True)
         box.add(status)
         buttons = Gtk.Box(spacing=8)
         choose = Gtk.Button(label="选择本地图片…")
+        choose_file = Gtk.Button(label="选择文件…")
         paste = Gtk.Button(label="粘贴图片")
         buttons.pack_start(choose, False, False, 0)
+        buttons.pack_start(choose_file, False, False, 0)
         buttons.pack_start(paste, False, False, 0)
         box.add(buttons)
-        selected = {"image": None, "alive": True, "busy": False}
+        selected = {"image": None, "file": None, "alive": True, "busy": False}
         dialog.set_response_sensitive(Gtk.ResponseType.OK, False)
 
         def set_image(pixbuf, description):
+            selected["file"] = None
             if pixbuf is None:
                 selected["image"] = None
                 preview.clear()
@@ -3848,6 +3851,13 @@ class App(Gtk.Window):
                 dialog.set_response_sensitive(Gtk.ResponseType.OK, False)
                 status.set_text(str(exc))
 
+        def set_file(data, filename):
+            selected["image"] = None
+            selected["file"] = {"data": data, "name": filename}
+            preview.clear()
+            status.set_text(f"{filename} · {format_file_size(len(data))}")
+            dialog.set_response_sensitive(Gtk.ResponseType.OK, True)
+
         def choose_image(*_):
             chooser = Gtk.FileChooserDialog(title="选择图片", transient_for=dialog, action=Gtk.FileChooserAction.OPEN)
             chooser.add_buttons("取消", Gtk.ResponseType.CANCEL, "选择", Gtk.ResponseType.OK)
@@ -3866,6 +3876,32 @@ class App(Gtk.Window):
                     set_image(GdkPixbuf.Pixbuf.new_from_file(path), os.path.basename(path))
                 except (OSError, GLib.Error, ValueError) as exc:
                     selected["image"] = None
+                    selected["file"] = None
+                    preview.clear()
+                    dialog.set_response_sensitive(Gtk.ResponseType.OK, False)
+                    status.set_text(str(exc))
+            chooser.destroy()
+
+        def choose_file_dialog(*_):
+            chooser = Gtk.FileChooserDialog(title="选择文件", transient_for=dialog, action=Gtk.FileChooserAction.OPEN)
+            chooser.add_buttons("取消", Gtk.ResponseType.CANCEL, "选择", Gtk.ResponseType.OK)
+            if chooser.run() == Gtk.ResponseType.OK:
+                path = chooser.get_filename()
+                try:
+                    if not path or not os.path.isfile(path):
+                        raise ValueError("所选文件不存在")
+                    size = os.path.getsize(path)
+                    if size == 0:
+                        raise ValueError("文件不能为空")
+                    if size > MAX_FILE_BYTES:
+                        raise ValueError("文件超过 20 MB")
+                    with open(path, "rb") as f:
+                        data = f.read()
+                    set_file(data, os.path.basename(path))
+                except (OSError, ValueError) as exc:
+                    selected["image"] = None
+                    selected["file"] = None
+                    preview.clear()
                     dialog.set_response_sensitive(Gtk.ResponseType.OK, False)
                     status.set_text(str(exc))
             chooser.destroy()
@@ -3885,20 +3921,26 @@ class App(Gtk.Window):
                 selected["alive"] = False
                 dialog.destroy()
                 return
-            if selected["busy"] or selected["image"] is None:
+            if selected["busy"] or (selected["image"] is None and selected["file"] is None):
                 return
             if state["closed"] or not state["connected"]:
                 status.set_text("终端已断开，请重新连接后再发送。")
                 return
             selected["busy"] = True
+            is_file = selected["file"] is not None
+            file_info = selected["file"]
             image, generation = selected["image"], state["generation"]
             dialog.set_response_sensitive(Gtk.ResponseType.OK, False)
             choose.set_sensitive(False)
+            choose_file.set_sensitive(False)
             paste.set_sensitive(False)
-            status.set_text("正在上传图片…")
+            status.set_text("正在上传文件…" if is_file else "正在上传图片…")
             def worker():
                 try:
-                    path, error = upload_image(host, socket_path, image), None
+                    if is_file:
+                        path, error = upload_file(host, socket_path, file_info["data"], file_info["name"]), None
+                    else:
+                        path, error = upload_image(host, socket_path, image), None
                 except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
                     path, error = None, str(exc)
                 def finish():
@@ -3906,14 +3948,19 @@ class App(Gtk.Window):
                         return False
                     selected["busy"] = False
                     choose.set_sensitive(True)
+                    choose_file.set_sensitive(True)
                     paste.set_sensitive(True)
                     dialog.set_response_sensitive(Gtk.ResponseType.OK, True)
                     if error:
                         status.set_text("上传失败：" + error)
                     elif state["closed"] or not state["connected"] or state["generation"] != generation:
-                        status.set_text("图片已上传，但终端连接已变化，未发送路径：" + path)
+                        target_type = "文件" if is_file else "图片"
+                        status.set_text(f"{target_type}已上传，但终端连接已变化，未发送路径：" + path)
                     else:
-                        terminal.paste_text("请查看这张图片：" + path)
+                        if is_file:
+                            terminal.paste_text(f"请查看文件 {shlex.quote(file_info['name'])}，路径：{shlex.quote(path)}")
+                        else:
+                            terminal.paste_text("请查看这张图片：" + path)
                         terminal.feed_child(b"\r")
                         selected["alive"] = False
                         dialog.destroy()
@@ -3923,6 +3970,7 @@ class App(Gtk.Window):
             threading.Thread(target=worker, daemon=True).start()
 
         choose.connect("clicked", choose_image)
+        choose_file.connect("clicked", choose_file_dialog)
         paste.connect("clicked", paste_image)
         dialog.connect("key-press-event", on_key)
         dialog.connect("response", on_response)
@@ -5086,7 +5134,7 @@ class App(Gtk.Window):
                 self.update_tab_header(terminal)
 
         image_button = Gtk.Button.new_from_icon_name("image-x-generic-symbolic", Gtk.IconSize.MENU)
-        image_button.set_tooltip_text("发送图片给此终端的 Agent")
+        image_button.set_tooltip_text("发送图片或文件给此终端的 Agent")
         minimize = Gtk.Button.new_from_icon_name("window-minimize-symbolic", Gtk.IconSize.MENU)
         minimize.set_tooltip_text("最小化到顶部栏")
         float_button = Gtk.Button.new_from_icon_name("window-restore-symbolic", Gtk.IconSize.MENU)
