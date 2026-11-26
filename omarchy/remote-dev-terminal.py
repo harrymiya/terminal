@@ -2447,7 +2447,9 @@ class App(Gtk.Window):
         if (not socket_path or not os.path.exists(socket_path) or not address or not port
                 or session.get("state", {}).get("closed")):
             return ""
-        remote = agent_session_title_command(session.get("id", ""), kind)
+        session_item = session.get("item") if isinstance(session.get("item"), dict) else {}
+        workspace = session_item.get("directory_path") or session.get("directory_path", "")
+        remote = agent_session_title_command(session.get("id", ""), kind, workspace)
         remote = f'"${{SHELL:-/bin/bash}}" -l -c {shlex.quote(remote)}'
         argv = ["ssh", "-S", socket_path, "-o", "ControlMaster=no", "-o", "BatchMode=yes",
                 "-o", "ConnectTimeout=3", "-p", str(port), "-l", host["username"], "--", address, remote]
@@ -2466,17 +2468,24 @@ class App(Gtk.Window):
         session["title_watcher_stop"] = stop
 
         def watch():
-            last_title = ""
             while not stop.is_set() and not session.get("state", {}).get("closed"):
                 title = self.read_agent_session_title(session, kind)
-                if title and title != last_title:
-                    last_title = title
+                if self.agent_session_title_needs_sync(session, title):
                     GLib.idle_add(self.apply_agent_session_title, session, title)
                 stop.wait(3)
 
         thread = threading.Thread(target=watch, daemon=True)
         session["title_watcher_thread"] = thread
         thread.start()
+
+    def agent_session_title_needs_sync(self, session, title):
+        if not title or session.get("state", {}).get("closed"):
+            return False
+        item = session.get("item") if isinstance(session.get("item"), dict) else {}
+        current_source = session.get("title_source", item.get("title_source", "default"))
+        if current_source == "manual":
+            return False
+        return item.get("display_name") != title or current_source != "agent"
 
     def apply_agent_session_title(self, session, title):
         if not session.get("state", {}).get("closed"):

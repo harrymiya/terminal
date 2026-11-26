@@ -445,6 +445,11 @@ class DesktopThemeBuildTest(unittest.TestCase):
                 self.assertEqual(sess["item"]["title_source"], "agent")
                 self.assertEqual(app.data["operation_logs"][0]["session_name"], "Agent Generated Title")
                 self.assertEqual(app.data["operation_logs"][0]["title_source"], "agent")
+                self.assertFalse(app.agent_session_title_needs_sync(sess, agent_title))
+                app.set_session_name(sess, "Stale synchronized title", sync=False, title_source="agent")
+                self.assertTrue(app.agent_session_title_needs_sync(sess, agent_title))
+                app.apply_agent_session_title(sess, agent_title)
+                self.assertEqual(sess["session_title"].get_text(), "Agent Generated Title")
                 app.set_session_name(sess, "Stale Default Name", sync=False, title_source="default")
                 self.assertEqual(sess["session_title"].get_text(), "Agent Generated Title")
 
@@ -457,6 +462,10 @@ class DesktopThemeBuildTest(unittest.TestCase):
                 self.assertEqual(app.data["operation_logs"][0]["session_name"], "Renamed Instance")
                 self.assertEqual(app.data["operation_logs"][0]["title_source"], "manual")
                 self.assertTrue(any(call[0] == "PUT" and call[1] == "sess-1" and call[2]["display_name"] == "Renamed Instance" for call in sync_calls))
+                self.assertFalse(app.agent_session_title_needs_sync(sess, "A later generated title"))
+                app.apply_agent_session_title(sess, "A later generated title")
+                self.assertEqual(sess["session_title"].get_text(), "Renamed Instance")
+                self.assertEqual(app.data["operation_logs"][0]["session_name"], "Renamed Instance")
 
                 # 2. Tab mode keeps only close in the instance row; header owns the other actions.
                 app.tiled = False

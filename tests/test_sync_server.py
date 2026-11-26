@@ -269,30 +269,79 @@ class SyncServerTest(unittest.TestCase):
             codex_home = Path(temp_dir) / "codex"
             codex_home.mkdir()
             with sqlite3.connect(codex_home / "state_5.sqlite") as db:
-                db.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, title TEXT)")
-                db.execute("INSERT INTO threads VALUES (?, ?)", (session_id, "Codex title from DB"))
+                db.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, title TEXT, cwd TEXT, updated_at INTEGER)")
+                db.execute("INSERT INTO threads VALUES (?, ?, ?, ?)", (session_id, "Stale SQLite title", "/work", 1))
+                legacy_thread_id = "f" * 32
+                db.execute("INSERT INTO threads VALUES (?, ?, ?, ?)", (legacy_thread_id, "Legacy title", "/work", 2))
+            (codex_home / "session_index.jsonl").write_text(
+                json.dumps({"id": session_id, "thread_name": "Old Codex title", "updated_at": "1"}) + "\n"
+                + json.dumps({"id": legacy_thread_id, "thread_name": "Recovered Codex title", "updated_at": "2"}) + "\n"
+                + json.dumps({"id": session_id, "thread_name": "Codex title from index", "updated_at": "3"}) + "\n",
+                encoding="utf-8")
             codex_env = {**os.environ, "CODEX_HOME": str(codex_home)}
             codex_env["HOME"] = temp_dir
-            codex_command = omarchy_core.agent_session_title_command(session_id, "codex")
+            codex_command = omarchy_core.agent_session_title_command(session_id, "codex", "/work")
             codex_remote = f'"${{SHELL:-/bin/bash}}" -l -c {shlex.quote(codex_command)}'
             result = subprocess.run(["bash", "-c", codex_remote],
                                     env=codex_env, text=True, capture_output=True, check=False)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(result.stdout, "RDT_TITLE:Codex title from DB")
+            self.assertEqual(result.stdout, "RDT_TITLE:Codex title from index")
+
+            fake_bin = Path(temp_dir) / "bin"
+            fake_bin.mkdir()
+            fake_tmux = fake_bin / "tmux"
+            fake_tmux.write_text(
+                "#!/bin/sh\n"
+                "case \"$5\" in\n"
+                "  '#{pane_current_command}') printf 'codex\\n' ;;\n"
+                "  '#{pane_current_path}') printf '%s\\n' \"$RDT_TEST_PANE_PATH\" ;;\n"
+                "esac\n", encoding="utf-8")
+            fake_tmux.chmod(0o700)
+            legacy_session_id = "d" * 32
+            legacy_command = omarchy_core.agent_session_title_command(legacy_session_id, "codex", "/work")
+            legacy_remote = f'"${{SHELL:-/bin/bash}}" -l -c {shlex.quote(legacy_command)}'
+            legacy_env = {**codex_env, "PATH": str(fake_bin) + os.pathsep + os.environ.get("PATH", ""),
+                          "RDT_TEST_PANE_PATH": "/work"}
+            result = subprocess.run(["bash", "-c", legacy_remote],
+                                    env=legacy_env, text=True, capture_output=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "RDT_TITLE:Recovered Codex title")
+            self.assertEqual((session_store / legacy_session_id).read_text(encoding="utf-8"), legacy_thread_id)
 
             agy_home = Path(temp_dir) / "agy"
             agy_home.mkdir()
             with sqlite3.connect(agy_home / "conversation_summaries.db") as db:
-                db.execute("CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, title TEXT)")
-                db.execute("INSERT INTO conversation_summaries VALUES (?, ?)", (session_id, "AGY title from DB"))
+                db.execute("CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, title TEXT, workspace_uris TEXT, last_modified_time INTEGER)")
+                db.execute("INSERT INTO conversation_summaries VALUES (?, ?, ?, ?)",
+                           (session_id, "AGY title from DB", json.dumps(["file:///work"]), 1))
+                legacy_agy_id = "a" * 32
+                db.execute("INSERT INTO conversation_summaries VALUES (?, ?, ?, ?)",
+                           (legacy_agy_id, "Recovered AGY title", json.dumps(["file:///work"]), 2))
             agy_env = {**os.environ, "AGY_HOME": str(agy_home)}
             agy_env["HOME"] = temp_dir
-            agy_command = omarchy_core.agent_session_title_command(session_id, "agy")
+            agy_command = omarchy_core.agent_session_title_command(session_id, "agy", "/work")
             agy_remote = f'"${{SHELL:-/bin/bash}}" -l -c {shlex.quote(agy_command)}'
             result = subprocess.run(["bash", "-c", agy_remote],
                                     env=agy_env, text=True, capture_output=True, check=False)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout, "RDT_TITLE:AGY title from DB")
+
+            legacy_agy_session_id = "c" * 32
+            legacy_agy_command = omarchy_core.agent_session_title_command(legacy_agy_session_id, "agy", "/work")
+            legacy_agy_remote = f'"${{SHELL:-/bin/bash}}" -l -c {shlex.quote(legacy_agy_command)}'
+            legacy_agy_env = {**agy_env, "PATH": str(fake_bin) + os.pathsep + os.environ.get("PATH", ""),
+                              "RDT_TEST_PANE_PATH": "/work"}
+            fake_tmux.write_text(
+                "#!/bin/sh\n"
+                "case \"$5\" in\n"
+                "  '#{pane_current_command}') printf 'agy\\n' ;;\n"
+                "  '#{pane_current_path}') printf '%s\\n' \"$RDT_TEST_PANE_PATH\" ;;\n"
+                "esac\n", encoding="utf-8")
+            result = subprocess.run(["bash", "-c", legacy_agy_remote],
+                                    env=legacy_agy_env, text=True, capture_output=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "RDT_TITLE:Recovered AGY title")
+            self.assertEqual((session_store / legacy_agy_session_id).read_text(encoding="utf-8"), legacy_agy_id)
 
 
 if __name__ == "__main__":
