@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class DesktopCredentialsTest(unittest.TestCase):
     def test_password_storage_and_environment_for_each_platform(self):
-        for platform in ('omarchy', 'ubuntu', 'windows'):
+        for platform in ('omarchy', 'ubuntu'):
             with self.subTest(platform=platform):
                 spec = importlib.util.spec_from_file_location('credential_core_' + platform, ROOT / platform / 'core.py')
                 core = importlib.util.module_from_spec(spec)

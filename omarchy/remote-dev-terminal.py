@@ -20,7 +20,7 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("Vte", "2.91")
 gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Gtk, Vte, GLib, Gdk, GdkPixbuf, Pango
-from core import load_config, save_config, ssh_argv, close_remote_session_command, should_close_missing_shared_session, auto_enter_signature, confirmation_pending, AutoEnterController, quota_agent, quota_key, read_agent_quota, hourly_quota, upload_image, MAX_IMAGE_BYTES, upload_file, MAX_FILE_BYTES, format_file_size, sync_request, sync_data_request, sync_operation_logs, merge_operation_logs, filter_operation_logs, apply_active_session_titles_to_operation_logs, sync_host_key, legacy_sync_keys, ssh_address, ssh_port, ssh_host_fingerprint, sync_auth_request, save_sync_password, load_sync_password, clear_sync_password, render_battery_pixbuf, save_host_password, clear_host_password, ssh_auth_environment, agent_session_title_command
+from core import load_config, save_config, ssh_argv, close_remote_session_command, should_close_missing_shared_session, auto_enter_signature, confirmation_pending, AutoEnterController, quota_agent, quota_key, read_agent_quota, hourly_quota, upload_image, MAX_IMAGE_BYTES, upload_file, MAX_FILE_BYTES, format_file_size, sync_request, sync_data_request, sync_operation_logs, merge_operation_logs, filter_operation_logs, apply_active_session_titles_to_operation_logs, sync_host_key, legacy_sync_keys, ssh_address, ssh_port, ssh_host_fingerprint, sync_auth_request, save_sync_password, load_sync_password, clear_sync_password, render_battery_pixbuf, save_host_password, clear_host_password, ssh_auth_environment, agent_session_title_command, DEFAULT_AGENTS
 from version import VERSION
 from host_metrics import metrics_key, read_host_metrics
 from mcp_server import EmbeddedMCPServer
@@ -1839,19 +1839,22 @@ class App(Gtk.Window):
         return False
 
     def detach_session_widgets(self, session):
-        label, terminal = session["label"], session["terminal"]
-        for handler_id in getattr(terminal, "_tile_dnd_handlers", ()):
-            if terminal.handler_is_connected(handler_id):
-                terminal.disconnect(handler_id)
-        terminal._tile_dnd_handlers = ()
-        parent = label.get_parent()
-        if parent is not None:
-            parent.remove(label)
-        parent = terminal.get_parent()
-        if parent is self.tabs:
-            self.tabs.remove_page(self.tabs.page_num(terminal))
-        elif parent is not None:
-            parent.remove(terminal)
+        label, terminal = session.get("label"), session.get("terminal")
+        if terminal is not None:
+            for handler_id in getattr(terminal, "_tile_dnd_handlers", ()):
+                if terminal.handler_is_connected(handler_id):
+                    terminal.disconnect(handler_id)
+            terminal._tile_dnd_handlers = ()
+        if label is not None:
+            parent = label.get_parent()
+            if parent is not None:
+                parent.remove(label)
+        if terminal is not None:
+            parent = terminal.get_parent()
+            if parent is self.tabs:
+                self.tabs.remove_page(self.tabs.page_num(terminal))
+            elif parent is not None:
+                parent.remove(terminal)
 
     def remove_floating_window(self, session):
         window = session.pop("floating_window", None)
@@ -1862,8 +1865,47 @@ class App(Gtk.Window):
             self.detach_session_widgets(session)
             window.destroy()
 
+    def session_matches_host(self, session, host):
+        if not session:
+            return False
+        if not host:
+            return True
+        shost = session.get("host")
+        if not shost or not isinstance(shost, dict):
+            return True
+        if shost is host:
+            return True
+        sid = str(shost.get("id", "")).strip()
+        hid = str(host.get("id", "")).strip()
+        if sid and hid and sid == hid:
+            return True
+        sync_id = str(shost.get("sync_id", "")).strip()
+        h_sync_id = str(host.get("sync_id", "")).strip()
+        if sync_id and h_sync_id and sync_id == h_sync_id:
+            return True
+        s_name = str(shost.get("name", "")).strip()
+        h_name = str(host.get("name", "")).strip()
+        if s_name and h_name and s_name == h_name:
+            return True
+        s_addr = str(shost.get("address") or shost.get("lan_address") or shost.get("external_address") or "").strip()
+        h_addr = str(host.get("address") or host.get("lan_address") or host.get("external_address") or "").strip()
+        s_user = str(shost.get("username", "")).strip()
+        h_user = str(host.get("username", "")).strip()
+        if s_addr and h_addr and s_addr == h_addr and s_user == h_user:
+            return True
+        return False
+
     def update_minimized_scroller(self):
-        self.minimized_scroller.set_visible(bool(self.minimized_buttons.get_children()) and not self.tiled)
+        current_host = self.current_host()
+        visible_count = 0
+        for session in self.sessions:
+            btn = session.get("minimized_button")
+            if btn is not None:
+                match = self.session_matches_host(session, current_host)
+                btn.set_visible(match)
+                if match:
+                    visible_count += 1
+        self.minimized_scroller.set_visible(visible_count > 0 and not self.tiled)
 
     def minimize_session(self, session):
         if session.get("minimized_button") is not None:
@@ -1902,6 +1944,12 @@ class App(Gtk.Window):
             self.update_minimized_scroller()
 
     def restore_minimized_session(self, session):
+        sess_host = session.get("host")
+        if sess_host and not self.session_matches_host(session, self.current_host()):
+            for idx, h in enumerate(self.data.get("hosts", [])):
+                if h is sess_host or (h.get("id") and h.get("id") == sess_host.get("id")):
+                    self.hosts.set_active(idx)
+                    break
         self.remove_minimized_button(session)
         self.set_active_terminal(session["terminal"])
         if not self.view_button.get_active():
@@ -1931,6 +1979,12 @@ class App(Gtk.Window):
         window.activate()
 
     def restore_floating_session(self, session):
+        sess_host = session.get("host")
+        if sess_host and not self.session_matches_host(session, self.current_host()):
+            for idx, h in enumerate(self.data.get("hosts", [])):
+                if h is sess_host or (h.get("id") and h.get("id") == sess_host.get("id")):
+                    self.hosts.set_active(idx)
+                    break
         self.remove_floating_window(session)
         self.update_float_button(session)
         self.set_active_terminal(session["terminal"])
@@ -2159,27 +2213,32 @@ class App(Gtk.Window):
     def rebuild_view(self, selected=None):
         if selected is None:
             selected = self.get_selected_terminal()
+        current_host = self.current_host()
         docked = []
         for session in self.sessions:
-            if session.get("floating_window") is not None:
+            is_current_host = self.session_matches_host(session, current_host)
+            floating_win = session.get("floating_window")
+            if floating_win is not None:
+                floating_win.set_visible(is_current_host)
                 continue
             self.detach_session_widgets(session)
             session["terminal"]._tile_frame = None
             session["terminal"]._running_outline = None
             session["terminal"]._running_tab_button = None
-            if session.get("minimized_button") is None:
+            if is_current_host and session.get("minimized_button") is None:
                 docked.append(session)
                 for indicator in session.get("quota_indicators", ()):
                     indicator.set_show_percent(not self.tiled)
         for child in self.grid.get_children():
             self.grid.remove(child)
-        self.count_label.set_text(f"{len(self.sessions)} / 8")
+        host_sessions = [s for s in self.sessions if self.session_matches_host(s, current_host)]
+        self.count_label.set_text(f"{len(host_sessions)} / 8")
         self.update_minimized_scroller()
         self.layout_button.set_visible(self.tiled)
         self.layout_button.set_sensitive(len(docked) >= 2)
         if not docked:
             self.rebuild_instances_sidebar([])
-            text = ("终端已最小化或悬浮。" if self.sessions else
+            text = ("终端已最小化或悬浮。" if host_sessions else
                     "选择左侧主机和开发者，然后点击工作区直达终端。")
             self.empty.set_text(text)
             self.views.set_visible_child_name("empty")
@@ -2247,12 +2306,16 @@ class App(Gtk.Window):
             button.clicked()
 
     def rebuild_instances_sidebar(self, docked=None):
+        current_host = self.current_host()
         if self.tiled:
-            docked = [s for s in self.sessions if s.get("minimized_button") is not None]
+            docked = [
+                s for s in self.sessions
+                if s.get("minimized_button") is not None and self.session_matches_host(s, current_host)
+            ]
         elif docked is None:
             docked = [
                 s for s in self.sessions
-                if s.get("floating_window") is None and s.get("minimized_button") is None
+                if s.get("floating_window") is None and s.get("minimized_button") is None and self.session_matches_host(s, current_host)
             ]
         self.instance_buttons = []
         for child in self.instances_list.get_children():
@@ -3068,6 +3131,7 @@ class App(Gtk.Window):
         if not self.refreshing:
             self.refresh_host_content()
             self.update_sync_status()
+            self.rebuild_view()
 
     def agent_changed(self, *_):
         host = self.current_host()
@@ -3080,7 +3144,9 @@ class App(Gtk.Window):
                 self.push_host_profile(host)
 
     def host_agents(self, host):
-        return self.data["agents"]
+        if host and isinstance(host, dict) and host.get("agents") is not None:
+            return host["agents"]
+        return self.data.get("agents", DEFAULT_AGENTS)
 
     def refresh_host_content(self):
         host = self.current_host()
@@ -3266,7 +3332,7 @@ class App(Gtk.Window):
             self.update_quota_displays()
         targets = {}
         for session in self.sessions:
-            if not session["state"].get("connected") or "update_quota" not in session:
+            if not session.get("state", {}).get("connected") or "update_quota" not in session:
                 continue
             host, item = session["host"], session["item"]
             key = quota_key(host, item["agent_command"])
@@ -3365,10 +3431,16 @@ class App(Gtk.Window):
         if not (0 <= index < len(agents) and 0 <= target < len(agents)):
             return
         agents[index], agents[target] = agents[target], agents[index]
-        self.replace_agents(agents)
+        if host and host.get("agents") is not None:
+            host["agents"] = agents
+            host["selected_agent"] = target
+        else:
+            self.replace_agents(agents)
+            if host:
+                host["selected_agent"] = target
         self.persist()
         self.refresh_host_content()
-        self.push_agent_list()
+        self.push_agent_list(host)
 
     def manage_agent(self, button, index, action):
         self.agents.set_active(index)
@@ -3426,7 +3498,11 @@ class App(Gtk.Window):
 
     def current_host(self):
         index = self.hosts.get_active()
-        return self.data["hosts"][index] if index >= 0 else None
+        if 0 <= index < len(self.data.get("hosts", [])):
+            return self.data["hosts"][index]
+        if self.data.get("hosts"):
+            return self.data["hosts"][0]
+        return None
 
     def refresh_directories(self):
         self.directories.remove_all()
@@ -4915,6 +4991,12 @@ class App(Gtk.Window):
         target_sid = str(entry.get("session_id", "")).strip()
         existing = next((s for s in self.sessions if s.get("id") == target_sid or s.get("id", "").replace("-", "") == target_sid.replace("-", "")), None)
         if existing:
+            sess_host = existing.get("host")
+            if sess_host and not self.session_matches_host(existing, self.current_host()):
+                for idx, h in enumerate(self.data.get("hosts", [])):
+                    if h is sess_host or (h.get("id") and h.get("id") == sess_host.get("id")):
+                        self.hosts.set_active(idx)
+                        break
             if existing.get("minimized_button") is not None:
                 self.restore_minimized_session(existing)
             elif existing.get("floating_window") is not None:
@@ -4932,6 +5014,11 @@ class App(Gtk.Window):
         if not host:
             self.message("无法重回现场", f"未找到主机 {entry.get('host_name', '')}，请先添加主机。")
             return
+        for idx, h in enumerate(hosts):
+            if h is host or (h.get("id") and h.get("id") == host.get("id")):
+                if self.hosts.get_active() != idx:
+                    self.hosts.set_active(idx)
+                break
         item = {
             "id": target_sid or uuid.uuid4().hex,
             "directory_name": entry.get("directory_name") or entry.get("directory_path", ""),
@@ -4950,7 +5037,9 @@ class App(Gtk.Window):
         area.set_spacing(10)
         area.set_margin_start(14); area.set_margin_end(14); area.set_margin_top(12); area.set_margin_bottom(12)
         header = Gtk.Box(spacing=8)
-        title = Gtk.Label(label="操作日志 · 一键重回现场", xalign=0)
+        current_h = self.current_host()
+        host_title = f" · {current_h['name']}" if current_h and current_h.get("name") else ""
+        title = Gtk.Label(label=f"操作日志{host_title} · 一键重回现场", xalign=0)
         title.get_style_context().add_class("section")
         header.pack_start(title, True, True, 0)
         refresh_btn = Gtk.Button(label="同步刷新")
@@ -4971,9 +5060,12 @@ class App(Gtk.Window):
                 return
             for child in list(list_box.get_children()):
                 list_box.remove(child)
-            logs = filter_operation_logs(self.data.get("operation_logs", []), self.data.get("sync_username", ""))
+            current_host = self.current_host()
+            logs = filter_operation_logs(self.data.get("operation_logs", []), self.data.get("sync_username", ""), host=current_host)
             if not logs:
-                empty = Gtk.Label(label="暂无操作记录，打开任意工作区会话后会自动记录并同步。", xalign=0.5)
+                host_name = (current_host or {}).get("name", "")
+                msg = f"当前主机「{host_name}」暂无操作记录，打开任意工作区会话后会自动记录并同步。" if host_name else "暂无操作记录，打开任意工作区会话后会自动记录并同步。"
+                empty = Gtk.Label(label=msg, xalign=0.5)
                 empty.get_style_context().add_class("subtitle")
                 list_box.pack_start(empty, True, True, 24)
             else:
@@ -5049,6 +5141,12 @@ class App(Gtk.Window):
 
     def open_terminal(self, _button, shared_host=None, shared_item=None, activate=True, attach_or_create=False, log_action="open"):
         host = shared_host or self.current_host()
+        if shared_host and activate:
+            for idx, h in enumerate(self.data.get("hosts", [])):
+                if h is shared_host or (h.get("id") and h.get("id") == shared_host.get("id")):
+                    if self.hosts.get_active() != idx:
+                        self.hosts.set_active(idx)
+                    break
         di, ai = self.directories.get_active(), self.agents.get_active()
         if not host or (shared_item is None and (di < 0 or ai < 0)):
             self.message("无法打开终端", "请选择主机、项目目录和命令预设。")

@@ -334,6 +334,8 @@ class DesktopThemeBuildTest(unittest.TestCase):
             if platform_dir not in sys.path:
                 sys.path.insert(0, platform_dir)
             try:
+                sys.modules.pop("core", None)
+                sys.modules.pop("remote-dev-terminal", None)
                 mod = importlib.import_module("remote-dev-terminal")
                 mod = importlib.reload(mod)
             finally:
@@ -380,6 +382,8 @@ class DesktopThemeBuildTest(unittest.TestCase):
             if platform_dir not in sys.path:
                 sys.path.insert(0, platform_dir)
             try:
+                sys.modules.pop("core", None)
+                sys.modules.pop("remote-dev-terminal", None)
                 mod = importlib.import_module("remote-dev-terminal")
                 mod = importlib.reload(mod)
             finally:
@@ -430,6 +434,8 @@ class DesktopThemeBuildTest(unittest.TestCase):
             if platform_dir not in sys.path:
                 sys.path.insert(0, platform_dir)
             try:
+                sys.modules.pop("core", None)
+                sys.modules.pop("remote-dev-terminal", None)
                 mod = importlib.import_module("remote-dev-terminal")
                 mod = importlib.reload(mod)
             finally:

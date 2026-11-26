@@ -214,13 +214,26 @@ def operation_log_account(config_or_entry):
     return str(config_or_entry.get("account", "")).strip().casefold()
 
 
-def filter_operation_logs(logs, account="", limit=200):
+def filter_operation_logs(logs, account="", limit=200, host=None):
     target = str(account or "").strip().casefold()
-    filtered = [
-        item for item in (logs or [])
-        if isinstance(item, dict) and item.get("id")
-        and str(item.get("account", "")).strip().casefold() == target
-    ]
+    host_id = str(host.get("id", "")).strip() if isinstance(host, dict) else ""
+    host_name = str(host.get("name", "")).strip() if isinstance(host, dict) else ""
+    filtered = []
+    for item in (logs or []):
+        if not (isinstance(item, dict) and item.get("id")):
+            continue
+        if target and str(item.get("account", "")).strip().casefold() != target:
+            continue
+        if host:
+            item_host_id = str(item.get("host_id", "")).strip()
+            item_host_name = str(item.get("host_name", "")).strip()
+            if host_id and item_host_id:
+                if item_host_id != host_id:
+                    continue
+            elif host_name and item_host_name:
+                if item_host_name != host_name:
+                    continue
+        filtered.append(item)
     return sorted(filtered, key=lambda x: int(x.get("created_at", 0)), reverse=True)[:limit]
 
 

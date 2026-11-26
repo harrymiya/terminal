@@ -67,6 +67,19 @@ function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' })[c]);
 }
 function currentHost() { return config.hosts.find((h) => h.id === activeHost) || null; }
+function sessionMatchesHost(session, host) {
+  if (!session) return false;
+  if (!host) return true;
+  const sh = session.host;
+  if (!sh) return true;
+  if (sh.id && host.id && sh.id === host.id) return true;
+  if (sh.sync_id && host.sync_id && sh.sync_id === host.sync_id) return true;
+  if (sh.name && host.name && sh.name === host.name) return true;
+  const sAddr = sh.address || sh.lan_address || sh.external_address || '';
+  const hAddr = host.address || host.lan_address || host.external_address || '';
+  if (sAddr && hAddr && sAddr === hAddr && (sh.username || '') === (host.username || '')) return true;
+  return false;
+}
 function agentsForHost(host) { return host?.agents?.length ? host.agents : config.agents; }
 function currentAgent() { const list=agentsForHost(currentHost()); return list[Math.max(0, Number(currentHost()?.selected_agent)||0)] || null; }
 function sshEndpointSignature(host) {
@@ -733,10 +746,14 @@ function enableFloatingHeaderDrag(session, card, head) {
 }
 
 function renderSessions({ focus = true } = {}) {
-  const all = [...sessions.values()];
+  const host = currentHost();
+  const all = [...sessions.values()].filter(s => sessionMatchesHost(s, host));
   const docked = all.filter(session => !session.minimized && !session.floating);
   const rows = tileRows(docked);
   const hasVisible = rows.length > 0 || all.some(session => session.floating);
+  if (!all.some(s => s.id === activeSession)) {
+    activeSession = all.length > 0 ? (docked[0]?.id || all[0].id) : null;
+  }
   emptyState.classList.toggle('hidden', hasVisible);
   terminalGrid.classList.toggle('visible', hasVisible);
   $('view-mode').textContent = viewMode === 'tabs' ? '标签模式' : '平铺模式';
@@ -864,7 +881,7 @@ function renderSessions({ focus = true } = {}) {
     }
   }
   if (focus && !document.querySelector('dialog[open]')) sessions.get(activeSession)?.term.focus();
-  $('session-count').textContent=`${sessions.size} / 8`;
+  $('session-count').textContent=`${all.length} / 8`;
   updateRunningHeaders();
   renderInstances();
   renderMinimized();
@@ -875,9 +892,10 @@ function renderInstances() {
   const section = $('instances-section'), root = $('instances-list');
   root.replaceChildren();
   for (const session of sessions.values()) session.instanceButton = null;
-  const items = [...sessions.values()].filter(session => viewMode === 'grid'
+  const host = currentHost();
+  const items = [...sessions.values()].filter(session => sessionMatchesHost(session, host) && (viewMode === 'grid'
     ? session.minimized
-    : !session.floating);
+    : !session.floating));
   section.hidden = !items.length;
   if (section.hidden) return;
   const renderInstanceRow = (session, container, grouped = false) => {
@@ -1026,8 +1044,8 @@ function toggleFloat(session){
   renderSessions();
 }
 function minimizeSession(session){session.minimized=true;session.floating=false;renderSessions();}
-function restoreSession(id){const session=sessions.get(id);if(!session)return;session.minimized=false;activeSession=id;renderSessions();session.term.focus();}
-function renderMinimized(){const bar=$('minimized-sessions');if(!bar)return;bar.replaceChildren();bar.style.display=viewMode==='grid'?'none':'flex';if(viewMode==='grid')return;for(const s of sessions.values()){if(!s.minimized)continue;const b=document.createElement('button');b.className='button quiet';b.textContent=`● ${s.title}`;b.title='恢复终端';b.addEventListener('click',()=>restoreSession(s.id));bar.append(b);}}
+function restoreSession(id){const session=sessions.get(id);if(!session)return;if(session.host?.id&&session.host.id!==activeHost){activeHost=session.host.id;}session.minimized=false;activeSession=id;renderSessions();session.term.focus();}
+function renderMinimized(){const bar=$('minimized-sessions');if(!bar)return;bar.replaceChildren();bar.style.display=viewMode==='grid'?'none':'flex';if(viewMode==='grid')return;const host=currentHost();for(const s of sessions.values()){if(!s.minimized||!sessionMatchesHost(s,host))continue;const b=document.createElement('button');b.className='button quiet';b.textContent=`● ${s.title}`;b.title='恢复终端';b.addEventListener('click',()=>restoreSession(s.id));bar.append(b);}}
 function chooseImage(session){openImageDialog(session);}
 
 function showForm(title, fields, initial, onSave, onDelete=null) {
@@ -1100,7 +1118,11 @@ function editHost(host=null) {
   });
 }
 function editAgent(index=-1) {
-  const host=currentHost(); const list=agentsForHost(host); const old=index>=0?list[index]:null;
+  const host=currentHost();
+  if (host && (!host.agents || !host.agents.length)) {
+    host.agents = (config.agents || []).map(a => ({...a}));
+  }
+  const list=agentsForHost(host); const old=index>=0?list[index]:null;
   let selectedIcon = old?.icon || '✳';
   showForm(old?'编辑开发者':'添加开发者',[{key:'name',label:'名称',placeholder:'Codex'},{key:'command',label:'启动命令',placeholder:'codex'}],old,(v)=>{
     if(!v.name||!v.command) return '请填写名称和启动命令。';
@@ -1109,7 +1131,7 @@ function editAgent(index=-1) {
     else list.push(updated);
     if (host) host.selected_agent = old ? index : list.length - 1;
     sendConfig();render();return '';
-  },old?()=>{if(confirm(`删除开发者“${old.name}”？`)){const target=host&&host.agents?.length?host.agents:config.agents;target.splice(index,1);if(host)host.selected_agent=Math.max(0,index-1);sendConfig();render();}}:null);
+  },old?()=>{if(confirm(`删除开发者“${old.name}”？`)){list.splice(index,1);if(host)host.selected_agent=Math.max(0,index-1);sendConfig();render();}}:null);
   const options = [['✳', '默认'], ...Object.entries(AGENT_ICONS).map(([key, name]) => [`brand:${key}`, name])];
   if (!options.some(([value]) => value === selectedIcon)) options.unshift([selectedIcon, '当前图标']);
   const picker = document.createElement('fieldset');
@@ -1148,7 +1170,7 @@ function editWorkspace(index=-1) {
 function deleteWorkspace(index){const host=currentHost(), item=host?.directories[index];if(!item||!confirm(`删除工作区“${item.name}”？`))return;host.directories.splice(index,1);sendConfig();render();}
 function moveWorkspace(index,offset){const host=currentHost(),items=host?.directories;if(!items||index<0||index+offset<0||index+offset>=items.length)return;[items[index],items[index+offset]]=[items[index+offset],items[index]];sendConfig();render();}
 function moveWorkspaceToEdge(index,toTop){const host=currentHost(),items=host?.directories;if(!items||index<0||index>=items.length)return;const target=toTop?0:items.length-1;if(index===target)return;const[item]=items.splice(index,1);if(toTop)items.unshift(item);else items.push(item);sendConfig();render();}
-function moveAgentAt(index,offset){const host=currentHost(),items=agentsForHost(host),target=index+offset;if(index<0||target<0||target>=items.length)return;[items[index],items[target]]=[items[target],items[index]];if(host)host.selected_agent=target;sendConfig();render();}
+function moveAgentAt(index,offset){const host=currentHost();if(host&&(!host.agents||!host.agents.length)){host.agents=(config.agents||[]).map(a=>({...a}));}const items=agentsForHost(host),target=index+offset;if(index<0||target<0||target>=items.length)return;[items[index],items[target]]=[items[target],items[index]];if(host)host.selected_agent=target;sendConfig();render();}
 
 function createTerminalSession({ id, remoteId = id, title, titleSource = 'default', host, workspace, agent, restoreOnly = false, activate = true }) {
   const normalizedId = normalizeSessionId(id);
@@ -1871,14 +1893,31 @@ function renderOperationLogs() {
   const container = $('operation-logs-list');
   if (!container) return;
   container.innerHTML = '';
+  const host = currentHost();
+  const hostId = String(host?.id || '').trim();
+  const hostName = String(host?.name || '').trim();
   const account = String(config.sync_username || '').trim().toLowerCase();
   const logs = (Array.isArray(config.operation_logs) ? config.operation_logs : [])
-    .filter((item) => String(item?.account || '').trim().toLowerCase() === account)
+    .filter((item) => {
+      if (account && String(item?.account || '').trim().toLowerCase() !== account) return false;
+      if (host) {
+        const itemHostId = String(item?.host_id || '').trim();
+        const itemHostName = String(item?.host_name || '').trim();
+        if (hostId && itemHostId) {
+          if (itemHostId !== hostId) return false;
+        } else if (hostName && itemHostName) {
+          if (itemHostName !== hostName) return false;
+        }
+      }
+      return true;
+    })
     .sort((a, b) => (Number(b?.created_at) || 0) - (Number(a?.created_at) || 0));
   if (!logs.length) {
     const empty = document.createElement('div');
     empty.className = 'muted small';
-    empty.textContent = '暂无操作记录，打开任意工作区会话后会自动记录并同步。';
+    empty.textContent = host?.name
+      ? `当前主机「${host.name}」暂无操作记录，打开任意工作区会话后会自动记录并同步。`
+      : '暂无操作记录，打开任意工作区会话后会自动记录并同步。';
     container.appendChild(empty);
     return;
   }
@@ -1943,6 +1982,9 @@ function restoreFromOperationLog(entry) {
   const sid = normalizeSessionId(entry.session_id || '');
   const existing = [...sessions.values()].find((s) => s.id === sid || s.remoteId === sid);
   if (existing) {
+    if (existing.host?.id && existing.host.id !== activeHost) {
+      activeHost = existing.host.id;
+    }
     if (existing.minimized) restoreSession(existing.id);
     else {
       activeSession = existing.id;
@@ -1957,6 +1999,9 @@ function restoreFromOperationLog(entry) {
   if (!host) {
     showError(`未找到主机 ${entry.host_name || ''}，请先添加主机。`);
     return;
+  }
+  if (host.id !== activeHost) {
+    activeHost = host.id;
   }
   if (sessions.size >= 8) {
     showError('最多同时打开 8 个终端。');

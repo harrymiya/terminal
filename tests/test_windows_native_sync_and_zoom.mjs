@@ -253,6 +253,11 @@ assert.match(windowsUi, /for \(const group of groupSessionsByDeveloper\(items\)\
 assert.match(windowsUi, /name\.textContent = grouped \? sessionWorkspaceLabel\(session\) : session\.title/);
 assert.match(windowsUi, /term\.onTitleChange/);
 assert.match(windowsUi, /applyAgentSessionTitle\(session, title\)/);
+assert.match(windowsUi, /function sessionMatchesHost\(session, host\)/);
+assert.match(windowsUi, /const all = \[\.\.\.sessions\.values\(\)\]\.filter\(s => sessionMatchesHost\(s, host\)\);/);
+assert.match(windowsUi, /sessionMatchesHost\(session, host\)/);
+assert.match(windowsUi, /function renderOperationLogs\(\)/);
+assert.match(windowsUi, /if \(existing\.host\?\.id && existing\.host\.id !== activeHost\)/);
 assert.match(windowsUi, /titleSource='manual'/);
 assert.match(windowsSsh, /conversation_summaries\.db/);
 assert.match(layoutCss, /body\.view-tabs \.terminal-quota:not\(\[hidden\]\)\s*\{[^}]*display:\s*inline-flex;/s);

@@ -265,13 +265,26 @@ def operation_log_account(config_or_entry):
     return str(config_or_entry.get("account", "")).strip().casefold()
 
 
-def filter_operation_logs(logs, account="", limit=200):
+def filter_operation_logs(logs, account="", limit=200, host=None):
     target = str(account or "").strip().casefold()
-    filtered = [
-        item for item in (logs or [])
-        if isinstance(item, dict) and item.get("id")
-        and str(item.get("account", "")).strip().casefold() == target
-    ]
+    host_id = str(host.get("id", "")).strip() if isinstance(host, dict) else ""
+    host_name = str(host.get("name", "")).strip() if isinstance(host, dict) else ""
+    filtered = []
+    for item in (logs or []):
+        if not (isinstance(item, dict) and item.get("id")):
+            continue
+        if target and str(item.get("account", "")).strip().casefold() != target:
+            continue
+        if host:
+            item_host_id = str(item.get("host_id", "")).strip()
+            item_host_name = str(item.get("host_name", "")).strip()
+            if host_id and item_host_id:
+                if item_host_id != host_id:
+                    continue
+            elif host_name and item_host_name:
+                if item_host_name != host_name:
+                    continue
+        filtered.append(item)
     return sorted(filtered, key=lambda x: int(x.get("created_at", 0)), reverse=True)[:limit]
 
 
@@ -493,6 +506,245 @@ def wrap_agent_command(session_id, agent):
         f'fi; _i=$((_i + 1)); done; rm -f "$_rdt_mark") >/dev/null 2>&1 & '
         f'{text}; fi'
     )
+
+
+def agent_session_title_command(session_id, kind, workspace=""):
+    if kind not in ("codex", "agy"):
+        raise ValueError("unsupported agent title source")
+    sid = re.sub(r"[^0-9a-f]", "", str(session_id).replace("-", "").lower())
+    if not sid:
+        raise ValueError("invalid session ID")
+    script = r'''import glob, os, sqlite3, sys
+import json, re, subprocess
+from urllib.parse import quote, unquote, urlparse
+kind, rdt_session_id, requested_workspace = sys.argv[1:4]
+session_file = os.path.join(os.path.expanduser("~"), ".remote-dev-terminal", "agent-sessions", rdt_session_id)
+try:
+    wanted = open(session_file, encoding="utf-8").read().strip().replace("-", "").lower()
+except OSError:
+    wanted = ""
+def clean(value):
+    return " ".join(str(value or "").replace("\x00", " ").split())[:512]
+def normalized_path(value):
+    return os.path.normcase(os.path.realpath(os.path.expanduser(str(value or "")))) if value else ""
+def sort_timestamp(value):
+    try:
+        return (1, float(value))
+    except (TypeError, ValueError):
+        return (0, str(value or ""))
+def codex_homes():
+    roots = [os.environ.get("CODEX_HOME", ""), os.path.expanduser("~/.codex")]
+    roots.extend(glob.glob(os.path.expanduser("~/.codex-*")))
+    unique = []
+    for root in roots:
+        if root:
+            root = os.path.realpath(os.path.expanduser(root))
+            if root not in unique:
+                unique.append(root)
+    return unique
+def codex_db_paths():
+    roots = codex_homes() + [os.environ.get("CODEX_SQLITE_HOME", "")]
+    paths = []
+    for root in roots:
+        if root:
+            paths.extend(glob.glob(os.path.join(root, "state_*.sqlite")))
+            paths.extend(glob.glob(os.path.join(root, "sqlite", "state_*.sqlite")))
+            paths.append(os.path.join(root, "state.sqlite"))
+    return sorted(set(paths), key=lambda path: os.path.getmtime(path) if os.path.isfile(path) else 0, reverse=True)
+def codex_title(thread_id):
+    wanted_id = str(thread_id).replace("-", "").lower()
+    for home in codex_homes():
+        path = os.path.join(home, "session_index.jsonl")
+        try:
+            with open(path, "rb") as handle:
+                handle.seek(0, os.SEEK_END)
+                position, pending = handle.tell(), b""
+                while position:
+                    size = min(position, 8192)
+                    position -= size
+                    handle.seek(position)
+                    pending = handle.read(size) + pending
+                    lines = pending.split(b"\n")
+                    pending = lines.pop(0)
+                    for line in reversed(lines):
+                        try:
+                            entry = json.loads(line)
+                        except (UnicodeDecodeError, json.JSONDecodeError):
+                            continue
+                        if isinstance(entry, dict) and str(entry.get("id", "")).replace("-", "").lower() == wanted_id:
+                            title = clean(entry.get("thread_name"))
+                            if title:
+                                return title
+                if pending:
+                    try:
+                        entry = json.loads(pending)
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        entry = {}
+                    if isinstance(entry, dict) and str(entry.get("id", "")).replace("-", "").lower() == wanted_id:
+                        title = clean(entry.get("thread_name"))
+                        if title:
+                            return title
+        except OSError:
+            pass
+    return ""
+def active_legacy_agent():
+    target = "rdt_" + rdt_session_id[:18]
+    try:
+        command = subprocess.run(["tmux", "display-message", "-p", "-t", target, "#{pane_current_command}"],
+                                 capture_output=True, text=True, timeout=2, check=False).stdout.strip().lower()
+        pane_path = subprocess.run(["tmux", "display-message", "-p", "-t", target, "#{pane_current_path}"],
+                                   capture_output=True, text=True, timeout=2, check=False).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return False
+    base = os.path.basename(command)
+    if kind == "codex":
+        expected = base in ("codex", "codex2", "codx") or base.startswith("codex-")
+    else:
+        expected = base in ("agy", "agy2", "antigravity")
+    return expected and (not requested_workspace or not pane_path or normalized_path(pane_path) == normalized_path(requested_workspace))
+def codex_workspace_candidates():
+    workspace = normalized_path(requested_workspace)
+    if not workspace:
+        return []
+    candidates = []
+    for path in codex_db_paths():
+        if not os.path.isfile(path):
+            continue
+        try:
+            uri = "file:" + quote(os.path.abspath(path), safe="/") + "?mode=ro"
+            db = sqlite3.connect(uri, uri=True, timeout=0.2)
+            db.execute("PRAGMA busy_timeout=200")
+            columns = {row[1] for row in db.execute("PRAGMA table_info(threads)")}
+            id_col = next((name for name in ("id", "thread_id") if name in columns), None)
+            cwd_col = "cwd" if "cwd" in columns else None
+            updated_col = next((name for name in ("updated_at_ms", "updated_at", "recency_at_ms", "created_at_ms", "created_at") if name in columns), None)
+            if id_col and cwd_col:
+                query = "SELECT " + id_col + ", " + cwd_col + (", " + updated_col if updated_col else "") + " FROM threads"
+                for row in db.execute(query):
+                    if normalized_path(row[1]) == workspace and row[0]:
+                        updated = row[2] if updated_col else 0
+                        candidates.append((sort_timestamp(updated), str(row[0]).replace("-", "").lower()))
+            db.close()
+        except Exception:
+            pass
+    return [thread_id for _updated, thread_id in sorted(candidates, key=lambda row: row[0], reverse=True)]
+def agy_db_paths():
+    roots = [os.environ.get("AGY_HOME", ""), os.path.expanduser("~/.gemini/antigravity-cli"),
+             os.path.expanduser("~/.gemini/antigravity"), os.path.expanduser("~/.gemini/antigravity-ide")]
+    roots.extend(glob.glob(os.path.expanduser("~/.gemini/antigravity*")))
+    paths = []
+    for root in roots:
+        if root:
+            path = os.path.join(os.path.realpath(os.path.expanduser(root)), "conversation_summaries.db")
+            if path not in paths:
+                paths.append(path)
+    return paths
+def agy_workspace_matches(value):
+    wanted_path = normalized_path(requested_workspace)
+    if not wanted_path:
+        return False
+    try:
+        parsed_value = json.loads(value) if isinstance(value, str) else value
+    except (TypeError, json.JSONDecodeError):
+        parsed_value = value
+    values = parsed_value if isinstance(parsed_value, list) else [parsed_value]
+    for item in values:
+        if isinstance(item, dict):
+            item = item.get("uri") or item.get("path") or item.get("workspace_uri") or ""
+        if not isinstance(item, str):
+            continue
+        parsed = urlparse(item)
+        path = unquote(parsed.path) if parsed.scheme == "file" else unquote(item)
+        if normalized_path(path) == wanted_path:
+            return True
+    return False
+def agy_workspace_candidates():
+    candidates = []
+    for path in agy_db_paths():
+        if not os.path.isfile(path):
+            continue
+        try:
+            uri = "file:" + quote(os.path.abspath(path), safe="/") + "?mode=ro"
+            db = sqlite3.connect(uri, uri=True, timeout=0.2)
+            db.execute("PRAGMA busy_timeout=200")
+            columns = {row[1] for row in db.execute("PRAGMA table_info(conversation_summaries)")}
+            id_col = next((name for name in ("conversation_id", "id") if name in columns), None)
+            workspace_col = next((name for name in ("workspace_uris", "workspace_uri", "workspace") if name in columns), None)
+            updated_col = next((name for name in ("last_modified_time", "updated_at", "modified_at") if name in columns), None)
+            if id_col and workspace_col:
+                select = [id_col, workspace_col] + ([updated_col] if updated_col else [])
+                for row in db.execute("SELECT " + ", ".join(select) + " FROM conversation_summaries"):
+                    if agy_workspace_matches(row[1]) and row[0]:
+                        updated = row[2] if updated_col else 0
+                        candidates.append((sort_timestamp(updated), str(row[0]).replace("-", "").lower()))
+            db.close()
+        except Exception:
+            pass
+    return [conversation_id for _updated, conversation_id in sorted(candidates, key=lambda row: row[0], reverse=True)]
+def recover_legacy_session_id():
+    pending_capture = os.path.join(os.path.dirname(session_file), ".mark_" + rdt_session_id)
+    if os.path.exists(pending_capture):
+        return ""
+    if not active_legacy_agent():
+        return ""
+    candidates = codex_workspace_candidates() if kind == "codex" else agy_workspace_candidates()
+    for candidate in candidates:
+        if re.fullmatch(r"[0-9a-f]{32,36}", candidate):
+            return candidate
+    return ""
+if not wanted:
+    wanted = recover_legacy_session_id()
+    if wanted:
+        try:
+            os.makedirs(os.path.dirname(session_file), mode=0o700, exist_ok=True)
+            temp_file = session_file + ".tmp"
+            with open(temp_file, "w", encoding="utf-8") as handle:
+                handle.write(wanted)
+            os.replace(temp_file, session_file)
+        except OSError:
+            pass
+if not wanted:
+    print("RDT_ERROR:session-id-not-found", end="")
+    raise SystemExit(0)
+if kind == "codex":
+    title = codex_title(wanted)
+    if title:
+        print("RDT_TITLE:" + title, end="")
+    else:
+        print("RDT_ERROR:codex-title-not-found", end="")
+else:
+    found_title = False
+    for path in agy_db_paths():
+        if not os.path.isfile(path):
+            continue
+        try:
+            uri = "file:" + quote(os.path.abspath(path), safe="/") + "?mode=ro"
+            db = sqlite3.connect(uri, uri=True, timeout=0.2)
+            db.execute("PRAGMA busy_timeout=200")
+            columns = {row[1] for row in db.execute("PRAGMA table_info(conversation_summaries)")}
+            id_col = next((name for name in ("conversation_id", "id") if name in columns), None)
+            title_col = next((name for name in ("title", "conversation_title") if name in columns), None)
+            if id_col and title_col:
+                query = "SELECT " + title_col + " FROM conversation_summaries WHERE lower(replace(" + id_col + ", '-', '')) = lower(replace(?, '-', '')) LIMIT 1"
+                row = db.execute(query, (wanted,)).fetchone()
+                db.close()
+                title = clean(row[0]) if row else ""
+                if title:
+                    print("RDT_TITLE:" + title, end="")
+                    found_title = True
+                    break
+            else:
+                db.close()
+        except Exception:
+            pass
+    if not found_title:
+        print("RDT_ERROR:agy-title-not-found", end="")'''
+    encoded = base64.b64encode(script.encode("utf-8")).decode("ascii")
+    arguments = base64.b64encode(json.dumps([kind, sid, str(workspace or "")], ensure_ascii=False).encode("utf-8")).decode("ascii")
+    python = (f'import base64,json,sys;sys.argv[1:]=json.loads(base64.b64decode("{arguments}"));'
+              f'exec(compile(base64.b64decode("{encoded}"),"<rdt-title-query>","exec"))')
+    return "python3 -c " + shlex.quote(python)
+
 
 
 def ssh_argv(host, directory, agent, session_id=None, control_path=None, restore_only=False):
