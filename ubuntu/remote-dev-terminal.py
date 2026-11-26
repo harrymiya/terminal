@@ -1879,6 +1879,10 @@ class App(Gtk.Window):
         hid = str(host.get("id", "")).strip()
         if sid and hid and sid == hid:
             return True
+        # Once both profiles have stable IDs, a reused name or address must not
+        # make an old session appear under a different host.
+        if sid and hid:
+            return False
         sync_id = str(shost.get("sync_id", "")).strip()
         h_sync_id = str(host.get("sync_id", "")).strip()
         if sync_id and h_sync_id and sync_id == h_sync_id:
@@ -3075,6 +3079,9 @@ class App(Gtk.Window):
             self.hosts.set_active(min(max(selected, 0), len(self.data["hosts"]) - 1))
         self.refreshing = False
         self.refresh_host_content()
+        # Host removal/reconciliation can change the active profile while the
+        # host selector is rebuilt. Keep the instance view in step with it.
+        self.rebuild_view()
         icons_changed = False
         for session in self.sessions:
             icon_box = session.get("title_icon")
@@ -3175,9 +3182,9 @@ class App(Gtk.Window):
             self.hosts_list.pack_start(hint, False, False, 0)
         self.hosts_list.show_all()
         agents = self.host_agents(host) if host else []
-        target_names = [agent["name"] for agent in agents]
         current_model = self.agents.get_model()
         current_names = [row[0] for row in current_model] if current_model else []
+        target_names = [agent.get("name", "") for agent in agents]
         target_active = min(max(host.get("selected_agent", 0), 0), len(agents) - 1) if agents else -1
         if current_names != target_names:
             self.refreshing = True
@@ -3199,8 +3206,8 @@ class App(Gtk.Window):
         agents = self.host_agents(host) if host else []
         active_index = self.agents.get_active()
         children = self.agents_list.get_children()
-        items = [(item["name"], item["command"], item.get("icon")) for item in agents]
-        if items and self.agent_rows == (items, self.edit_mode) and len(children) == len(items):
+        items = [(item.get("id", ""), item["name"], item["command"], item.get("icon")) for item in agents]
+        if items and getattr(self, "agent_rows_host", None) == (host or {}).get("id") and self.agent_rows == (items, self.edit_mode) and len(children) == len(items):
             for index, row in enumerate(children):
                 ctx = row.get_children()[0].get_style_context()
                 (ctx.add_class if index == active_index else ctx.remove_class)("agent-selected")
@@ -3209,6 +3216,7 @@ class App(Gtk.Window):
             return
 
         self.agent_rows = (items, self.edit_mode)
+        self.agent_rows_host = (host or {}).get("id")
         for child in children:
             self.agents_list.remove(child)
         for index, item in enumerate(agents):
@@ -3397,7 +3405,7 @@ class App(Gtk.Window):
                 host["selected_agent"] = target
         self.persist()
         self.refresh_host_content()
-        self.push_agent_list(host)
+        self.push_host_profile(host)
 
     def manage_agent(self, button, index, action):
         self.agents.set_active(index)
@@ -3607,10 +3615,12 @@ class App(Gtk.Window):
                 items.pop(index)
                 if kind == "agents":
                     host["selected_agent"] = min(index, max(0, len(items) - 1))
+                    if host.get("agents") is not None:
+                        host["agents"] = items
                 self.persist()
                 self.refresh()
                 if kind == "directories": self.push_workspace_list(host)
-                elif kind == "agents": self.push_agent_list()
+                elif kind == "agents": self.push_host_profile(host)
                 if kind == "hosts":
                     self.refresh_all_shared()
             return
@@ -3730,14 +3740,18 @@ class App(Gtk.Window):
                 continue
             if action == "edit":
                 items[index] = values
+                if kind == "agents" and host.get("agents") is not None:
+                    host["agents"] = items
             else:
                 items.append(values)
                 if kind == "agents":
                     host["selected_agent"] = len(items) - 1
+                    if host.get("agents") is not None:
+                        host["agents"] = items
             self.persist()
             self.refresh()
             if kind == "directories": self.push_workspace_list(host)
-            elif kind == "agents": self.push_agent_list()
+            elif kind == "agents": self.push_host_profile(host)
             if kind == "hosts":
                 target_host = items[index] if action == "edit" else items[-1]
                 target_host.pop("_resolved", None)
@@ -4515,6 +4529,11 @@ class App(Gtk.Window):
                         merged = dict(synced)
                         if latest is not None:
                             merged["directories"] = latest.get("directories", merged.get("directories", []))
+                            # Developer presets are local host configuration. A
+                            # profile refresh must not replace them with defaults
+                            # from a different machine/account snapshot.
+                            merged["agents"] = latest.get("agents", merged.get("agents", self.data.get("agents", [])))
+                            merged["selected_agent"] = latest.get("selected_agent", merged.get("selected_agent", 0))
                         reconciled.append(merged)
                     reconciled_ids = {host.get("id") for host in reconciled}
                     reconciled.extend(dict(host) for host in current_hosts
