@@ -2437,31 +2437,91 @@ class App(Gtk.Window):
         if response == Gtk.ResponseType.OK and new_name and new_name != current_name:
             self.set_session_name(session, new_name, sync=True)
 
+    def session_title_tooltip(self, session, title):
+        status = session.get("title_sync_status", "")
+        return f"{title}\n标题同步：{status}" if status else title
+
+    def set_agent_title_sync_status(self, session, status):
+        if session.get("title_sync_status") == status:
+            return
+        session["title_sync_status"] = status
+        GLib.idle_add(self.apply_agent_title_sync_status, session, status)
+
+    def apply_agent_title_sync_status(self, session, status):
+        if session.get("title_sync_status") != status:
+            return False
+        item = session.get("item") if isinstance(session.get("item"), dict) else {}
+        title = item.get("display_name", "")
+        widget = session.get("session_title")
+        if title and widget is not None and hasattr(widget, "set_tooltip_text"):
+            widget.set_tooltip_text(self.session_title_tooltip(session, title))
+        widget = session.get("minimized_label")
+        if title and widget is not None and hasattr(widget, "set_tooltip_text"):
+            widget.set_tooltip_text(self.session_title_tooltip(session, title))
+        button = session.get("minimized_button")
+        if title and button is not None and hasattr(button, "set_tooltip_text"):
+            button.set_tooltip_text(self.session_title_tooltip(session, title))
+        return False
+
     def read_agent_session_title(self, session, kind):
         if kind not in ("codex", "agy"):
             return ""
         socket_path = session.get("socket_path", "")
         host = session.get("host", {})
+        if session.get("state", {}).get("closed"):
+            return ""
+        item = session.get("item") if isinstance(session.get("item"), dict) else {}
+        if session.get("title_source", item.get("title_source", "default")) == "manual":
+            self.set_agent_title_sync_status(session, "保留手动名称")
+            return ""
         address = ssh_address(host)
         port = ssh_port(host)
-        if (not socket_path or not os.path.exists(socket_path) or not address or not port
-                or session.get("state", {}).get("closed")):
+        if not socket_path or not os.path.exists(socket_path):
+            self.set_agent_title_sync_status(session, "等待 SSH 连接")
+            return ""
+        if not address or not port:
+            self.set_agent_title_sync_status(session, "SSH 地址或端口未配置")
+            return ""
+        if not host.get("username"):
+            self.set_agent_title_sync_status(session, "SSH 用户名未配置")
             return ""
         session_item = session.get("item") if isinstance(session.get("item"), dict) else {}
         workspace = session_item.get("directory_path") or session.get("directory_path", "")
         remote = agent_session_title_command(session.get("id", ""), kind, workspace)
-        remote = f'"${{SHELL:-/bin/bash}}" -l -c {shlex.quote(remote)}'
         argv = ["ssh", "-S", socket_path, "-o", "ControlMaster=no", "-o", "BatchMode=yes",
                 "-o", "ConnectTimeout=3", "-p", str(port), "-l", host["username"], "--", address, remote]
         try:
             result = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                    stderr=subprocess.DEVNULL, text=True, timeout=8)
-        except (OSError, subprocess.SubprocessError):
+                                    stderr=subprocess.PIPE, text=True, timeout=8)
+        except subprocess.TimeoutExpired:
+            self.set_agent_title_sync_status(session, "SSH 标题查询超时")
+            return ""
+        except OSError as exc:
+            self.set_agent_title_sync_status(session, f"无法启动 SSH：{str(exc)[:120]}")
+            return ""
+        except subprocess.SubprocessError:
+            self.set_agent_title_sync_status(session, "SSH 标题查询失败")
             return ""
         if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip().splitlines()
+            reason = detail[-1][-180:] if detail else f"远端退出码 {result.returncode}"
+            self.set_agent_title_sync_status(session, f"远端查询失败：{reason}")
             return ""
-        return next((line[len("RDT_TITLE:"):].strip()
-                     for line in reversed(result.stdout.splitlines()) if line.startswith("RDT_TITLE:")), "")
+        lines = result.stdout.splitlines()
+        title = next((line[len("RDT_TITLE:"):].strip()
+                      for line in reversed(lines) if line.startswith("RDT_TITLE:")), "")
+        if title:
+            self.set_agent_title_sync_status(session, "已读取 Agent 标题")
+        else:
+            code = next((line[len("RDT_ERROR:"):].strip()
+                         for line in reversed(lines) if line.startswith("RDT_ERROR:")), "")
+            reason = {
+                "session-id-not-found": "远端未绑定 Agent 会话 ID",
+                "codex-title-not-found": "Codex 索引中未找到会话名称",
+                "agy-title-not-found": "AGY 摘要库中未找到会话名称",
+            }.get(code, "等待 Agent 写入会话标题")
+            self.set_agent_title_sync_status(session, reason)
+        return title
 
     def watch_agent_session_title(self, session, kind):
         stop = threading.Event()
@@ -2471,7 +2531,10 @@ class App(Gtk.Window):
             while not stop.is_set() and not session.get("state", {}).get("closed"):
                 title = self.read_agent_session_title(session, kind)
                 if self.agent_session_title_needs_sync(session, title):
+                    self.set_agent_title_sync_status(session, "发现新标题，正在同步")
                     GLib.idle_add(self.apply_agent_session_title, session, title)
+                elif title:
+                    self.set_agent_title_sync_status(session, "已同步")
                 stop.wait(3)
 
         thread = threading.Thread(target=watch, daemon=True)
@@ -2524,15 +2587,15 @@ class App(Gtk.Window):
             if session_title is not None and hasattr(session_title, "set_text"):
                 session_title.set_text(new_name)
                 if hasattr(session_title, "set_tooltip_text"):
-                    session_title.set_tooltip_text(new_name)
+                    session_title.set_tooltip_text(self.session_title_tooltip(session, new_name))
 
             minimized_label = session.get("minimized_label")
             if minimized_label is not None and hasattr(minimized_label, "set_text"):
                 minimized_label.set_text(new_name)
                 if hasattr(minimized_label, "set_tooltip_text"):
-                    minimized_label.set_tooltip_text(new_name)
+                    minimized_label.set_tooltip_text(self.session_title_tooltip(session, new_name))
             if session.get("minimized_button") is not None and hasattr(session["minimized_button"], "set_tooltip_text"):
-                session["minimized_button"].set_tooltip_text(new_name)
+                session["minimized_button"].set_tooltip_text(self.session_title_tooltip(session, new_name))
 
             if not self.tiled:
                 self.update_tab_header(self.tabs.get_nth_page(self.tabs.get_current_page()))

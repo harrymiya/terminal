@@ -440,6 +440,9 @@ class DesktopThemeBuildTest(unittest.TestCase):
                     agent_title = app.read_agent_session_title(sess, "codex")
                 self.assertEqual(agent_title, "Agent Generated Title")
                 self.assertIn(sess["socket_path"], ssh_run.call_args.args[0])
+                remote_title_command = ssh_run.call_args.args[0][-1]
+                self.assertIn("python3 -c", remote_title_command)
+                self.assertNotIn("<<'RDT_PY'", remote_title_command)
                 app.apply_agent_session_title(sess, agent_title)
                 self.assertEqual(sess["session_title"].get_text(), "Agent Generated Title")
                 self.assertEqual(sess["item"]["title_source"], "agent")
@@ -452,6 +455,12 @@ class DesktopThemeBuildTest(unittest.TestCase):
                 self.assertEqual(sess["session_title"].get_text(), "Agent Generated Title")
                 app.set_session_name(sess, "Stale Default Name", sync=False, title_source="default")
                 self.assertEqual(sess["session_title"].get_text(), "Agent Generated Title")
+                with patch.object(mod.subprocess, "run", return_value=SimpleNamespace(
+                        returncode=0, stdout="RDT_ERROR:session-id-not-found", stderr="")):
+                    self.assertEqual(app.read_agent_session_title(sess, "codex"), "")
+                self.assertEqual(sess["title_sync_status"], "远端未绑定 Agent 会话 ID")
+                app.apply_agent_title_sync_status(sess, sess["title_sync_status"])
+                self.assertIn("远端未绑定 Agent 会话 ID", sess["session_title"].get_tooltip_text())
 
                 # Test set_session_name updates label and syncs PUT
                 app.set_session_name(sess, "Renamed Instance", sync=True)
@@ -463,6 +472,9 @@ class DesktopThemeBuildTest(unittest.TestCase):
                 self.assertEqual(app.data["operation_logs"][0]["title_source"], "manual")
                 self.assertTrue(any(call[0] == "PUT" and call[1] == "sess-1" and call[2]["display_name"] == "Renamed Instance" for call in sync_calls))
                 self.assertFalse(app.agent_session_title_needs_sync(sess, "A later generated title"))
+                with patch.object(mod.subprocess, "run", side_effect=AssertionError("manual names must skip remote title reads")):
+                    self.assertEqual(app.read_agent_session_title(sess, "codex"), "")
+                self.assertEqual(sess["title_sync_status"], "保留手动名称")
                 app.apply_agent_session_title(sess, "A later generated title")
                 self.assertEqual(sess["session_title"].get_text(), "Renamed Instance")
                 self.assertEqual(app.data["operation_logs"][0]["session_name"], "Renamed Instance")

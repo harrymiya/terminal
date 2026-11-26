@@ -2,7 +2,6 @@ import http.client
 import importlib.util
 import json
 import os
-import shlex
 import sqlite3
 import subprocess
 import tempfile
@@ -281,8 +280,8 @@ class SyncServerTest(unittest.TestCase):
             codex_env = {**os.environ, "CODEX_HOME": str(codex_home)}
             codex_env["HOME"] = temp_dir
             codex_command = omarchy_core.agent_session_title_command(session_id, "codex", "/work")
-            codex_remote = f'"${{SHELL:-/bin/bash}}" -l -c {shlex.quote(codex_command)}'
-            result = subprocess.run(["bash", "-c", codex_remote],
+            self.assertNotIn("<<'RDT_PY'", codex_command)
+            result = subprocess.run(["bash", "-c", codex_command],
                                     env=codex_env, text=True, capture_output=True, check=False)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout, "RDT_TITLE:Codex title from index")
@@ -299,10 +298,9 @@ class SyncServerTest(unittest.TestCase):
             fake_tmux.chmod(0o700)
             legacy_session_id = "d" * 32
             legacy_command = omarchy_core.agent_session_title_command(legacy_session_id, "codex", "/work")
-            legacy_remote = f'"${{SHELL:-/bin/bash}}" -l -c {shlex.quote(legacy_command)}'
             legacy_env = {**codex_env, "PATH": str(fake_bin) + os.pathsep + os.environ.get("PATH", ""),
                           "RDT_TEST_PANE_PATH": "/work"}
-            result = subprocess.run(["bash", "-c", legacy_remote],
+            result = subprocess.run(["bash", "-c", legacy_command],
                                     env=legacy_env, text=True, capture_output=True, check=False)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout, "RDT_TITLE:Recovered Codex title")
@@ -320,15 +318,13 @@ class SyncServerTest(unittest.TestCase):
             agy_env = {**os.environ, "AGY_HOME": str(agy_home)}
             agy_env["HOME"] = temp_dir
             agy_command = omarchy_core.agent_session_title_command(session_id, "agy", "/work")
-            agy_remote = f'"${{SHELL:-/bin/bash}}" -l -c {shlex.quote(agy_command)}'
-            result = subprocess.run(["bash", "-c", agy_remote],
+            result = subprocess.run(["bash", "-c", agy_command],
                                     env=agy_env, text=True, capture_output=True, check=False)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout, "RDT_TITLE:AGY title from DB")
 
             legacy_agy_session_id = "c" * 32
             legacy_agy_command = omarchy_core.agent_session_title_command(legacy_agy_session_id, "agy", "/work")
-            legacy_agy_remote = f'"${{SHELL:-/bin/bash}}" -l -c {shlex.quote(legacy_agy_command)}'
             legacy_agy_env = {**agy_env, "PATH": str(fake_bin) + os.pathsep + os.environ.get("PATH", ""),
                               "RDT_TEST_PANE_PATH": "/work"}
             fake_tmux.write_text(
@@ -337,7 +333,7 @@ class SyncServerTest(unittest.TestCase):
                 "  '#{pane_current_command}') printf 'agy\\n' ;;\n"
                 "  '#{pane_current_path}') printf '%s\\n' \"$RDT_TEST_PANE_PATH\" ;;\n"
                 "esac\n", encoding="utf-8")
-            result = subprocess.run(["bash", "-c", legacy_agy_remote],
+            result = subprocess.run(["bash", "-c", legacy_agy_command],
                                     env=legacy_agy_env, text=True, capture_output=True, check=False)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout, "RDT_TITLE:Recovered AGY title")

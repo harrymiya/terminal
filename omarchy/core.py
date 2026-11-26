@@ -588,12 +588,16 @@ if not wanted:
         except OSError:
             pass
 if not wanted:
+    print("RDT_ERROR:session-id-not-found", end="")
     raise SystemExit(0)
 if kind == "codex":
     title = codex_title(wanted)
     if title:
         print("RDT_TITLE:" + title, end="")
+    else:
+        print("RDT_ERROR:codex-title-not-found", end="")
 else:
+    found_title = False
     for path in agy_db_paths():
         if not os.path.isfile(path):
             continue
@@ -611,12 +615,19 @@ else:
                 title = clean(row[0]) if row else ""
                 if title:
                     print("RDT_TITLE:" + title, end="")
+                    found_title = True
                     break
             else:
                 db.close()
         except Exception:
-            pass'''
-    return f"python3 - {shlex.quote(kind)} {shlex.quote(sid)} {shlex.quote(str(workspace or ''))} <<'RDT_PY' 2>/dev/null\n{script}\nRDT_PY"
+            pass
+    if not found_title:
+        print("RDT_ERROR:agy-title-not-found", end="")'''
+    encoded = base64.b64encode(script.encode("utf-8")).decode("ascii")
+    arguments = base64.b64encode(json.dumps([kind, sid, str(workspace or "")], ensure_ascii=False).encode("utf-8")).decode("ascii")
+    python = (f'import base64,json,sys;sys.argv[1:]=json.loads(base64.b64decode("{arguments}"));'
+              f'exec(compile(base64.b64decode("{encoded}"),"<rdt-title-query>","exec"))')
+    return "python3 -c " + shlex.quote(python)
 
 
 def ssh_argv(host, directory, agent, session_id=None, control_path=None, restore_only=False):
