@@ -4869,7 +4869,7 @@ class App(Gtk.Window):
             GLib.idle_add(show)
         self.sync_executor.submit(worker)
 
-    def record_operation_log(self, host, directory, agent, session_id, display_name, action="open"):
+    def record_operation_log(self, host, directory, agent, session_id, display_name, action="open", title_source="default"):
         account = str(self.data.get("sync_username", "")).strip().casefold()
         entry = {
             "id": uuid.uuid4().hex,
@@ -4887,6 +4887,7 @@ class App(Gtk.Window):
             "agent_icon": str(agent.get("icon", "")),
             "session_id": str(session_id),
             "session_name": str(display_name),
+            "title_source": str(title_source or "default"),
             "client": "ubuntu",
             "action": action,
         }
