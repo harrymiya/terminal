@@ -60,6 +60,9 @@ data class HostProfile(
     val legacyAddress: String = address,
     val lanPort: Int = port,
     val externalPort: Int = port,
+    val agents: List<AgentPreset>? = null,
+    val selectedAgent: String? = null,
+    val selectedAgentCommand: String? = null,
 )
 
 data class HostEndpoint(
@@ -155,6 +158,37 @@ data class AgentPreset(
     val command: String,
     val icon: String,
 )
+
+fun hostAgents(host: HostProfile?, globalAgents: List<AgentPreset>): List<AgentPreset> {
+    if (host != null && host.agents != null && host.agents.isNotEmpty()) {
+        return host.agents
+    }
+    return globalAgents
+}
+
+fun hostSelectedAgent(host: HostProfile?, availableAgents: List<AgentPreset>, store: LocalStore? = null): AgentPreset? {
+    if (availableAgents.isEmpty()) return null
+    if (host == null) return availableAgents.firstOrNull()
+
+    val storedId = store?.loadHostSelectedAgent(host.id).orEmpty()
+    if (storedId.isNotBlank()) {
+        availableAgents.firstOrNull { it.id == storedId }?.let { return it }
+    }
+
+    if (!host.selectedAgent.isNullOrBlank()) {
+        availableAgents.firstOrNull { it.id == host.selectedAgent }?.let { return it }
+        val idx = host.selectedAgent.toIntOrNull()
+        if (idx != null && idx in availableAgents.indices) {
+            return availableAgents[idx]
+        }
+    }
+
+    if (!host.selectedAgentCommand.isNullOrBlank()) {
+        availableAgents.firstOrNull { it.command == host.selectedAgentCommand }?.let { return it }
+    }
+
+    return availableAgents.firstOrNull()
+}
 
 /** Returns the configured Codex CLI executable, including compatible codex2 builds. */
 fun codexExecutable(command: String): String? {
@@ -371,9 +405,25 @@ class LocalStore(context: Context) {
             val directories = (0 until dirs.length()).map { n ->
                 dirs.getJSONObject(n).let { ProjectDirectory(it.getString("id"), it.getString("name"), it.getString("path"), it.optString("icon", "📁")) }
             }
+            val ags = item.optJSONArray("agents")
+            val hostAgents = ags?.let { arr ->
+                (0 until arr.length()).mapNotNull { n ->
+                    arr.optJSONObject(n)?.let { a ->
+                        AgentPreset(
+                            id = a.optString("id", a.optString("name")),
+                            name = a.optString("name"),
+                            command = a.optString("command"),
+                            icon = a.optString("icon", "✳"),
+                        )
+                    }
+                }
+            }
             val port = item.optInt("port", 0)
             val lanPort = if (item.has("lan_port") && !item.isNull("lan_port")) item.optInt("lan_port", port) else port
             val externalPort = if (item.has("external_port") && !item.isNull("external_port")) item.optInt("external_port", port) else port
+            val selectedAgent = item.optString("selected_agent").takeIf { it.isNotBlank() }
+                ?: item.optString("selected_agent_id").takeIf { it.isNotBlank() }
+            val selectedAgentCommand = item.optString("selected_agent_command").takeIf { it.isNotBlank() }
             HostProfile(
                 id = item.getString("id"), name = item.getString("name"), address = item.optString("external_address", item.getString("address")),
                 port = port, username = item.getString("username"),
@@ -386,6 +436,9 @@ class LocalStore(context: Context) {
                 legacyAddress = item.optString("legacy_address", item.optString("address", "")),
                 lanPort = lanPort,
                 externalPort = externalPort,
+                agents = hostAgents,
+                selectedAgent = selectedAgent,
+                selectedAgentCommand = selectedAgentCommand,
             )
         }
     }.getOrDefault(emptyList())
@@ -396,11 +449,21 @@ class LocalStore(context: Context) {
         hosts.forEach { host ->
             val dirs = JSONArray()
             host.directories.forEach { dirs.put(JSONObject().put("id", it.id).put("name", it.name).put("path", it.path).put("icon", it.icon)) }
-            root.put(JSONObject().put("id", host.id).put("name", host.name).put("address", host.externalAddress.ifBlank { host.lanAddress })
+            val hostObj = JSONObject().put("id", host.id).put("name", host.name).put("address", host.externalAddress.ifBlank { host.lanAddress })
                 .put("port", host.port).put("lan_port", host.lanPort).put("external_port", host.externalPort)
                 .put("username", host.username).put("icon", host.icon).put("directories", dirs)
                 .put("sync_fingerprint", host.syncFingerprint).put("sync_id", host.syncId.trim())
-                .put("lan_address", host.lanAddress).put("external_address", host.externalAddress).put("legacy_address", host.legacyAddress))
+                .put("lan_address", host.lanAddress).put("external_address", host.externalAddress).put("legacy_address", host.legacyAddress)
+            if (host.agents != null) {
+                val agsArray = JSONArray()
+                host.agents.forEach { ag ->
+                    agsArray.put(JSONObject().put("id", ag.id).put("name", ag.name).put("command", ag.command).put("icon", ag.icon))
+                }
+                hostObj.put("agents", agsArray)
+            }
+            host.selectedAgent?.let { hostObj.put("selected_agent", it) }
+            host.selectedAgentCommand?.let { hostObj.put("selected_agent_command", it) }
+            root.put(hostObj)
             preferences.edit().putString("password_${host.id}", vault.encrypt(host.password)).apply()
         }
         (oldIds - hosts.map { it.id }.toSet()).forEach { preferences.edit().remove("password_$it").apply() }

@@ -17,10 +17,15 @@ import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputConnectionWrapper
+import android.net.Uri
+import android.provider.OpenableColumns
 import android.widget.EditText
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateColor
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -85,14 +90,17 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.ArrowForward
+import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
@@ -181,6 +189,8 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.viewinterop.AndroidView
 import dev.remote.terminal.data.AgentPreset
 import dev.remote.terminal.data.HostProfile
+import dev.remote.terminal.data.hostAgents
+import dev.remote.terminal.data.hostSelectedAgent
 import dev.remote.terminal.data.hasValidConfiguredPorts
 import dev.remote.terminal.data.SessionStore
 import dev.remote.terminal.data.SyncClient
@@ -469,7 +479,12 @@ private fun RemoteTerminalApp(store: LocalStore) {
         val agentSaves = remember { mutableSetOf<String>() }
         val mainHandler = remember { Handler(Looper.getMainLooper()) }
         val selectedHost = hosts.firstOrNull { it.id == selectedHostId } ?: hosts.firstOrNull()
-        val selectedAgent = agents.firstOrNull { it.id == selectedAgentId } ?: agents.firstOrNull()
+        val currentAgents = remember(selectedHost?.id, selectedHost?.agents, agents.toList()) {
+            hostAgents(selectedHost, agents)
+        }
+        val selectedAgent = remember(selectedHost?.id, selectedAgentId, currentAgents) {
+            currentAgents.firstOrNull { it.id == selectedAgentId } ?: hostSelectedAgent(selectedHost, currentAgents, store) ?: currentAgents.firstOrNull()
+        }
         val quotas = remember { androidx.compose.runtime.mutableStateMapOf<AgentQuotaKey, List<QuotaWindow>>() }
         val quotaAttempts = remember { mutableMapOf<AgentQuotaKey, Long>() }
         val quotaSuccesses = remember { mutableMapOf<AgentQuotaKey, Long>() }
@@ -484,7 +499,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 }
             }
             if (route == AppRoute.HOME && selectedHost != null) {
-                val developers = listOfNotNull(selectedAgent) + agents.filter { it.id != selectedAgent?.id }
+                val developers = listOfNotNull(selectedAgent) + currentAgents.filter { it.id != selectedAgent?.id }
                 for (agent in developers) {
                     quotaKey(selectedHost, agent.command)?.let { key ->
                         if (key !in this) put(key, AgentQuotaTarget(selectedHost, agent.command))
@@ -536,16 +551,20 @@ private fun RemoteTerminalApp(store: LocalStore) {
 
         fun selectHost(host: HostProfile) {
             selectedHostId = host.id
-            val savedAgentId = store.loadHostSelectedAgent(host.id)
-            if (savedAgentId.isNotBlank() && agents.any { it.id == savedAgentId }) {
-                selectedAgentId = savedAgentId
+            val hostPresetList = hostAgents(host, agents)
+            val agent = hostSelectedAgent(host, hostPresetList, store)
+            if (agent != null) {
+                selectedAgentId = agent.id
+                store.saveHostSelectedAgent(host.id, agent.id)
             }
         }
 
         LaunchedEffect(selectedHostId) {
-            val savedAgentId = store.loadHostSelectedAgent(selectedHostId)
-            if (savedAgentId.isNotBlank() && agents.any { it.id == savedAgentId }) {
-                selectedAgentId = savedAgentId
+            val currentHost = hosts.firstOrNull { it.id == selectedHostId }
+            val hostPresetList = hostAgents(currentHost, agents)
+            val agent = hostSelectedAgent(currentHost, hostPresetList, store)
+            if (agent != null) {
+                selectedAgentId = agent.id
             }
         }
 
@@ -767,7 +786,8 @@ private fun RemoteTerminalApp(store: LocalStore) {
                         address = external.ifBlank { lan }, lanAddress = lan, externalAddress = external,
                         port = profile.optInt("port", local.port), lanPort = lanPort, externalPort = externalPort,
                         username = profile.optString("username", local.username),
-                        icon = profile.optString("icon", local.icon))
+                        icon = profile.optString("icon", local.icon),
+                        selectedAgentCommand = profile.optString("selected_agent_command").takeIf { it.isNotBlank() } ?: local.selectedAgentCommand)
                 }
             }.toMutableList()
             active.filterNot { it.optString("id") in matched }.forEach { profile ->
@@ -779,7 +799,8 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 result.add(HostProfile(profile.optString("id"), profile.optString("name", "主机"), external.ifBlank { lan },
                     port, profile.optString("username"), icon = profile.optString("icon", "⌘"),
                     lanAddress = lan, externalAddress = external, legacyAddress = "",
-                    lanPort = lanPort, externalPort = externalPort))
+                    lanPort = lanPort, externalPort = externalPort,
+                    selectedAgentCommand = profile.optString("selected_agent_command").takeIf { it.isNotBlank() }))
             }
             val uniqueResult = result.distinctBy { it.id }
             val snapshotIds = localHosts.mapTo(mutableSetOf()) { it.id }
@@ -790,7 +811,12 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 val reconciled = uniqueResult.map { synced ->
                     val sourceId = idRemaps.entries.firstOrNull { it.value == synced.id }?.key ?: synced.id
                     val current = latestById[synced.id] ?: latestById[sourceId]
-                    if (current != null) synced.copy(directories = current.directories) else synced
+                    if (current != null) synced.copy(
+                        directories = current.directories,
+                        agents = current.agents,
+                        selectedAgent = current.selectedAgent,
+                        selectedAgentCommand = synced.selectedAgentCommand ?: current.selectedAgentCommand
+                    ) else synced
                 }.toMutableList()
                 val reconciledIds = reconciled.mapTo(mutableSetOf()) { it.id }
                 latestHosts.filter { it.id !in snapshotIds && it.id !in reconciledIds }.forEach { reconciled.add(it) }
@@ -1265,12 +1291,20 @@ private fun RemoteTerminalApp(store: LocalStore) {
             if (!isPad) {
                 when (route) {
                     AppRoute.HOME -> HomeScreen(
-                        hosts = hosts, agents = agents, selectedHost = selectedHost, selectedAgent = selectedAgent,
+                        hosts = hosts, agents = currentAgents, selectedHost = selectedHost, selectedAgent = selectedAgent,
                         quotaFor = { host, agent -> quotaKey(host, agent.command)?.let(quotas::get) },
                         sessions = sessions, onSelectHost = { selectHost(it) }, onSelectAgent = { agent ->
                             selectedAgentId = agent.id
                             selectedHost?.let { host ->
                                 store.saveHostSelectedAgent(host.id, agent.id)
+                                val updatedHost = host.copy(selectedAgent = agent.id, selectedAgentCommand = agent.command)
+                                val idx = hosts.indexOfFirst { it.id == host.id }
+                                if (idx >= 0) {
+                                    hosts[idx] = updatedHost
+                                    saveHosts(hosts)
+                                }
+                                dirtyHostProfiles.add(host.id)
+                                store.saveDirtyHostProfiles(dirtyHostProfiles)
                                 if (!offlineMode && syncUrl.isNotBlank() && syncToken.isNotBlank()) {
                                     scope.launch { runCatching { withContext(SyncClient.dispatcher) { SyncClient.updateCurrentAgent(host, agent.command) } } }
                                 }
@@ -1485,7 +1519,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
                     )
                     else -> PadWorkspace(
                         hosts = hosts,
-                        agents = agents,
+                        agents = currentAgents,
                         sessions = sessions,
                         selectedHost = selectedHost,
                         selectedAgent = selectedAgent,
@@ -1500,6 +1534,14 @@ private fun RemoteTerminalApp(store: LocalStore) {
                             selectedAgentId = agent.id
                             selectedHost?.let { host ->
                                 store.saveHostSelectedAgent(host.id, agent.id)
+                                val updatedHost = host.copy(selectedAgent = agent.id, selectedAgentCommand = agent.command)
+                                val idx = hosts.indexOfFirst { it.id == host.id }
+                                if (idx >= 0) {
+                                    hosts[idx] = updatedHost
+                                    saveHosts(hosts)
+                                }
+                                dirtyHostProfiles.add(host.id)
+                                store.saveDirtyHostProfiles(dirtyHostProfiles)
                                 if (!offlineMode && syncUrl.isNotBlank() && syncToken.isNotBlank()) {
                                     scope.launch { runCatching { withContext(SyncClient.dispatcher) { SyncClient.updateCurrentAgent(host, agent.command) } } }
                                 }
@@ -1689,10 +1731,18 @@ private fun RemoteTerminalApp(store: LocalStore) {
             )
         }
 
-        sessions.forEach { session ->
+        val pendingKeySession = sessions.firstOrNull { it.hostFingerprint != null }
+        pendingKeySession?.let { session ->
             session.hostFingerprint?.let { fingerprint ->
                 AlertDialog(
-                    onDismissRequest = { session.resolveHostKey?.invoke(false); session.hostFingerprint = null },
+                    onDismissRequest = {
+                        val addr = session.hostKeyAddress
+                        val port = session.hostKeyPort
+                        sessions.filter { it.hostKeyAddress == addr && it.hostKeyPort == port }.forEach {
+                            it.resolveHostKey?.invoke(false)
+                            it.hostFingerprint = null
+                        }
+                    },
                     containerColor = Panel,
                     title = { Text("首次连接这台主机？", color = White, fontWeight = FontWeight.SemiBold) },
                     text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1701,14 +1751,25 @@ private fun RemoteTerminalApp(store: LocalStore) {
                         Text(fingerprint, color = Mint, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
                     } },
                     confirmButton = { TextButton(onClick = {
-                        store.trustHostKey(session.hostKeyAddress, session.hostKeyPort, fingerprint)
+                        val addr = session.hostKeyAddress
+                        val port = session.hostKeyPort
+                        store.trustHostKey(addr, port, fingerprint)
                         val trustedHost = session.task.host.copy(syncFingerprint = fingerprint)
                         saveHosts(hosts.map { if (it.id == trustedHost.id) trustedHost else it })
-                        session.task = session.task.copy(host = trustedHost)
-                        session.resolveHostKey?.invoke(true)
-                        session.hostFingerprint = null
+                        sessions.filter { it.hostKeyAddress == addr && it.hostKeyPort == port }.forEach {
+                            it.task = it.task.copy(host = trustedHost)
+                            it.resolveHostKey?.invoke(true)
+                            it.hostFingerprint = null
+                        }
                     }) { Text("信任并连接", color = Mint) } },
-                    dismissButton = { TextButton(onClick = { session.resolveHostKey?.invoke(false); session.hostFingerprint = null }) { Text("取消", color = Muted) } },
+                    dismissButton = { TextButton(onClick = {
+                        val addr = session.hostKeyAddress
+                        val port = session.hostKeyPort
+                        sessions.filter { it.hostKeyAddress == addr && it.hostKeyPort == port }.forEach {
+                            it.resolveHostKey?.invoke(false)
+                            it.hostFingerprint = null
+                        }
+                    }) { Text("取消", color = Muted) } },
                 )
             }
         }
@@ -1738,25 +1799,36 @@ private fun HomeScreen(
             }
         }
     }
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
-        Row(Modifier.fillMaxWidth().padding(top = 24.dp, bottom = 18.dp), verticalAlignment = Alignment.CenterVertically) {
+    Column(Modifier.fillMaxSize()) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             Column(Modifier.weight(1f)) {
                 NeonGlowBrandLogo(fontSize = 19.sp, letterSpacing = 1.4.sp)
                 Text("随时接回你的开发现场 · v${BuildConfig.VERSION_NAME}", color = Muted, fontSize = 12.sp)
             }
-            IconButton(onClick = onManage) {
-                Icon(Icons.Default.Dns, contentDescription = "管理主机和目录", tint = Muted)
+            IconButton(onClick = onManage, modifier = Modifier.size(40.dp)) {
+                Icon(Icons.Default.Dns, contentDescription = "管理主机和目录", tint = Muted, modifier = Modifier.size(22.dp))
             }
-            IconButton(onClick = onOpenAgents) {
-                Icon(Icons.Default.SmartToy, contentDescription = "编辑开发者", tint = Muted)
+            IconButton(onClick = onOpenAgents, modifier = Modifier.size(40.dp)) {
+                Icon(Icons.Default.SmartToy, contentDescription = "编辑开发者", tint = Muted, modifier = Modifier.size(22.dp))
             }
-            IconButton(onClick = onOpenLogs) {
-                Icon(Icons.Default.History, contentDescription = "历史记录", tint = Muted)
+            IconButton(onClick = onOpenLogs, modifier = Modifier.size(40.dp)) {
+                Icon(Icons.Default.History, contentDescription = "历史记录", tint = Muted, modifier = Modifier.size(22.dp))
             }
-            IconButton(onClick = onOpenSettings) {
-                Icon(Icons.Default.Settings, contentDescription = "设置", tint = Muted)
+            IconButton(onClick = onOpenSettings, modifier = Modifier.size(40.dp)) {
+                Icon(Icons.Default.Settings, contentDescription = "设置", tint = Muted, modifier = Modifier.size(22.dp))
             }
         }
+        Column(
+            Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 20.dp)
+        ) {
 
         if (syncLoading) Text("正在同步共享会话…", color = Muted, fontSize = 12.sp)
 
@@ -2041,6 +2113,7 @@ private fun HomeScreen(
             }
         }
         Spacer(Modifier.height(24.dp))
+        }
     }
 }
 
@@ -2051,44 +2124,35 @@ private fun NeonGlowBrandLogo(
     letterSpacing: TextUnit = 1.4.sp,
     modifier: Modifier = Modifier,
 ) {
-    var textSize by remember { mutableStateOf(IntSize.Zero) }
-    val transition = rememberInfiniteTransition(label = "brand_neon_glow")
-    val progress by transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 2200, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse,
-        ),
-        label = "glow_progress",
-    )
     val accent = Color(0xFF00F0FF)
     val highlight = Color(0xFFF4EAFF)
     val brand = Color(0xFFFF2EEC)
-    val width = textSize.width.toFloat().coerceAtLeast(1f)
-    val height = textSize.height.toFloat().coerceAtLeast(1f)
-    val brush = Brush.linearGradient(
-        colors = listOf(accent, highlight, brand, accent),
-        start = Offset(x = -width * 1.2f * progress, y = 0f),
-        end = Offset(x = width * (2.2f - 1.2f * progress), y = height * 0.27f),
-    )
-    val glowColor = lerp(accent.copy(alpha = 0.50f), brand.copy(alpha = 0.80f), progress)
-    val blurRadius = with(LocalDensity.current) { (2f + 5f * progress).dp.toPx() }
-    Text(
-        text = text,
-        maxLines = 1,
-        modifier = modifier.onSizeChanged { textSize = it },
-        style = TextStyle(
+    val brush = remember {
+        Brush.linearGradient(
+            colors = listOf(accent, highlight, brand, accent)
+        )
+    }
+    val shadow = remember {
+        Shadow(
+            color = accent.copy(alpha = 0.65f),
+            offset = Offset.Zero,
+            blurRadius = 6f,
+        )
+    }
+    val style = remember(fontSize, letterSpacing) {
+        TextStyle(
             brush = brush,
             fontSize = fontSize,
             fontWeight = FontWeight.ExtraBold,
             letterSpacing = letterSpacing,
-            shadow = Shadow(
-                color = glowColor,
-                offset = Offset.Zero,
-                blurRadius = blurRadius,
-            ),
-        ),
+            shadow = shadow,
+        )
+    }
+    Text(
+        text = text,
+        maxLines = 1,
+        modifier = modifier,
+        style = style,
     )
 }
 
@@ -2430,6 +2494,84 @@ private fun TerminalWorkspace(
     // Pager may briefly retain a removed page index while it reconciles the new count.
     val fallbackSession = sessions.getOrNull(initialIndex.coerceIn(0, sessions.lastIndex)) ?: sessions.lastOrNull() ?: return
     val currentSession = sessions.getOrNull(pager.currentPage) ?: fallbackSession
+    val context = LocalContext.current
+    var showUploadDialog by remember { mutableStateOf(false) }
+    var isUploading by remember { mutableStateOf(false) }
+
+    fun processUpload(uri: Uri, isImage: Boolean) {
+        if (!currentSession.status.startsWith("已连接") && !currentSession.controller.isConnected()) {
+            Toast.makeText(context, "无法发送图片或文件：请先等待该终端连接成功", Toast.LENGTH_SHORT).show()
+            return
+        }
+        scope.launch(Dispatchers.IO) {
+            try {
+                isUploading = true
+                var displayName = if (isImage) "image.png" else "file"
+                var fileSize = -1L
+                context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                        if (nameIdx >= 0) displayName = cursor.getString(nameIdx) ?: displayName
+                        val sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE)
+                        if (sizeIdx >= 0) fileSize = cursor.getLong(sizeIdx)
+                    }
+                }
+                if (fileSize > 20 * 1024 * 1024) {
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(context, "文件超过 20 MB，无法上传", Toast.LENGTH_LONG).show()
+                        isUploading = false
+                    }
+                    return@launch
+                }
+                val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                    ?: throw java.io.IOException("无法读取文件内容")
+                if (bytes.isEmpty()) {
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(context, "文件内容为空", Toast.LENGTH_SHORT).show()
+                        isUploading = false
+                    }
+                    return@launch
+                }
+                if (bytes.size > 20 * 1024 * 1024) {
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(context, "文件超过 20 MB，无法上传", Toast.LENGTH_LONG).show()
+                        isUploading = false
+                    }
+                    return@launch
+                }
+                val remotePath = currentSession.controller.uploadRemoteFile(bytes, displayName, isImage)
+                withContext(Dispatchers.Main) {
+                    isUploading = false
+                    if (isImage) {
+                        currentSession.controller.send("请查看这张图片：$remotePath\r")
+                    } else {
+                        val escapedName = displayName.replace("'", "'\\''")
+                        val escapedPath = remotePath.replace("'", "'\\''")
+                        currentSession.controller.send("请查看文件 '$escapedName'，路径：'$escapedPath'\r")
+                    }
+                    Toast.makeText(context, if (isImage) "图片已上传并发送给 Agent" else "文件已上传并发送给 Agent", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    isUploading = false
+                    Toast.makeText(context, "上传失败: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
+    val imagePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        if (uri != null) processUpload(uri, isImage = true)
+    }
+
+    val filePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        if (uri != null) processUpload(uri, isImage = false)
+    }
+
     LaunchedEffect(sessionIds) {
         pagerReady = false
         pager.scrollToPage(initialIndex.coerceIn(0, sessions.lastIndex))
@@ -2460,7 +2602,17 @@ private fun TerminalWorkspace(
                     Text(currentSession.task.agent.name, color = Muted, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
             }
-            IconButton(onClick = onNewTask, modifier = Modifier.size(40.dp)) { Icon(Icons.Default.Add, "新建任务", tint = Mint) }
+            IconButton(
+                onClick = { showUploadDialog = true },
+                enabled = !isUploading,
+                modifier = Modifier.size(40.dp)
+            ) {
+                if (isUploading) {
+                    CircularProgressIndicator(color = Mint, modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                } else {
+                    Icon(Icons.Default.Add, "上传图片或文件", tint = Mint)
+                }
+            }
         }
         Divider(color = Edge)
         Column(
@@ -2500,6 +2652,73 @@ private fun TerminalWorkspace(
         ) { page ->
             TerminalPage(sessions.getOrNull(page) ?: currentSession, page == pager.currentPage)
         }
+    }
+
+    if (showUploadDialog) {
+        AlertDialog(
+            onDismissRequest = { showUploadDialog = false },
+            containerColor = Panel,
+            title = { Text("发送图片或文件给 Agent", color = White, fontWeight = FontWeight.SemiBold, fontSize = 16.sp) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        "文件将上传至远端 ~/.remote-dev-terminal/ 目录，并将路径发送给当前终端。最大支持 20 MB。",
+                        color = Muted,
+                        fontSize = 12.sp
+                    )
+                    Surface(
+                        onClick = {
+                            showUploadDialog = false
+                            imagePickerLauncher.launch("image/*")
+                        },
+                        color = PanelRaised,
+                        shape = RoundedCornerShape(10.dp),
+                        border = BorderStroke(1.dp, Edge),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Icon(Icons.Default.Image, contentDescription = null, tint = Mint, modifier = Modifier.size(22.dp))
+                            Column {
+                                Text("上传本地图片", color = White, fontWeight = FontWeight.Medium, fontSize = 14.sp)
+                                Text("支持 PNG、JPEG、WEBP 等常见格式", color = Muted, fontSize = 11.sp)
+                            }
+                        }
+                    }
+                    Surface(
+                        onClick = {
+                            showUploadDialog = false
+                            filePickerLauncher.launch("*/*")
+                        },
+                        color = PanelRaised,
+                        shape = RoundedCornerShape(10.dp),
+                        border = BorderStroke(1.dp, Edge),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Icon(Icons.Default.AttachFile, contentDescription = null, tint = Blue, modifier = Modifier.size(22.dp))
+                            Column {
+                                Text("上传本地文件", color = White, fontWeight = FontWeight.Medium, fontSize = 14.sp)
+                                Text("支持代码、文本、压缩包等任意格式", color = Muted, fontSize = 11.sp)
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { showUploadDialog = false }) {
+                    Text("取消", color = Muted)
+                }
+            }
+        )
     }
 }
 

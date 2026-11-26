@@ -13,6 +13,7 @@ import dev.remote.terminal.data.QuotaWindow
 import dev.remote.terminal.data.endpoints
 import dev.remote.terminal.data.TerminalTask
 import android.os.SystemClock
+import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.InputStreamReader
 import java.io.OutputStream
@@ -535,6 +536,81 @@ RDT_PY
     }
 
     private fun shellQuote(value: String): String = "'" + value.replace("'", "'\\''") + "'"
+
+    fun uploadRemoteFile(bytes: ByteArray, filename: String, isImage: Boolean): String {
+        val conn = activeConnection.get()
+        if (conn != null && conn.session.isConnected) {
+            return execUpload(conn.session, bytes, filename, isImage)
+        }
+        return RemoteDirectoryBrowser.withSshSession(task.host, store) { session ->
+            execUpload(session, bytes, filename, isImage)
+        }
+    }
+
+    private fun execUpload(session: Session, bytes: ByteArray, filename: String, isImage: Boolean): String {
+        require(bytes.isNotEmpty()) { "文件为空" }
+        require(bytes.size <= 20 * 1024 * 1024) { "文件超过 20 MB" }
+
+        val ext = if (isImage) {
+            val originalExt = filename.substringAfterLast('.', "").lowercase()
+            if (originalExt in setOf("png", "jpg", "jpeg", "gif", "webp", "bmp")) ".$originalExt" else ".png"
+        } else {
+            val originalExt = filename.substringAfterLast('.', "").lowercase()
+            if (originalExt.length in 1..15 && originalExt.all { it.isLetterOrDigit() }) ".$originalExt" else ""
+        }
+        val name = java.util.UUID.randomUUID().toString().replace("-", "") + ext
+        val dir = if (isImage) "\$HOME/.remote-dev-terminal/images" else "\$HOME/.remote-dev-terminal/files"
+        val cmd = "umask 077; dir=\"$dir\"; mkdir -p -- \"\$dir\" || exit 1; tmp=\"\$dir/.$name.tmp\"; target=\"\$dir/$name\"; trap 'rm -f -- \"\$tmp\"' EXIT HUP INT TERM; cat > \"\$tmp\" && mv -- \"\$tmp\" \"\$target\" && printf '\\0%s\\0' \"\$target\""
+
+        val channel = session.openChannel("exec") as ChannelExec
+        try {
+            channel.setCommand(cmd)
+            val inStream = channel.inputStream
+            val errStream = channel.errStream
+            val outStream = channel.outputStream
+            channel.connect(15_000)
+
+            outStream.write(bytes)
+            outStream.flush()
+            outStream.close()
+
+            val stdoutBytes = ByteArrayOutputStream()
+            val buffer = ByteArray(4096)
+            val deadline = System.currentTimeMillis() + 60_000L
+            while (System.currentTimeMillis() < deadline) {
+                if (inStream.available() > 0) {
+                    val r = inStream.read(buffer)
+                    if (r > 0) stdoutBytes.write(buffer, 0, r)
+                } else if (channel.isClosed) {
+                    if (inStream.available() > 0) {
+                        val r = inStream.read(buffer)
+                        if (r > 0) stdoutBytes.write(buffer, 0, r)
+                    }
+                    break
+                } else {
+                    Thread.sleep(25)
+                }
+            }
+            if (!channel.isClosed && System.currentTimeMillis() >= deadline) {
+                throw IOException("上传超时")
+            }
+
+            val exitCode = channel.exitStatus
+            val output = stdoutBytes.toString(Charsets.UTF_8.name())
+            if (exitCode != 0) {
+                val err = errStream?.bufferedReader()?.use { it.readText() }.orEmpty()
+                throw IOException(err.ifBlank { "远端写入失败 (exit $exitCode)" })
+            }
+            val parts = output.split('\u0000')
+            val path = if (parts.size >= 3) parts[parts.size - 2] else ""
+            if (!path.startsWith("/") || "\n" in path || "\r" in path) {
+                throw IOException("远端未返回有效的文件路径: $output")
+            }
+            return path
+        } finally {
+            channel.disconnect()
+        }
+    }
 
     private inner class TrustedHostRepository : HostKeyRepository {
         override fun check(host: String, key: ByteArray): Int {
