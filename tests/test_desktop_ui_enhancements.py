@@ -193,6 +193,38 @@ class DesktopUIEnhancementsTest(unittest.TestCase):
             app.disconnect_by_func(self.app_mod.Gtk.main_quit)
             app.destroy()
 
+    def test_session_title_mutation_is_pushed_to_remote_server_immediately(self):
+        app = self.app_mod.App()
+        try:
+            host = {"id": "host-id", "username": "dev", "address": "127.0.0.1", "port": 22}
+            item = {"id": "a" * 32, "directory_path": "/project", "directory_name": "project",
+                    "agent_name": "Codex", "agent_command": "codex",
+                    "display_name": "Generated title", "title_source": "agent"}
+            app.data.update({"sync_username": "single-user", "sync_url": "https://sync.example",
+                             "sync_token": "test-token", "auto_sync_enabled": True,
+                             "offline_mode": False, "pending_session_sync": []})
+            app.persist = lambda: None
+            requests = []
+
+            def record_request(config, method, session_id=None, payload=None, host=None):
+                requests.append((method, session_id, payload, host))
+                return payload
+
+            with patch.object(self.app_mod, "sync_request", side_effect=record_request), \
+                    patch.object(self.app_mod.GLib, "idle_add", side_effect=lambda callback, *args: callback(*args)):
+                app.sync_async(host, "PUT", item["id"], item)
+                app.sync_executor.shutdown(wait=True)
+
+            self.assertEqual(len(requests), 1)
+            self.assertEqual(requests[0][0:2], ("PUT", item["id"]))
+            self.assertEqual(requests[0][2]["display_name"], "Generated title")
+            self.assertEqual(requests[0][2]["title_source"], "agent")
+            self.assertEqual(app.data["pending_session_sync"], [])
+        finally:
+            app.sync_executor.shutdown(wait=True)
+            app.disconnect_by_func(self.app_mod.Gtk.main_quit)
+            app.destroy()
+
     def test_uniform_control_heights(self):
         for platform in ("omarchy", "ubuntu"):
             py_file = (Path(__file__).resolve().parents[1] / platform / "remote-dev-terminal.py").read_text(encoding="utf-8")

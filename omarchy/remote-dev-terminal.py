@@ -4723,7 +4723,50 @@ class App(Gtk.Window):
         return False
 
     def sync_async(self, host, method, session_id, item=None):
-        self.queue_session_sync(self.canonical_session_host(host), method, session_id, item)
+        host = self.canonical_session_host(host)
+        self.queue_session_sync(host, method, session_id, item)
+        self.push_pending_session_sync(host)
+
+    def push_pending_session_sync(self, host):
+        if (self.is_offline_mode() or not self.data.get("auto_sync_enabled", False)
+                or not self.data.get("sync_url") or not self.data.get("sync_token")):
+            return
+        host = self.canonical_session_host(host)
+        mutations = self.pending_session_sync_for(host)
+        if not mutations:
+            return
+        pending_key = (self.shared_host_key(host), self.data.get("sync_token"))
+        in_flight = getattr(self, "session_sync_push_pending", None)
+        if in_flight is None:
+            in_flight = self.session_sync_push_pending = set()
+        if pending_key in in_flight:
+            return
+        in_flight.add(pending_key)
+        request_config = dict(self.data)
+        request_host = dict(host)
+
+        def worker():
+            pushed = []
+            for mutation in mutations:
+                try:
+                    sync_request(request_config, mutation["method"], mutation["session_id"],
+                                 mutation.get("item"), host=request_host)
+                    pushed.append(mutation)
+                except Exception:
+                    pass
+
+            def finish():
+                in_flight.discard(pending_key)
+                self.clear_session_sync_mutations(pushed)
+                attempted_ids = {item.get("mutation_id") for item in mutations}
+                if any(item.get("mutation_id") not in attempted_ids
+                       for item in self.pending_session_sync_for(host)):
+                    self.push_pending_session_sync(host)
+                return False
+
+            GLib.idle_add(finish)
+
+        self.sync_executor.submit(worker)
 
     def show_shared_sessions(self, _button):
         if self.is_offline_mode():
