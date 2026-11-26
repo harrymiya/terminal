@@ -559,6 +559,27 @@ private fun RemoteTerminalApp(store: LocalStore) {
             }
         }
 
+        fun selectAgent(agent: AgentPreset) {
+            selectedAgentId = agent.id
+            selectedHost?.let { host ->
+                store.saveHostSelectedAgent(host.id, agent.id)
+                val updatedHost = host.copy(selectedAgent = agent.id, selectedAgentCommand = agent.command)
+                val idx = hosts.indexOfFirst { it.id == host.id }
+                if (idx >= 0) {
+                    hosts[idx] = updatedHost
+                    store.saveHosts(hosts.toList())
+                }
+                dirtyHostProfiles.add(host.id)
+                store.saveDirtyHostProfiles(dirtyHostProfiles)
+                if (!offlineMode && autoSyncEnabled && syncUrl.isNotBlank() && syncToken.isNotBlank()) {
+                    scope.launch {
+                        val localHost = updatedHost
+                        runCatching { withContext(SyncClient.dispatcher) { SyncClient.updateCurrentAgent(localHost, agent.command) } }
+                    }
+                }
+            }
+        }
+
         LaunchedEffect(selectedHostId) {
             val currentHost = hosts.firstOrNull { it.id == selectedHostId }
             val hostPresetList = hostAgents(currentHost, agents)
@@ -570,17 +591,30 @@ private fun RemoteTerminalApp(store: LocalStore) {
 
         fun saveHosts(updated: List<HostProfile>) {
             val previous = hosts.toList()
-            val updatedIds = updated.mapTo(mutableSetOf()) { it.id }
+            val next = updated.toList()
+            val updatedIds = next.mapTo(mutableSetOf()) { it.id }
             previous.filterNot { it.id in updatedIds }.forEach { HostRouteResolver.invalidate(it.id) }
-            updated.forEach { host ->
+            next.forEach { host ->
                 val oldHost = previous.firstOrNull { it.id == host.id }
                 if (oldHost == null || oldHost.endpoints() != host.endpoints()) {
                     HostRouteResolver.invalidate(host.id)
                     scope.launch(Dispatchers.IO) { HostRouteResolver.resolveHostRoute(host, force = true) }
                 }
             }
-            hosts.clear(); hosts.addAll(updated); store.saveHosts(updated)
-            if (selectedHostId !in updated.map { it.id }) selectedHostId = updated.firstOrNull()?.id.orEmpty()
+            if (hosts.toList() != next) {
+                for (i in next.indices) {
+                    if (i < hosts.size) {
+                        if (hosts[i] != next[i]) hosts[i] = next[i]
+                    } else {
+                        hosts.add(next[i])
+                    }
+                }
+                while (hosts.size > next.size) {
+                    hosts.removeAt(hosts.lastIndex)
+                }
+            }
+            store.saveHosts(next)
+            if (selectedHostId !in next.map { it.id }) selectedHostId = next.firstOrNull()?.id.orEmpty()
         }
 
         fun syncHostProfile(host: HostProfile) {
@@ -785,7 +819,8 @@ private fun RemoteTerminalApp(store: LocalStore) {
                     local.copy(id = profile.optString("id", local.id), name = profile.optString("name", local.name),
                         address = external.ifBlank { lan }, lanAddress = lan, externalAddress = external,
                         port = profile.optInt("port", local.port), lanPort = lanPort, externalPort = externalPort,
-                        username = profile.optString("username", local.username),
+                        username = profile.optString("username").ifBlank { local.username },
+                        password = local.password.ifBlank { store.loadHostPassword(local.id) },
                         icon = profile.optString("icon", local.icon),
                         selectedAgentCommand = profile.optString("selected_agent_command").takeIf { it.isNotBlank() } ?: local.selectedAgentCommand)
                 }
@@ -796,8 +831,10 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 val port = profile.getInt("port")
                 val lanPort = if (profile.has("lan_port") && !profile.isNull("lan_port")) profile.getInt("lan_port") else port
                 val externalPort = if (profile.has("external_port") && !profile.isNull("external_port")) profile.getInt("external_port") else port
-                result.add(HostProfile(profile.optString("id"), profile.optString("name", "主机"), external.ifBlank { lan },
-                    port, profile.optString("username"), icon = profile.optString("icon", "⌘"),
+                val id = profile.optString("id")
+                val localPassword = store.loadHostPassword(id)
+                result.add(HostProfile(id, profile.optString("name", "主机"), external.ifBlank { lan },
+                    port, profile.optString("username"), password = localPassword, icon = profile.optString("icon", "⌘"),
                     lanAddress = lan, externalAddress = external, legacyAddress = "",
                     lanPort = lanPort, externalPort = externalPort,
                     selectedAgentCommand = profile.optString("selected_agent_command").takeIf { it.isNotBlank() }))
@@ -812,11 +849,15 @@ private fun RemoteTerminalApp(store: LocalStore) {
                     val sourceId = idRemaps.entries.firstOrNull { it.value == synced.id }?.key ?: synced.id
                     val current = latestById[synced.id] ?: latestById[sourceId]
                     if (current != null) synced.copy(
+                        password = if (synced.password.isNotBlank()) synced.password else current.password.ifBlank { store.loadHostPassword(current.id) },
+                        username = if (synced.username.isNotBlank()) synced.username else current.username,
                         directories = current.directories,
                         agents = current.agents,
                         selectedAgent = current.selectedAgent,
                         selectedAgentCommand = synced.selectedAgentCommand ?: current.selectedAgentCommand
-                    ) else synced
+                    ) else synced.copy(
+                        password = synced.password.ifBlank { store.loadHostPassword(synced.id) }
+                    )
                 }.toMutableList()
                 val reconciledIds = reconciled.mapTo(mutableSetOf()) { it.id }
                 latestHosts.filter { it.id !in snapshotIds && it.id !in reconciledIds }.forEach { reconciled.add(it) }
@@ -978,7 +1019,8 @@ private fun RemoteTerminalApp(store: LocalStore) {
             val same = sessions.count { it.task.host.id == host.id && it.task.directory.id == directory.id && it.task.agent.id == agent.id }
             val agentLabel = if (same == 0) agent.name else "${agent.name} ${same + 1}"
             val displayName = if (directory.name.isNotBlank()) "${directory.name} · $agentLabel" else agentLabel
-            val task = restoredTask ?: TerminalTask(UUID.randomUUID().toString(), host, directory, agent, displayName)
+            val taskHost = if (host.password.isNotBlank()) host else host.copy(password = store.loadHostPassword(host.id))
+            val task = restoredTask ?: TerminalTask(UUID.randomUUID().toString(), taskHost, directory, agent, displayName)
             if (restoredTask == null || attachOrCreate) {
                 sessionStore.save(task)
                 if (!offlineMode) store.enqueueSessionSync(task, "PUT", SyncClient.sessionItem(task))
@@ -1293,23 +1335,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
                     AppRoute.HOME -> HomeScreen(
                         hosts = hosts, agents = currentAgents, selectedHost = selectedHost, selectedAgent = selectedAgent,
                         quotaFor = { host, agent -> quotaKey(host, agent.command)?.let(quotas::get) },
-                        sessions = sessions, onSelectHost = { selectHost(it) }, onSelectAgent = { agent ->
-                            selectedAgentId = agent.id
-                            selectedHost?.let { host ->
-                                store.saveHostSelectedAgent(host.id, agent.id)
-                                val updatedHost = host.copy(selectedAgent = agent.id, selectedAgentCommand = agent.command)
-                                val idx = hosts.indexOfFirst { it.id == host.id }
-                                if (idx >= 0) {
-                                    hosts[idx] = updatedHost
-                                    saveHosts(hosts)
-                                }
-                                dirtyHostProfiles.add(host.id)
-                                store.saveDirtyHostProfiles(dirtyHostProfiles)
-                                if (!offlineMode && syncUrl.isNotBlank() && syncToken.isNotBlank()) {
-                                    scope.launch { runCatching { withContext(SyncClient.dispatcher) { SyncClient.updateCurrentAgent(host, agent.command) } } }
-                                }
-                            }
-                        },
+                        sessions = sessions, onSelectHost = { selectHost(it) }, onSelectAgent = ::selectAgent,
                         syncLoading = syncLoading,
                         onManage = { route = AppRoute.MANAGE }, onAddHost = { addingHost = true },
                         onAddDirectory = { selectedHost?.let { editingDirectory = it.id to null } },
@@ -1530,23 +1556,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
                             store.saveTiledMode(tiled)
                         },
                         onSelectHost = { selectHost(it) },
-                        onSelectAgent = { agent ->
-                            selectedAgentId = agent.id
-                            selectedHost?.let { host ->
-                                store.saveHostSelectedAgent(host.id, agent.id)
-                                val updatedHost = host.copy(selectedAgent = agent.id, selectedAgentCommand = agent.command)
-                                val idx = hosts.indexOfFirst { it.id == host.id }
-                                if (idx >= 0) {
-                                    hosts[idx] = updatedHost
-                                    saveHosts(hosts)
-                                }
-                                dirtyHostProfiles.add(host.id)
-                                store.saveDirtyHostProfiles(dirtyHostProfiles)
-                                if (!offlineMode && syncUrl.isNotBlank() && syncToken.isNotBlank()) {
-                                    scope.launch { runCatching { withContext(SyncClient.dispatcher) { SyncClient.updateCurrentAgent(host, agent.command) } } }
-                                }
-                            }
-                        },
+                        onSelectAgent = ::selectAgent,
                         onSelectSession = { index ->
                             activePage = index
                             sessions.getOrNull(index)?.let {
@@ -1663,6 +1673,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 dirtyHostProfiles.remove(host.id)
                 store.saveDirtyHostProfiles(dirtyHostProfiles)
                 if (!offlineMode && syncUrl.isNotBlank() && syncToken.isNotBlank()) scope.launch { runCatching { withContext(SyncClient.dispatcher) { SyncClient.deleteHostProfile(host.id) } } }
+                store.removeHostPassword(host.id)
                 saveHosts(hosts.filterNot { it.id == host.id }); deletingHost = null
             },
             onDismiss = { deletingHost = null },
@@ -1792,7 +1803,10 @@ private fun HomeScreen(
     var draggingDirectoryId by remember(selectedHost?.id) { mutableStateOf<String?>(null) }
     var dragOffsetY by remember(selectedHost?.id) { mutableStateOf(0f) }
 
-    LaunchedEffect(hosts) {
+    val hostEndpointsKey = remember(hosts.map { it.id to it.endpoints() }) {
+        hosts.joinToString(";") { "${it.id}:${it.endpoints().joinToString(",") { ep -> "${ep.address}:${ep.port}" }}" }
+    }
+    LaunchedEffect(hostEndpointsKey) {
         hosts.forEach { host ->
             launch(Dispatchers.IO) {
                 HostRouteResolver.resolveHostRoute(host)

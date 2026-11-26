@@ -58,8 +58,9 @@ object RemoteDirectoryBrowser {
         for (endpoint in endpoints) {
             currentAddress = endpoint.address
             currentPort = endpoint.port
-            val candidate = jsch.getSession(host.username, endpoint.address, endpoint.port)
-            candidate.setPassword(host.password)
+            val candidate = jsch.getSession(host.username.trim(), endpoint.address, endpoint.port)
+            val effectivePassword = host.password.ifBlank { store.loadHostPassword(host.id) }
+            candidate.setPassword(effectivePassword)
             candidate.setConfig("StrictHostKeyChecking", "yes")
             candidate.setConfig("PreferredAuthentications", "publickey,keyboard-interactive,password")
             candidate.setServerAliveInterval(10_000)

@@ -443,8 +443,16 @@ class LocalStore(context: Context) {
         }
     }.getOrDefault(emptyList())
 
+    fun loadHostPassword(hostId: String): String = runCatching {
+        vault.decrypt(preferences.getString("password_$hostId", null))
+    }.getOrDefault("")
+
+    fun removeHostPassword(hostId: String) {
+        preferences.edit().remove("password_$hostId").apply()
+    }
+
     fun saveHosts(hosts: List<HostProfile>) {
-        val oldIds = loadHosts().map { it.id }.toSet()
+        val existingPasswords = loadHosts().associate { it.id to it.password }
         val root = JSONArray()
         hosts.forEach { host ->
             val dirs = JSONArray()
@@ -464,9 +472,14 @@ class LocalStore(context: Context) {
             host.selectedAgent?.let { hostObj.put("selected_agent", it) }
             host.selectedAgentCommand?.let { hostObj.put("selected_agent_command", it) }
             root.put(hostObj)
-            preferences.edit().putString("password_${host.id}", vault.encrypt(host.password)).apply()
+            val effectivePassword = host.password.ifBlank { existingPasswords[host.id].orEmpty().ifBlank { loadHostPassword(host.id) } }
+            if (effectivePassword.isNotBlank()) {
+                preferences.edit().putString("password_${host.id}", vault.encrypt(effectivePassword)).apply()
+            }
         }
-        (oldIds - hosts.map { it.id }.toSet()).forEach { preferences.edit().remove("password_$it").apply() }
+        if (hosts.isNotEmpty()) {
+            (existingPasswords.keys - hosts.map { it.id }.toSet()).forEach { preferences.edit().remove("password_$it").apply() }
+        }
         preferences.edit().putString("hosts", root.toString()).apply()
     }
 

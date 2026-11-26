@@ -288,8 +288,9 @@ class SshTerminalController(
                 var connectFailure: Exception? = null
                 for (endpoint in candidates) {
                     ensureRunning()
-                    val candidate = jsch.getSession(task.host.username, endpoint.address, endpoint.port)
-                    candidate.setPassword(task.host.password)
+                    val candidate = jsch.getSession(task.host.username.trim(), endpoint.address, endpoint.port)
+                    val effectivePassword = task.host.password.ifBlank { store.loadHostPassword(task.host.id) }
+                    candidate.setPassword(effectivePassword)
                     candidate.setConfig("StrictHostKeyChecking", "yes")
                     candidate.setConfig("PreferredAuthentications", "publickey,keyboard-interactive,password")
                     candidate.setServerAliveInterval(10_000)
