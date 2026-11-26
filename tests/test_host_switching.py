@@ -36,6 +36,20 @@ class HostSwitchingTest(unittest.TestCase):
             res_all = filter_fn(logs, account="alice", host=None)
             self.assertEqual(len(res_all), 3)
 
+    def test_session_matches_host_recreated_id_same_host(self):
+        import ast
+        source = (Path(__file__).resolve().parents[1] / "ubuntu" / "remote-dev-terminal.py").read_text()
+        tree = ast.parse(source)
+        cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "App")
+        method = next(node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == "session_matches_host")
+        isolated = ast.Module(body=[ast.ClassDef(name="Probe", bases=[], keywords=[], body=[method], decorator_list=[])], type_ignores=[])
+        namespace = {}
+        exec(compile(ast.fix_missing_locations(isolated), "<session-match>", "exec"), namespace)
+        app = namespace["Probe"]()
+        old_host = {"id": "deleted-id", "name": "xk", "username": "agent", "address": "114.55.232.229"}
+        replacement = {"id": "new-id", "name": "xk", "username": "agent", "address": "114.55.232.229"}
+        self.assertTrue(app.session_matches_host({"host": old_host}, replacement))
+
     def test_session_matches_host_logic(self):
         host1 = {"id": "h1", "name": "Host1", "username": "user1", "address": "192.168.1.10"}
         host2 = {"id": "h2", "name": "Host2", "username": "user2", "address": "192.168.1.20"}

@@ -1879,10 +1879,6 @@ class App(Gtk.Window):
         hid = str(host.get("id", "")).strip()
         if sid and hid and sid == hid:
             return True
-        # Once both profiles have stable IDs, a reused name or address must not
-        # make an old session appear under a different host.
-        if sid and hid:
-            return False
         sync_id = str(shost.get("sync_id", "")).strip()
         h_sync_id = str(host.get("sync_id", "")).strip()
         if sync_id and h_sync_id and sync_id == h_sync_id:
@@ -3079,6 +3075,7 @@ class App(Gtk.Window):
             self.hosts.set_active(min(max(selected, 0), len(self.data["hosts"]) - 1))
         self.refreshing = False
         self.refresh_host_content()
+        self.recover_host_sessions_from_history(self.current_host())
         # Host removal/reconciliation can change the active profile while the
         # host selector is rebuilt. Keep the instance view in step with it.
         self.rebuild_view()
@@ -4156,11 +4153,15 @@ class App(Gtk.Window):
                     else:
                         sessions = None
                         self.shared_by_host[key] = result
+                        if local_host is not None:
+                            self.recover_host_sessions_from_history(local_host)
                     if isinstance(sessions, list):
                         overlay = pending_mutations + pushed_mutations + self.pending_session_sync_for(host)
                         sessions = self.merge_session_sync_items(sessions, overlay)
                         remote_ids = {item.get("id") for item in sessions}
                         self.shared_by_host[key] = sessions
+                        if not sessions:
+                            self.recover_host_sessions_from_history(local_host or host)
                         for session in list(self.sessions):
                             session_host = self.canonical_session_host(session.get("host", {}))
                             if self.shared_host_key(session_host) == key:
@@ -4875,6 +4876,10 @@ class App(Gtk.Window):
             return icon
         hosts = self.data.get("hosts", [])
         host = next((h for h in hosts if h.get("id") == entry.get("host_id")), None) or next((h for h in hosts if h.get("name") == entry.get("host_name")), None)
+        if host is None:
+            # Host IDs can be regenerated when a deleted profile is recreated.
+            # Recover the historical icon from this host's current presets.
+            host = self._match_host_for_history(entry, hosts)
         presets = self.host_agents(host) if host else self.data.get("agents", [])
         preset = next((a for a in presets if entry.get("agent_id") and a.get("id") == entry.get("agent_id")), None)
         if preset is None:
@@ -4882,6 +4887,54 @@ class App(Gtk.Window):
         if preset is None:
             preset = next((a for a in presets if a.get("command") == entry.get("agent_command")), None)
         return (preset.get("icon") if preset else None) or "✳"
+
+    @staticmethod
+    def _match_host_for_history(entry, hosts):
+        name = str(entry.get("host_name", "")).strip().casefold()
+        matches = [host for host in hosts if name and str(host.get("name", "")).strip().casefold() == name]
+        return matches[0] if len(matches) == 1 else None
+
+    def operation_logs_for_host(self, host):
+        logs = self.data.get("operation_logs", [])
+        selected = filter_operation_logs(logs, self.data.get("sync_username", ""))
+        host_id = str((host or {}).get("id", "")).strip()
+        exact = [item for item in selected if str(item.get("host_id", "")).strip() == host_id]
+        if exact:
+            return exact
+        host_name = str((host or {}).get("name", "")).strip().casefold()
+        if not host_name:
+            return selected
+        # Legacy history remains reachable after a profile ID was regenerated.
+        return [item for item in selected if str(item.get("host_name", "")).strip().casefold() == host_name]
+
+    def recover_host_sessions_from_history(self, host):
+        """Expose recent historical sessions as open instances after app restart."""
+        if not host or not hasattr(self, "shared_by_host"):
+            return
+        key = self.shared_host_key(host)
+        if isinstance(self.shared_by_host.get(key), list) and self.shared_by_host[key]:
+            return
+        recovered = []
+        seen = set()
+        for entry in self.operation_logs_for_host(host):
+            sid = str(entry.get("session_id", "")).strip()
+            path = str(entry.get("directory_path", "")).strip()
+            command = str(entry.get("agent_command", "")).strip()
+            if not sid or not path or not command or sid in seen:
+                continue
+            seen.add(sid)
+            recovered.append({
+                "id": sid,
+                "directory_name": entry.get("directory_name") or os.path.basename(path) or path,
+                "directory_path": path,
+                "agent_id": entry.get("agent_id", ""),
+                "agent_name": entry.get("agent_name") or command,
+                "agent_command": command,
+                "agent_icon": entry.get("agent_icon", ""),
+                "display_name": entry.get("session_name", ""),
+                "title_source": entry.get("title_source", "default"),
+            })
+        self.shared_by_host[key] = recovered
 
     def restore_from_operation_log(self, entry):
         target_sid = str(entry.get("session_id", "")).strip()
@@ -4932,9 +4985,7 @@ class App(Gtk.Window):
         area.set_spacing(10)
         area.set_margin_start(14); area.set_margin_end(14); area.set_margin_top(12); area.set_margin_bottom(12)
         header = Gtk.Box(spacing=8)
-        current_h = self.current_host()
-        host_title = f" · {current_h['name']}" if current_h and current_h.get("name") else ""
-        title = Gtk.Label(label=f"操作日志{host_title} · 一键重回现场", xalign=0)
+        title = Gtk.Label(label="操作日志 · 一键重回现场", xalign=0)
         title.get_style_context().add_class("section")
         header.pack_start(title, True, True, 0)
         refresh_btn = Gtk.Button(label="同步刷新")
@@ -4956,7 +5007,7 @@ class App(Gtk.Window):
             for child in list(list_box.get_children()):
                 list_box.remove(child)
             current_host = self.current_host()
-            logs = filter_operation_logs(self.data.get("operation_logs", []), self.data.get("sync_username", ""), host=current_host)
+            logs = self.operation_logs_for_host(current_host)
             if not logs:
                 host_name = (current_host or {}).get("name", "")
                 msg = f"当前主机「{host_name}」暂无操作记录，打开任意工作区会话后会自动记录并同步。" if host_name else "暂无操作记录，打开任意工作区会话后会自动记录并同步。"
