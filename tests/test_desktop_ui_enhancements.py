@@ -193,6 +193,31 @@ class DesktopUIEnhancementsTest(unittest.TestCase):
             app.disconnect_by_func(self.app_mod.Gtk.main_quit)
             app.destroy()
 
+    def test_renamed_session_header_keeps_workspace_and_agent(self):
+        mod = self.app_mod
+        self.assertEqual(
+            mod.session_display_name({"directory_name": "proj", "agent_name": "Codex", "display_name": "Fix headers"}),
+            "Fix headers · proj · Codex",
+        )
+        app = mod.App()
+        try:
+            app.persist = lambda: None
+            session = {
+                "id": "a" * 32,
+                "item": {"directory_name": "proj", "directory_path": "/proj", "agent_command": "codex",
+                         "display_name": "Old name", "title_source": "default"},
+                "agent": {"name": "Codex", "command": "codex"},
+                "title_source": "default",
+                "session_title": mod.Gtk.Label(label="Old name · proj · Codex"),
+            }
+            app.set_session_name(session, "Fix headers", sync=False, title_source="agent")
+            self.assertEqual(session["session_title"].get_text(), "Fix headers · proj · Codex")
+            self.assertEqual(session["item"]["display_name"], "Fix headers")
+        finally:
+            app.sync_executor.shutdown(wait=True)
+            app.disconnect_by_func(mod.Gtk.main_quit)
+            app.destroy()
+
     def test_session_title_mutation_is_pushed_to_remote_server_immediately(self):
         app = self.app_mod.App()
         try:
@@ -417,7 +442,7 @@ class DesktopThemeBuildTest(unittest.TestCase):
             )
             self.assertEqual(
                 mod.session_display_name({"directory_name": "proj", "agent_name": "Codex", "display_name": "Custom"}),
-                "Custom",
+                "Custom · proj · Codex",
             )
             self.assertEqual(
                 mod.session_workspace_label({"directory_name": "proj", "agent_name": "Codex", "display_name": "Codex · proj"}),
@@ -425,7 +450,7 @@ class DesktopThemeBuildTest(unittest.TestCase):
             )
             self.assertEqual(
                 mod.session_workspace_label({"directory_name": "proj", "agent_name": "Codex", "display_name": "Custom"}),
-                "Custom",
+                "Custom · proj",
             )
 
             app = mod.App()
@@ -456,7 +481,7 @@ class DesktopThemeBuildTest(unittest.TestCase):
                 sess = app.sessions[0]
                 self.assertIn("edit_button", sess)
                 self.assertIn("session_title", sess)
-                self.assertEqual(sess["session_title"].get_text(), "Original Name")
+                self.assertEqual(sess["session_title"].get_text(), "Original Name · proj · codex")
                 self.assertEqual(sess["edit_button"].get_tooltip_text(), "编辑实例名称")
                 app.data["operation_logs"] = [{
                     "id": "log-1", "created_at": 1, "updated_at": 1,
@@ -477,7 +502,7 @@ class DesktopThemeBuildTest(unittest.TestCase):
                 self.assertIn("python3 -c", remote_title_command)
                 self.assertNotIn("<<'RDT_PY'", remote_title_command)
                 app.apply_agent_session_title(sess, agent_title)
-                self.assertEqual(sess["session_title"].get_text(), "Agent Generated Title")
+                self.assertEqual(sess["session_title"].get_text(), "Agent Generated Title · proj · codex")
                 self.assertEqual(sess["item"]["title_source"], "agent")
                 self.assertEqual(app.data["operation_logs"][0]["session_name"], "Agent Generated Title")
                 self.assertEqual(app.data["operation_logs"][0]["title_source"], "agent")
@@ -487,9 +512,9 @@ class DesktopThemeBuildTest(unittest.TestCase):
                 app.set_session_name(sess, "Stale synchronized title", sync=False, title_source="agent")
                 self.assertTrue(app.agent_session_title_needs_sync(sess, agent_title))
                 app.apply_agent_session_title(sess, agent_title)
-                self.assertEqual(sess["session_title"].get_text(), "Agent Generated Title")
+                self.assertEqual(sess["session_title"].get_text(), "Agent Generated Title · proj · codex")
                 app.set_session_name(sess, "Stale Default Name", sync=False, title_source="default")
-                self.assertEqual(sess["session_title"].get_text(), "Agent Generated Title")
+                self.assertEqual(sess["session_title"].get_text(), "Agent Generated Title · proj · codex")
                 with patch.object(mod.subprocess, "run", return_value=SimpleNamespace(
                         returncode=0, stdout="RDT_ERROR:session-id-not-found", stderr="")):
                     self.assertEqual(app.read_agent_session_title(sess, "codex"), "")
@@ -499,7 +524,7 @@ class DesktopThemeBuildTest(unittest.TestCase):
 
                 # Test set_session_name updates label and syncs PUT
                 app.set_session_name(sess, "Renamed Instance", sync=True)
-                self.assertEqual(sess["session_title"].get_text(), "Renamed Instance")
+                self.assertEqual(sess["session_title"].get_text(), "Renamed Instance · proj · codex")
                 self.assertEqual(sess["item"]["display_name"], "Renamed Instance")
                 self.assertEqual(sess["item"]["title_source"], "manual")
                 self.assertEqual(sess["display_name"], "Renamed Instance")
@@ -511,7 +536,7 @@ class DesktopThemeBuildTest(unittest.TestCase):
                     self.assertEqual(app.read_agent_session_title(sess, "codex"), "")
                 self.assertEqual(sess["title_sync_status"], "保留手动名称")
                 app.apply_agent_session_title(sess, "A later generated title")
-                self.assertEqual(sess["session_title"].get_text(), "Renamed Instance")
+                self.assertEqual(sess["session_title"].get_text(), "Renamed Instance · proj · codex")
                 self.assertEqual(app.data["operation_logs"][0]["session_name"], "Renamed Instance")
 
                 # 2. Tab mode keeps only close in the instance row; header owns the other actions.
@@ -525,7 +550,7 @@ class DesktopThemeBuildTest(unittest.TestCase):
                 btn_children = tab_btn.get_child().get_children()
                 self.assertEqual(len(btn_children), 2)
                 title_lbl, close_btn = btn_children
-                self.assertEqual(title_lbl.get_text(), "Renamed Instance")
+                self.assertEqual(title_lbl.get_text(), "Renamed Instance · proj · codex")
                 self.assertTrue(app.tab_header_edit_button.get_visible())
                 self.assertTrue(app.tab_header_image_button.get_visible())
                 self.assertTrue(app.tab_header_close_button.get_visible())
@@ -542,12 +567,12 @@ class DesktopThemeBuildTest(unittest.TestCase):
                 remote_name = matching.get("display_name")
                 if remote_name and remote_name != sess.get("item", {}).get("display_name"):
                     app.set_session_name(sess, remote_name, sync=False, title_source="manual")
-                self.assertEqual(sess["session_title"].get_text(), "Remote Updated Name")
+                self.assertEqual(sess["session_title"].get_text(), "Remote Updated Name · proj · codex")
                 self.assertEqual(sess["item"]["display_name"], "Remote Updated Name")
                 rows = app.instances_list.get_children()
                 self.assertEqual(len(rows), 1)
                 tab_btn = rows[0].get_children()[0]
-                self.assertEqual(tab_btn.get_child().get_text(), "Remote Updated Name")
+                self.assertEqual(tab_btn.get_child().get_text(), "Remote Updated Name · proj · codex")
                 self.assertEqual(len(sync_calls), 0)
 
                 # A title change schedules history sync even before the matching log row is loaded.

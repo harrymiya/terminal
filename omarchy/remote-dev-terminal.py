@@ -83,8 +83,10 @@ def session_display_name(item, agent=None):
     current = item.get("display_name")
     if not agent_name:
         return current or workspace_name
-    legacy_default = f"{workspace_name} · {agent_name}"
-    return f"{agent_name} · {workspace_name}" if not current or current == legacy_default else current
+    default_names = (f"{agent_name} · {workspace_name}", f"{workspace_name} · {agent_name}")
+    if not current or current in default_names:
+        return f"{agent_name} · {workspace_name}"
+    return f"{current} · {workspace_name} · {agent_name}"
 
 
 def session_workspace_label(item, agent=None):
@@ -97,7 +99,7 @@ def session_workspace_label(item, agent=None):
         return current or workspace_name
     if current in (None, "", f"{agent_name} · {workspace_name}", f"{workspace_name} · {agent_name}"):
         return workspace_name
-    return current
+    return f"{current} · {workspace_name}"
 
 
 def agent_icon_picker(selected):
@@ -2596,19 +2598,20 @@ class App(Gtk.Window):
         session["title_source"] = title_source
 
         if name_changed:
+            display_title = session_display_name(session["item"], session.get("agent"))
             session_title = session.get("session_title")
             if session_title is not None and hasattr(session_title, "set_text"):
-                session_title.set_text(new_name)
+                session_title.set_text(display_title)
                 if hasattr(session_title, "set_tooltip_text"):
-                    session_title.set_tooltip_text(self.session_title_tooltip(session, new_name))
+                    session_title.set_tooltip_text(self.session_title_tooltip(session, display_title))
 
             minimized_label = session.get("minimized_label")
             if minimized_label is not None and hasattr(minimized_label, "set_text"):
-                minimized_label.set_text(new_name)
+                minimized_label.set_text(display_title)
                 if hasattr(minimized_label, "set_tooltip_text"):
-                    minimized_label.set_tooltip_text(self.session_title_tooltip(session, new_name))
+                    minimized_label.set_tooltip_text(self.session_title_tooltip(session, display_title))
             if session.get("minimized_button") is not None and hasattr(session["minimized_button"], "set_tooltip_text"):
-                session["minimized_button"].set_tooltip_text(self.session_title_tooltip(session, new_name))
+                session["minimized_button"].set_tooltip_text(self.session_title_tooltip(session, display_title))
 
             if not self.tiled:
                 self.update_tab_header(self.tabs.get_nth_page(self.tabs.get_current_page()))
