@@ -14,6 +14,7 @@ import subprocess
 import select
 import socket
 import urllib.request
+import urllib.error
 from urllib.parse import quote
 
 DEFAULT_AGENTS = [
@@ -293,8 +294,18 @@ def sync_operation_logs(config, local_logs=None, limit=200):
 def sync_request(config, method, session_id=None, item=None, host=None):
     if host:
         path = "/v1/hosts/" + sync_host_key(host) + "/users/" + quote(host.get("username", ""), safe="") + "/sessions"
-        return sync_data_request(config, method, path + ("/" + session_id if session_id else ""), item)
-    return sync_data_request(config, method, "/v1/sessions" + ("/" + session_id if session_id else ""), item)
+        path += "/" + session_id if session_id else ""
+    else:
+        path = "/v1/sessions" + ("/" + session_id if session_id else "")
+    try:
+        return sync_data_request(config, method, path, item)
+    except urllib.error.HTTPError as exc:
+        if method != "PUT" or exc.code != 400 or not isinstance(item, dict) or "title_source" not in item:
+            raise
+        # Older sync servers reject the optional field, but can still store the title.
+        compatible_item = dict(item)
+        compatible_item.pop("title_source", None)
+        return sync_data_request(config, method, path, compatible_item)
 
 
 def sync_host_key(host):
@@ -639,7 +650,7 @@ def active_legacy_agent():
     if kind == "codex":
         expected = base in ("codex", "codex2", "codx") or base.startswith("codex-")
     else:
-        expected = base in ("agy", "agy2", "antigravity")
+        expected = base in ("agy", "agy2", "agy.real", "antigravity")
     return expected and (not requested_workspace or not pane_path or normalized_path(pane_path) == normalized_path(requested_workspace))
 def codex_workspace_candidates():
     workspace = normalized_path(requested_workspace)
@@ -671,6 +682,10 @@ def agy_db_paths():
     roots = [os.environ.get("AGY_HOME", ""), os.path.expanduser("~/.gemini/antigravity-cli"),
              os.path.expanduser("~/.gemini/antigravity"), os.path.expanduser("~/.gemini/antigravity-ide")]
     roots.extend(glob.glob(os.path.expanduser("~/.gemini/antigravity*")))
+    agy_accounts = glob.glob(os.path.expanduser("~/.agy-homes/*"))
+    roots.extend(agy_accounts)
+    for account in agy_accounts:
+        roots.extend(glob.glob(os.path.join(account, ".gemini", "antigravity*")))
     paths = []
     for root in roots:
         if root:

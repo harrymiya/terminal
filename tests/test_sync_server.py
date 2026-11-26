@@ -271,6 +271,7 @@ class SyncServerTest(unittest.TestCase):
         self.assertEqual(relogin["theme"], "nord")
 
     def test_wrap_agent_command_codex_and_agy(self):
+        import urllib.error
         import sys
         from pathlib import Path
         sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ubuntu"))
@@ -278,6 +279,15 @@ class SyncServerTest(unittest.TestCase):
         omarchy_spec = importlib.util.spec_from_file_location("omarchy_core", Path(__file__).resolve().parents[1] / "omarchy/core.py")
         omarchy_core = importlib.util.module_from_spec(omarchy_spec)
         omarchy_spec.loader.exec_module(omarchy_core)
+
+        title_item = {"id": "1" * 32, "directory_path": "/work", "directory_name": "work",
+                      "agent_name": "Codex", "agent_command": "codex",
+                      "display_name": "Generated title", "title_source": "agent"}
+        old_server_error = urllib.error.HTTPError("https://sync.example", 400, "invalid session", {}, None)
+        with patch.object(omarchy_core, "sync_data_request", side_effect=[old_server_error, title_item]) as request:
+            self.assertEqual(omarchy_core.sync_request({}, "PUT", title_item["id"], title_item), title_item)
+        self.assertEqual(request.call_count, 2)
+        self.assertNotIn("title_source", request.call_args.args[3])
 
         wrapped_codex = ubuntu_core.wrap_agent_command("a" * 32, "codex --dangerously-bypass-approvals-and-sandbox")
         self.assertIn("codex resume \"$_rdt_id\" --dangerously-bypass-approvals-and-sandbox", wrapped_codex)
@@ -410,6 +420,21 @@ class SyncServerTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout, "RDT_TITLE:AGY title from default home")
 
+            agy_account_id = "7" * 32
+            (session_store / agy_account_id).write_text(agy_account_id, encoding="utf-8")
+            agy_account_home = Path(temp_dir) / ".agy-homes/account-b/.gemini/antigravity-cli"
+            agy_account_home.mkdir(parents=True)
+            with sqlite3.connect(agy_account_home / "conversation_summaries.db") as db:
+                db.execute("CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, title TEXT)")
+                db.execute("INSERT INTO conversation_summaries VALUES (?, ?)",
+                           (agy_account_id, "AGY title from alternate account"))
+            account_agy_env = {**agy_env, "AGY_HOME": str(Path(temp_dir) / "missing-agy-home")}
+            account_agy_command = omarchy_core.agent_session_title_command(agy_account_id, "agy", "/work")
+            result = subprocess.run(["bash", "-c", account_agy_command],
+                                    env=account_agy_env, text=True, capture_output=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "RDT_TITLE:AGY title from alternate account")
+
             legacy_agy_session_id = "c" * 32
             legacy_agy_command = omarchy_core.agent_session_title_command(legacy_agy_session_id, "agy", "/work")
             legacy_agy_env = {**agy_env, "PATH": str(fake_bin) + os.pathsep + os.environ.get("PATH", ""),
@@ -417,7 +442,7 @@ class SyncServerTest(unittest.TestCase):
             fake_tmux.write_text(
                 "#!/bin/sh\n"
                 "case \"$5\" in\n"
-                "  '#{pane_current_command}') printf 'agy\\n' ;;\n"
+                "  '#{pane_current_command}') printf 'agy.real\\n' ;;\n"
                 "  '#{pane_current_path}') printf '%s\\n' \"$RDT_TEST_PANE_PATH\" ;;\n"
                 "esac\n", encoding="utf-8")
             result = subprocess.run(["bash", "-c", legacy_agy_command],
