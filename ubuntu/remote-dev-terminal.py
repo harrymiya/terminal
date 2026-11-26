@@ -1403,6 +1403,7 @@ class App(Gtk.Window):
         self.connect("destroy", self.stop_quota_refresh)
         self.refresh()
         self.rebuild_instances_sidebar()
+        self.restore_cached_host_sessions()
         self.refresh_all_shared()
         self.sync_poll_source = None
         self.configure_sync_polling()
@@ -1438,6 +1439,22 @@ class App(Gtk.Window):
                 if frame:
                     ctx = frame.get_style_context()
                     (ctx.add_class if t is terminal else ctx.remove_class)("tile-focused")
+
+    def restore_cached_host_sessions(self):
+        """Reconnect sessions restored from the account sync cache on startup."""
+        cached = self.data.get("shared_sessions", {})
+        if not isinstance(cached, dict):
+            return
+        for host in self.data.get("hosts", []):
+            entries = cached.get(str(host.get("id", "")), [])
+            if not isinstance(entries, list):
+                continue
+            for item in entries:
+                if not isinstance(item, dict) or not item.get("id"):
+                    continue
+                if any(session.get("id") == item.get("id") for session in self.sessions):
+                    continue
+                self.open_terminal(None, host, item, activate=False)
 
     def get_selected_terminal(self):
         docked_terms = [
@@ -2320,6 +2337,30 @@ class App(Gtk.Window):
         self.instance_buttons = []
         for child in self.instances_list.get_children():
             self.instances_list.remove(child)
+        if not docked:
+            host = current_host
+            recoverable = self.recoverable_instances_for_host(host)
+            if recoverable:
+                self.instances_heading.set_text("历史实例 · 点击恢复")
+                self.instances_section.show()
+                for item in recoverable:
+                    button = Gtk.Button()
+                    button.set_hexpand(True)
+                    button.get_style_context().add_class("host-button")
+                    content = Gtk.Box(spacing=6)
+                    icon = agent_icon_widget(item.get("agent_icon") or self.operation_log_icon(item))
+                    if icon is not None:
+                        content.pack_start(icon, False, False, 0)
+                    label = Gtk.Label(label=session_display_name(item), xalign=0)
+                    label.set_ellipsize(Pango.EllipsizeMode.END)
+                    content.pack_start(label, True, True, 0)
+                    button.add(content)
+                    button.set_tooltip_text("使用原会话 ID 尝试恢复远端工作区")
+                    button.connect("clicked", lambda _button, entry=item: self.restore_from_operation_log(entry))
+                    self.instances_list.pack_start(button, False, False, 0)
+                self.instances_list.show_all()
+                return
+            self.instances_heading.set_text("工作实例")
         if self.tiled and not docked:
             self.instances_section.hide()
             return
@@ -2478,6 +2519,20 @@ class App(Gtk.Window):
             target_rows.pack_start(row, False, False, 0)
             self.scale_layout(row)
         self.instances_list.show_all()
+
+    def recoverable_instances_for_host(self, host):
+        if not host:
+            return []
+        entries = self.operation_logs_for_host(host)
+        by_session = {}
+        for entry in entries:
+            sid = str(entry.get("session_id", "")).strip()
+            path = str(entry.get("directory_path", "")).strip()
+            command = str(entry.get("agent_command", "")).strip()
+            if not sid or not path or not command:
+                continue
+            by_session.setdefault(sid, entry)
+        return list(by_session.values())[:50]
 
     def prompt_edit_session_name(self, session):
         current_name = (session.get("item") or {}).get("display_name") or session.get("display_name") or ""
