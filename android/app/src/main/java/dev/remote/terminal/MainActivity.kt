@@ -1248,6 +1248,200 @@ private fun RemoteTerminalApp(store: LocalStore) {
             sessionsRestored = true
         }
 
+        LaunchedEffect(Unit) {
+            dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.appStateProvider = {
+                org.json.JSONObject().apply {
+                    put("selected_host_id", selectedHostId)
+                    put("selected_agent_id", selectedAgentId)
+                    put("tiled_mode", tiledMode)
+                    put("active_page", activePage)
+                    put("hosts", org.json.JSONArray().apply {
+                        hosts.forEach { h ->
+                            put(org.json.JSONObject().apply {
+                                put("id", h.id)
+                                put("name", h.name)
+                                put("username", h.username)
+                                put("lan_address", h.lanAddress)
+                                put("external_address", h.externalAddress)
+                                put("workspaces", org.json.JSONArray(h.directories.map { it.name }))
+                            })
+                        }
+                    })
+                    put("agents", org.json.JSONArray(agents.map { it.name }))
+                    put("sessions", org.json.JSONArray().apply {
+                        sessions.forEachIndexed { idx, s ->
+                            put(org.json.JSONObject().apply {
+                                put("index", idx)
+                                put("id", s.task.id)
+                                put("display_name", s.task.displayName)
+                                put("directory_name", s.task.directory.name)
+                                put("directory_path", s.task.directory.path)
+                                put("agent_name", s.task.agent.name)
+                                put("agent_command", s.task.agent.command)
+                                put("status", s.status)
+                                put("connected", s.isSessionConnected)
+                                put("needs_action", s.needsAction)
+                            })
+                        }
+                    })
+                }
+            }
+
+            dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.selectHostHandler = { id, index, name ->
+                val target = when {
+                    id != null -> hosts.firstOrNull { it.id == id }
+                    index != null -> hosts.getOrNull(index)
+                    name != null -> hosts.firstOrNull { it.name.equals(name, true) || it.name.contains(name, true) }
+                    else -> null
+                }
+                if (target != null) {
+                    selectedHostId = target.id
+                    true
+                } else false
+            }
+
+            dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.selectAgentHandler = { id, name ->
+                val target = when {
+                    id != null -> agents.firstOrNull { it.id == id }
+                    name != null -> agents.firstOrNull { it.name.equals(name, true) || it.name.contains(name, true) }
+                    else -> null
+                }
+                if (target != null) {
+                    selectedAgentId = target.id
+                    true
+                } else false
+            }
+
+            dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.openTerminalHandler = { hostId, wsPath, cmd, wsName ->
+                val targetHost = (if (hostId != null) hosts.firstOrNull { it.id == hostId } else null)
+                    ?: hosts.firstOrNull { it.id == selectedHostId } ?: hosts.firstOrNull()
+                if (targetHost != null) {
+                    val targetDir = targetHost.directories.firstOrNull {
+                        (wsPath != null && it.path == wsPath) || (wsName != null && it.name.equals(wsName, true))
+                    } ?: targetHost.directories.firstOrNull()
+                    val targetAgent = (if (cmd != null) agents.firstOrNull { it.command == cmd } else null)
+                        ?: agents.firstOrNull { it.id == selectedAgentId } ?: agents.firstOrNull()
+                    if (targetDir != null && targetAgent != null) {
+                        openTask(targetHost, targetDir, targetAgent)
+                        true
+                    } else false
+                } else false
+            }
+
+            dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.focusTerminalHandler = { sid, sIndex ->
+                val index = when {
+                    sid != null -> sessions.indexOfFirst { it.task.id == sid || it.task.id.replace("-", "") == sid.replace("-", "") }
+                    sIndex != null -> sIndex
+                    else -> -1
+                }
+                if (index in sessions.indices) {
+                    activePage = index
+                    route = AppRoute.TERMINAL
+                    true
+                } else false
+            }
+
+            dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.closeTerminalHandler = { sid, sIndex ->
+                val target = when {
+                    sid != null -> sessions.firstOrNull { it.task.id == sid || it.task.id.replace("-", "") == sid.replace("-", "") }
+                    sIndex != null -> sessions.getOrNull(sIndex)
+                    else -> sessions.getOrNull(activePage)
+                }
+                if (target != null) {
+                    closeSession(target)
+                    true
+                } else false
+            }
+
+            dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.reconnectTerminalHandler = { sid ->
+                val target = when {
+                    sid != null -> sessions.firstOrNull { it.task.id == sid || it.task.id.replace("-", "") == sid.replace("-", "") }
+                    else -> sessions.getOrNull(activePage)
+                }
+                if (target != null) {
+                    target.controller.start()
+                    true
+                } else false
+            }
+
+            dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.sendTextHandler = { text, sid, pressEnter ->
+                val target = when {
+                    sid != null -> sessions.firstOrNull { it.task.id == sid || it.task.id.replace("-", "") == sid.replace("-", "") }
+                    else -> sessions.getOrNull(activePage)
+                }
+                val ctrl = target?.let { dev.remote.terminal.ssh.TerminalConnectionRegistry.get(it.task.id) }
+                    ?: dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.activeTerminalController
+                if (ctrl != null) {
+                    ctrl.send(if (pressEnter && !text.endsWith("\n")) "$text\n" else text)
+                    true
+                } else false
+            }
+
+            dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.sendKeysHandler = { keys, sid ->
+                val target = when {
+                    sid != null -> sessions.firstOrNull { it.task.id == sid || it.task.id.replace("-", "") == sid.replace("-", "") }
+                    else -> sessions.getOrNull(activePage)
+                }
+                val ctrl = target?.let { dev.remote.terminal.ssh.TerminalConnectionRegistry.get(it.task.id) }
+                    ?: dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.activeTerminalController
+                if (ctrl != null) {
+                    keys.forEach { keyName ->
+                        val seq = dev.remote.terminal.jarvis.mcp.McpKeyMap.resolveKey(keyName) ?: keyName
+                        ctrl.send(seq)
+                    }
+                    true
+                } else false
+            }
+
+            dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.readScreenHandler = { sid, lines ->
+                val target = when {
+                    sid != null -> sessions.firstOrNull { it.task.id == sid || it.task.id.replace("-", "") == sid.replace("-", "") }
+                    else -> sessions.getOrNull(activePage)
+                }
+                val full = target?.buffer?.toString() ?: ""
+                val lineList = full.lines().filter { it.isNotBlank() }
+                lineList.takeLast(lines.coerceIn(1, 100)).joinToString("\n").ifBlank { "终端屏幕当前无输出" }
+            }
+
+            dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.setViewModeHandler = { tiled ->
+                tiledMode = tiled
+                store.saveTiledMode(tiled)
+                true
+            }
+
+            dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.triggerSyncHandler = {
+                val host = hosts.firstOrNull { it.id == selectedHostId }
+                if (host != null) {
+                    refreshShared(host)
+                }
+            }
+
+            dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.publicKeyProvider = {
+                store.sshPublicKey()
+            }
+
+            dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.addWorkspaceHandler = { path, name, hostId ->
+                val host = (if (hostId != null) hosts.firstOrNull { it.id == hostId } else null)
+                    ?: hosts.firstOrNull { it.id == selectedHostId }
+                if (host != null) {
+                    val newDir = ProjectDirectory(java.util.UUID.randomUUID().toString(), name, path)
+                    val updatedHost = host.copy(directories = host.directories + newDir)
+                    saveHosts(hosts.map { if (it.id == host.id) updatedHost else it })
+                    true
+                } else false
+            }
+
+            dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.deleteWorkspaceHandler = { path, hostId ->
+                val host = (if (hostId != null) hosts.firstOrNull { it.id == hostId } else null)
+                    ?: hosts.firstOrNull { it.id == selectedHostId }
+                if (host != null) {
+                    val updatedHost = host.copy(directories = host.directories.filterNot { it.path == path })
+                    saveHosts(hosts.map { if (it.id == host.id) updatedHost else it })
+                    true
+                } else false
+            }
+        }
+
         LaunchedEffect(agents.toList(), sessions.size) {
             for (session in sessions) {
                 val agent = session.task.agent

@@ -40,6 +40,42 @@ class JarvisIntentRouter(
             """(?i)(?:什么情况|进度|好了吗|完成了吗|状态|当前|情况怎么样|status)"""
         )
 
+        private val ReadScreenRegex = Regex(
+            """(?i)(?:读屏幕|看屏幕|念屏幕|屏幕内容|显示什么|输出什么)"""
+        )
+
+        private val ReconnectRegex = Regex(
+            """(?i)(?:重连|重新连接|断线重连)"""
+        )
+
+        private val CloseTerminalRegex = Regex(
+            """(?i)(?:关闭终端|关掉终端|关掉会话|关闭会话)"""
+        )
+
+        private val TiledViewRegex = Regex(
+            """(?i)(?:切换平铺|平铺模式|变成平铺)"""
+        )
+
+        private val TabViewRegex = Regex(
+            """(?i)(?:切换标签|标签模式|变成标签)"""
+        )
+
+        private val SyncRegex = Regex(
+            """(?i)(?:触发同步|立即同步|同步一下|同步数据)"""
+        )
+
+        private val PublicKeyRegex = Regex(
+            """(?i)(?:读取公钥|查看公钥|我的公钥|公钥是什么)"""
+        )
+
+        private val AppStateRegex = Regex(
+            """(?i)(?:系统状态|应用状态|全部状态|整体状态)"""
+        )
+
+        private val SwitchHostRegex = Regex(
+            """(?i)(?:切换到主机|换到主机|切到主机|换主机)\s*([a-zA-Z0-9_\u4e00-\u9fa5\-\.]+)"""
+        )
+
         private val HelpRegex = Regex(
             """(?i)(?:你能做什么|帮助|功能|指令|help|who are you)"""
         )
@@ -74,6 +110,53 @@ class JarvisIntentRouter(
             }
         }
 
+        if (ReadScreenRegex.containsMatchIn(cleanText)) {
+            Log.i(TAG, "Tier-1 matched: MCP read_terminal_screen (0 Token)")
+            return@withContext JarvisAction.ExecuteTool("read_terminal_screen", JSONObject().put("lines", 15))
+        }
+
+        if (ReconnectRegex.containsMatchIn(cleanText)) {
+            Log.i(TAG, "Tier-1 matched: MCP reconnect_terminal (0 Token)")
+            return@withContext JarvisAction.ExecuteTool("reconnect_terminal")
+        }
+
+        if (CloseTerminalRegex.containsMatchIn(cleanText)) {
+            Log.i(TAG, "Tier-1 matched: MCP close_terminal (0 Token)")
+            return@withContext JarvisAction.ExecuteTool("close_terminal")
+        }
+
+        if (TiledViewRegex.containsMatchIn(cleanText)) {
+            Log.i(TAG, "Tier-1 matched: MCP set_view_mode (tiled=true, 0 Token)")
+            return@withContext JarvisAction.ExecuteTool("set_view_mode", JSONObject().put("tiled", true))
+        }
+
+        if (TabViewRegex.containsMatchIn(cleanText)) {
+            Log.i(TAG, "Tier-1 matched: MCP set_view_mode (tiled=false, 0 Token)")
+            return@withContext JarvisAction.ExecuteTool("set_view_mode", JSONObject().put("tiled", false))
+        }
+
+        if (SyncRegex.containsMatchIn(cleanText)) {
+            Log.i(TAG, "Tier-1 matched: MCP trigger_sync (0 Token)")
+            return@withContext JarvisAction.ExecuteTool("trigger_sync")
+        }
+
+        if (PublicKeyRegex.containsMatchIn(cleanText)) {
+            Log.i(TAG, "Tier-1 matched: MCP get_ssh_public_key (0 Token)")
+            return@withContext JarvisAction.ExecuteTool("get_ssh_public_key")
+        }
+
+        if (AppStateRegex.containsMatchIn(cleanText)) {
+            Log.i(TAG, "Tier-1 matched: MCP get_app_state (0 Token)")
+            return@withContext JarvisAction.ExecuteTool("get_app_state")
+        }
+
+        val hostMatch = SwitchHostRegex.find(cleanText)
+        if (hostMatch != null) {
+            val targetHost = hostMatch.groupValues[1].trim()
+            Log.i(TAG, "Tier-1 matched: MCP select_host to $targetHost (0 Token)")
+            return@withContext JarvisAction.ExecuteTool("select_host", JSONObject().put("host_name", targetHost))
+        }
+
         if (StatusQueryRegex.containsMatchIn(cleanText)) {
             Log.i(TAG, "Tier-1 matched: Status Query (0 Token)")
             val summary = generateLocalStatusSummary(context)
@@ -82,7 +165,7 @@ class JarvisIntentRouter(
 
         if (HelpRegex.containsMatchIn(cleanText)) {
             Log.i(TAG, "Tier-1 matched: Help Query (0 Token)")
-            return@withContext JarvisAction.DirectReply("先生，我是贾维斯。您可以吩咐我切换工作区、确认授权推进，或直接交代开发调试任务。")
+            return@withContext JarvisAction.DirectReply("先生，我是贾维斯。已为您接入全套 MCP 工具集，您可以吩咐我读屏幕、切换主机、重连会话、平铺布局，或派发后台开发任务。")
         }
 
         // 2. Tier-2 复杂开放式指令：压缩元数据后由服务端轻量模型处理
@@ -128,6 +211,8 @@ class JarvisIntentRouter(
                     put("workspaces", org.json.JSONArray(context.workspaces))
                     put("agents", org.json.JSONArray(context.agents))
                 })
+                // 提供 MCP 工具名称列表，供大模型进行 Function Calling / Tool Calling
+                put("available_tools", org.json.JSONArray(dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.getAllDefinitions().map { it.name }))
             }
 
             conn.outputStream.use { os ->
@@ -142,7 +227,11 @@ class JarvisIntentRouter(
                 val cmd = json.optString("command", "")
                 val targetWs = json.optString("target_workspace", "")
 
-                if (targetWs.isNotBlank() && targetWs != context.currentWorkspaceName) {
+                if (json.has("tool")) {
+                    val toolName = json.getString("tool")
+                    val toolArgs = json.optJSONObject("arguments") ?: JSONObject()
+                    JarvisAction.ExecuteTool(toolName, toolArgs, voiceReply)
+                } else if (targetWs.isNotBlank() && targetWs != context.currentWorkspaceName) {
                     JarvisAction.SwitchWorkspace(targetWs, voiceReply)
                 } else if (cmd.isNotBlank()) {
                     JarvisAction.InjectKeystroke(cmd.let { if (it.endsWith("\n")) it else "$it\n" }, voiceReply)

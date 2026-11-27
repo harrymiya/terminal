@@ -183,6 +183,19 @@ object JarvisCoordinator : VoicePerceptorCallback {
             is JarvisAction.DirectReply -> {
                 speakWithState(action.voiceReply)
             }
+            is JarvisAction.ExecuteTool -> {
+                updateState(JarvisState.EXECUTING)
+                scope.launch {
+                    val result = dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.executeTool(action.toolName, action.arguments)
+                    if (result.isError) {
+                        earconManager.playAlertChime()
+                        speakWithState(action.voiceReply ?: result.voiceSummary ?: "执行工具失败。")
+                    } else {
+                        earconManager.playActionSuccessChime()
+                        speakWithState(action.voiceReply ?: result.voiceSummary ?: "操作已完成。")
+                    }
+                }
+            }
             is JarvisAction.ErrorAction -> {
                 earconManager.playAlertChime()
                 speakWithState(action.message)

@@ -39,6 +39,7 @@ sealed class JarvisAction {
     data class SwitchWorkspace(val workspaceName: String, val voiceReply: String? = null) : JarvisAction()
     data class QueryStatus(val voiceReply: String) : JarvisAction()
     data class DirectReply(val voiceReply: String) : JarvisAction()
+    data class ExecuteTool(val toolName: String, val arguments: org.json.JSONObject = org.json.JSONObject(), val voiceReply: String? = null) : JarvisAction()
     data class ErrorAction(val message: String) : JarvisAction()
     object None : JarvisAction()
 }
