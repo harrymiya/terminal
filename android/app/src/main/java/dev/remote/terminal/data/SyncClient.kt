@@ -3,6 +3,8 @@ package dev.remote.terminal.data
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
+import java.io.EOFException
+import java.io.IOException
 import java.security.MessageDigest
 import org.json.JSONObject
 import org.json.JSONArray
@@ -27,18 +29,42 @@ object SyncClient {
     fun authenticate(url: String, action: String, username: String, password: String): JSONObject {
         val endpoint = URL(url.trimEnd('/') + "/v1/auth/$action")
         require(endpoint.protocol == "http" || endpoint.protocol == "https") { "同步地址必须以 http:// 或 https:// 开头" }
+        val payload = JSONObject().put("username", username).put("password", password).toString().toByteArray(Charsets.UTF_8)
+        return try {
+            authenticateOnce(endpoint, payload)
+        } catch (error: IOException) {
+            if (error !is EOFException && error.message?.contains("unexpected end of stream", ignoreCase = true) != true) throw error
+            // A stale keep-alive connection can be handed out by Android's HTTP connection pool.
+            // Retry the login request once; authenticateOnce always asks the server to close it.
+            authenticateOnce(endpoint, payload)
+        }
+    }
+
+    private fun authenticateOnce(endpoint: URL, payload: ByteArray): JSONObject {
         val connection = endpoint.openConnection() as HttpURLConnection
         try {
             connection.requestMethod = "POST"
+            connection.instanceFollowRedirects = false
+            connection.useCaches = false
             connection.connectTimeout = 10_000
             connection.readTimeout = 10_000
             connection.doOutput = true
             connection.setRequestProperty("Content-Type", "application/json")
-            val payload = JSONObject().put("username", username).put("password", password)
-            connection.outputStream.use { it.write(payload.toString().toByteArray(Charsets.UTF_8)) }
+            connection.setRequestProperty("Accept", "application/json")
+            connection.setRequestProperty("Connection", "close")
+            connection.setFixedLengthStreamingMode(payload.size)
+            connection.outputStream.use { it.write(payload) }
             val code = connection.responseCode
+            if (code in 300..399) {
+                throw IOException("登录请求被重定向（HTTP $code），请检查同步服务地址")
+            }
             val stream = if (code in 200..299) connection.inputStream else connection.errorStream
-            val response = JSONObject(stream.bufferedReader().use { it.readText() })
+            val body = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+            val response = try {
+                JSONObject(body)
+            } catch (error: Exception) {
+                throw IOException("登录响应为空或格式错误（HTTP $code）", error)
+            }
             check(code in 200..299) { response.optString("error", "登录失败（HTTP $code）") }
             return response
         } finally { connection.disconnect() }
