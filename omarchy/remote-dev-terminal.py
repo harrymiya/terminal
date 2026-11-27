@@ -5135,7 +5135,8 @@ class App(Gtk.Window):
                     if live_info and not (live_info[1] == "agent" and entry.get("title_source") == "manual"):
                         if live_info[0] and (entry.get("title_source", "default") == "default" or live_info[1] in ("agent", "manual")):
                             history_name = live_info[0]
-                    main_lbl = Gtk.Label(label=history_name or f"{entry.get('agent_name') or entry.get('agent_command', '')} · {entry.get('directory_name') or entry.get('directory_path', '')}", xalign=0)
+                    display_name = history_name or f"{entry.get('agent_name') or entry.get('agent_command', '')} · {entry.get('directory_name') or entry.get('directory_path', '')}"
+                    main_lbl = Gtk.Label(label=f"会话名称：{display_name}", xalign=0)
                     main_lbl.set_line_wrap(True)
                     main_lbl.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
                     sub_lbl = Gtk.Label(label=f"主机: {entry.get('host_name', '')} · {entry.get('agent_name') or entry.get('agent_command', '')} · 目录: {entry.get('directory_path', '')}", xalign=0)
