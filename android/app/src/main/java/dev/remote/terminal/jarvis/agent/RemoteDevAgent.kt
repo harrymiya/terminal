@@ -3,6 +3,7 @@ package dev.remote.terminal.jarvis.agent
 import android.util.Log
 import dev.remote.terminal.jarvis.api.JarvisManagerPolicy
 import dev.remote.terminal.jarvis.mcp.JarvisToolRegistry
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -233,6 +234,7 @@ internal object RemoteDevAgent {
     private data class McpBatchOutcome(
         val toolLogs: List<String>,
         val reports: List<String>,
+        val verifiedReports: List<String>,
         val hasError: Boolean,
         val needsFollowUp: Boolean,
         val closedAwake: Boolean = false
@@ -244,6 +246,7 @@ internal object RemoteDevAgent {
     ): McpBatchOutcome {
         val toolLogs = mutableListOf<String>()
         val reports = mutableListOf<String>()
+        val verifiedReports = mutableListOf<String>()
         var hasError = false
         var needsFollowUp = false
         var closedAwake = false
@@ -252,35 +255,33 @@ internal object RemoteDevAgent {
             Log.i(TAG, "Jarvis manager requested Remote Dev MCP tool: ${call.toolName}")
             val result = executeTool(call.toolName, call.arguments)
             toolLogs.add("[${call.toolName}] isError=${result.isError} content=${result.content.take(3500)}")
-            if (call.toolName == "close_awake" && !result.isError) {
-                closedAwake = true
-            }
-
-            val triggerFollowUp = !closedAwake && allowReadFollowUp && (result.expectsFollowUp || call.toolName in READ_TOOLS)
-            if (triggerFollowUp) {
-                needsFollowUp = true
-            }
-
             if (result.isError) {
                 hasError = true
-                val errSummary = result.voiceSummary?.takeIf { it.isNotBlank() }
-                    ?: "执行 ${call.toolName} 失败：${result.content.take(80)}"
-                reports.add(errSummary)
-            } else {
-                val okSummary = result.voiceSummary?.takeIf { it.isNotBlank() }
+                verifiedReports.add(result.voiceSummary?.takeIf { it.isNotBlank() }
+                    ?: "执行 ${call.toolName} 失败：${result.content.take(80)}")
+                if (toolLogs.size < calls.size) verifiedReports.add("本批后续操作未执行。")
+                break
+            }
+            if (call.toolName == "close_awake") {
+                closedAwake = true
+                break
+            }
+
+            val triggerFollowUp = allowReadFollowUp && (result.expectsFollowUp || call.toolName in READ_TOOLS)
+            needsFollowUp = needsFollowUp || triggerFollowUp
+            if (call.toolName != "speak_to_user") {
+                val summary = result.voiceSummary?.takeIf { it.isNotBlank() }
                     ?: "已完成 ${call.toolName} 操作。"
-                // 若结果已触发模型二次整合（如 read_terminal_screen 或 run_terminal_command 返回了真实 stdout/exit_code），
-                // 则由模型结合真实输出直接汇报，避免额外拼接重复摘要。
-                if ((!triggerFollowUp && call.toolName !in READ_TOOLS || !allowReadFollowUp && call.toolName in READ_TOOLS) &&
-                    call.toolName != "speak_to_user" && call.toolName != "close_awake") {
-                    reports.add(okSummary)
-                }
+                // Prefer the model's synthesis when it arrives. Keep the verified result if it fails.
+                verifiedReports.add(summary)
+                if (!triggerFollowUp) reports.add(summary)
             }
         }
 
         return McpBatchOutcome(
             toolLogs = toolLogs,
             reports = reports,
+            verifiedReports = verifiedReports,
             hasError = hasError,
             needsFollowUp = needsFollowUp,
             closedAwake = closedAwake
@@ -296,9 +297,22 @@ internal object RemoteDevAgent {
     ): String {
         var reply = rawReply
         val reports = mutableListOf<String>()
+        val verifiedReports = mutableListOf<String>()
         val toolLogs = mutableListOf<String>()
         val executed = mutableSetOf<Pair<String, String>>()
         var retriedInvalidTurn = false
+        fun reportWithFallback(message: String = "") =
+            (verifiedReports + message).filter { it.isNotBlank() }.distinct().joinToString(" ")
+
+        suspend fun completeFollowUp(prompt: String): String? = try {
+            complete(buildPrompt(prompt, appState, memoryContext, isFollowUp = true)).getOrThrow()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "Jarvis model follow-up failed")
+            null
+        }
+
         repeat(3) { step ->
             var turn = parseModelTurn(reply)
             if (turn == null && !retriedInvalidTurn) {
@@ -307,38 +321,40 @@ internal object RemoteDevAgent {
                 val retryPrompt = "上一条模型输出没有符合调用协议。重新处理本轮请求。需要 App 操作时，返回 tool_calls，让手机执行。需要补充信息时，返回 reply 并说明缺哪项信息。"
                     .plus("\n本轮用户请求：$originalRequest")
                     .plus(if (toolLogs.isEmpty()) "" else "\n已执行的工具结果：\n" + toolLogs.joinToString("\n"))
-                val retry = complete(buildPrompt(retryPrompt, appState, memoryContext, isFollowUp = true)).getOrNull()
+                val retry = completeFollowUp(retryPrompt)
                 turn = retry?.let(::parseModelTurn)
             }
             if (turn == null) {
                 Log.w(TAG, "Jarvis model action unavailable after protocol recovery")
-                return (reports + "模型没有发出可执行的手机操作指令。").distinct().joinToString(" ")
+                return reportWithFallback("模型没有发出可继续执行的手机操作指令。")
             }
             val calls = turn.calls
             if (calls.isEmpty()) {
                 val summary = sanitizeForSpeech(turn.reply)
-                return (listOf(summary) + reports).filter { it.isNotBlank() }.distinct().joinToString(" ")
+                return if (summary.isBlank()) reportWithFallback()
+                else (listOf(summary) + reports).filter { it.isNotBlank() }.distinct().joinToString(" ")
             }
             val newCalls = calls.filter { executed.add(it.toolName to it.arguments.toString()) }
-            if (newCalls.isEmpty()) return reports.distinct().joinToString(" ").ifBlank { "本轮工具已调用，请查看上一步结果。" }
+            if (newCalls.isEmpty()) return reportWithFallback().ifBlank { "本轮工具已调用，请查看上一步结果。" }
 
             val batch = executeMcpCalls(newCalls, allowReadFollowUp = step < 2)
             if (batch.closedAwake) return ""
             reports.addAll(batch.reports)
+            verifiedReports.addAll(batch.verifiedReports)
             toolLogs.addAll(batch.toolLogs)
             if (batch.hasError || !batch.needsFollowUp) {
-                return reports.distinct().joinToString(" ")
+                return reportWithFallback()
             }
 
             val followPrompt = "继续完成本轮用户请求。按顺序核对以下工具结果。仅在需要下一步操作时调用工具，避免重复已执行的操作，否则简短汇报结果。\n" +
                 "本轮用户请求：$originalRequest\n" + toolLogs.joinToString("\n")
-            val next = complete(buildPrompt(followPrompt, appState, memoryContext, isFollowUp = true)).getOrNull()
+            val next = completeFollowUp(followPrompt)
             if (next.isNullOrBlank()) {
-                return reports.distinct().joinToString(" ").ifBlank { "手机已返回工具结果，暂时无法整理后续回复。" }
+                return reportWithFallback("暂时无法继续整理结果。")
             }
             reply = next
         }
-        return reports.distinct().joinToString(" ")
+        return reportWithFallback()
     }
 
     private fun buildPrompt(userPrompt: String, appStateSnapshot: String, memoryContext: String, isFollowUp: Boolean = false): String = buildString {
