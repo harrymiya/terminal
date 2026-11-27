@@ -617,6 +617,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
         var sharedHost by remember { mutableStateOf<HostProfile?>(null) }
         var startupShared by remember { mutableStateOf<List<Pair<HostProfile, org.json.JSONObject>>>(emptyList()) }
         var syncLoading by remember { mutableStateOf(false) }
+        val sessionSyncErrors = remember { androidx.compose.runtime.mutableStateMapOf<String, String>() }
         val snackbars = remember { SnackbarHostState() }
         val scope = rememberCoroutineScope()
         val dirtyWorkspaces = remember { store.loadDirtyWorkspaces().toMutableSet() }
@@ -1307,7 +1308,10 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 if (activate) { activePage = existing; route = AppRoute.TERMINAL }
                 return
             }
-            val currentHost = hosts.firstOrNull { it.id == host.id } ?: return
+            val currentHost = hosts.firstOrNull { it.id == host.id } ?: run {
+                scope.launch { snackbars.showSnackbar("找不到远端实例对应的主机，请先同步或重新添加主机") }
+                return
+            }
             val effectiveHost = if (currentHost.password.isNotBlank()) currentHost else currentHost.copy(password = store.loadHostPassword(currentHost.id))
             val directory = effectiveHost.directories.firstOrNull { it.path == path }
                 ?: ProjectDirectory(UUID.randomUUID().toString(), item.getString("directory_name"), path)
@@ -1334,13 +1338,12 @@ private fun RemoteTerminalApp(store: LocalStore) {
             val items = SyncClient.mergeSessionItems(batch.remoteItems, mergedPending)
             startupShared = startupShared.filterNot { it.first.id == host.id } + items.map { host to it }
             val remoteIds = items.map { it.optString("id").replace("-", "") }.toSet()
-            val hadSessions = sessions.isNotEmpty()
             sessions.toList().filter { session ->
                 session.task.host.id == host.id && session.task.id.replace("-", "") !in remoteIds &&
                     android.os.SystemClock.elapsedRealtime() - session.startedAt > 15_000L
             }.forEach { closeSession(it, syncDeletion = false) }
-            items.forEach { item -> openSharedSession(host, item, activate = false) }
-            if (!hadSessions && sessions.isNotEmpty() && route == AppRoute.HOME) { activePage = 0; route = AppRoute.TERMINAL }
+            // Keep the remote list visible without attaching every remote tmux session automatically.
+            // The user can choose an instance from HomeScreen when they want to take it over.
             if (sharedHost?.id == host.id && sharedSessions != null) sharedSessions = items
             store.clearPendingSessionSync(batch.completedMutationIds)
         }
@@ -2819,7 +2822,10 @@ private fun RemoteTerminalApp(store: LocalStore) {
             operationLogs.addAll(store.loadOperationLogs(store.loadSyncUsername()))
             val syncEnabled = !offlineMode && autoSyncEnabled && syncUrl.isNotBlank() && syncToken.isNotBlank()
             syncLoading = syncEnabled && hosts.isNotEmpty()
-            if (!syncEnabled) startupShared = emptyList()
+            if (!syncEnabled) {
+                startupShared = emptyList()
+                sessionSyncErrors.clear()
+            }
             while (true) {
                 if (!syncEnabled) {
                     syncLoading = false
@@ -2828,8 +2834,11 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 }
                 val resolvedHosts = if (syncEnabled) runCatching {
                     withContext(SyncClient.dispatcher) { syncHostProfiles() }
+                }.onSuccess {
+                    sessionSyncErrors.remove("host_profiles")
                 }.getOrElse { error ->
                     val message = error.message.orEmpty()
+                    sessionSyncErrors["host_profiles"] = "远端主机列表同步失败：${message.ifBlank { "网络请求失败" }}"
                     if (message.contains("401") || message.contains("unauthorized", ignoreCase = true)) {
                         syncToken = ""; store.saveSyncSettings(syncUrl, "")
                     }
@@ -2936,7 +2945,12 @@ private fun RemoteTerminalApp(store: LocalStore) {
                         }
                     }
                     runCatching { syncSharedSessions(host) }
-                        .onFailure { error -> snackbars.showSnackbar("${host.name} 会话同步失败：${error.message}") }
+                        .onSuccess { sessionSyncErrors.remove(host.id) }
+                        .onFailure { error ->
+                            val message = error.message ?: "网络请求失败"
+                            sessionSyncErrors[host.id] = "${host.name} 会话同步失败：$message"
+                            snackbars.showSnackbar("${host.name} 会话同步失败：$message")
+                        }
                 }
                 runCatching { syncOperationLogs() }
                 syncLoading = false
@@ -2955,6 +2969,9 @@ private fun RemoteTerminalApp(store: LocalStore) {
                         hosts = hosts, agents = currentAgents, selectedHost = selectedHost, selectedAgent = selectedAgent,
                         quotaFor = { host, agent -> quotaKey(host, agent.command)?.let(quotas::get) },
                         sessions = sessions, onSelectHost = { selectHost(it) }, onSelectAgent = ::selectAgent,
+                        remoteInstances = startupShared,
+                        onOpenRemoteInstance = { host, item -> openSharedSession(host, item, activate = true) },
+                        syncErrors = sessionSyncErrors.values.toList(),
                         syncLoading = syncLoading,
                         onManage = { route = AppRoute.MANAGE }, onAddHost = { addingHost = true },
                         onAddDirectory = { selectedHost?.let { editingDirectory = it.id to null } },
@@ -3442,6 +3459,9 @@ private fun HomeScreen(
     hosts: List<HostProfile>, agents: List<AgentPreset>, selectedHost: HostProfile?, selectedAgent: AgentPreset?,
     quotaFor: (HostProfile, AgentPreset) -> List<QuotaWindow>?,
     sessions: List<TerminalSessionState>, onSelectHost: (HostProfile) -> Unit, onSelectAgent: (AgentPreset) -> Unit,
+    remoteInstances: List<Pair<HostProfile, org.json.JSONObject>>,
+    onOpenRemoteInstance: (HostProfile, org.json.JSONObject) -> Unit,
+    syncErrors: List<String>,
     onManage: () -> Unit, onAddHost: () -> Unit, onAddDirectory: () -> Unit, onOpenAgents: () -> Unit, onOpenLogs: () -> Unit, onOpenSettings: () -> Unit,
     onStartTask: (HostProfile, ProjectDirectory, AgentPreset) -> Unit, onResumeSession: (Int) -> Unit,
     onRenameSession: (TerminalSessionState) -> Unit,
@@ -3493,6 +3513,9 @@ private fun HomeScreen(
         ) {
 
         if (syncLoading) Text("正在同步共享会话…", color = Muted, fontSize = 12.sp)
+        syncErrors.forEach { message ->
+            Text(message, color = Coral, fontSize = 11.sp, modifier = Modifier.padding(top = 3.dp, bottom = 3.dp))
+        }
 
         val hostSessions = remember(sessions.toList(), selectedHost?.id) {
             if (selectedHost == null) sessions
@@ -3617,6 +3640,58 @@ private fun HomeScreen(
                             if (rowSessions.size == 1) {
                                 Spacer(Modifier.weight(1f))
                             }
+                        }
+                    }
+                }
+            }
+        }
+
+        val openSessionIds = sessions.mapTo(mutableSetOf()) { it.task.id.replace("-", "").lowercase() }
+        val remoteOnlyInstances = remoteInstances.filter { (_, item) ->
+            item.optString("id").replace("-", "").lowercase() !in openSessionIds
+        }
+        if (remoteOnlyInstances.isNotEmpty()) {
+            Row(
+                Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("远端实例", color = White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.width(8.dp))
+                Text("${remoteOnlyInstances.size}", color = Blue, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            }
+            Column(
+                Modifier.fillMaxWidth().padding(bottom = 18.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                remoteOnlyInstances.forEach { (host, item) ->
+                    val workspace = item.optString("directory_name").ifBlank { item.optString("directory_path") }
+                    val agent = item.optString("agent_name")
+                    val title = item.optString("display_name").ifBlank {
+                        listOf(workspace, agent).filter { it.isNotBlank() }.joinToString(" · ").ifBlank { "远端工作实例" }
+                    }
+                    Surface(
+                        onClick = { onOpenRemoteInstance(host, item) },
+                        color = Panel,
+                        shape = RoundedCornerShape(12.dp),
+                        border = BorderStroke(1.dp, Blue.copy(alpha = 0.45f)),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Row(
+                            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                Text(title, color = White, fontSize = 12.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(
+                                    listOf(host.name, workspace, agent).filter { it.isNotBlank() }.joinToString(" · "),
+                                    color = Muted,
+                                    fontSize = 10.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                            Spacer(Modifier.width(10.dp))
+                            Text("点按接入", color = Blue, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
                         }
                     }
                 }
