@@ -4962,6 +4962,7 @@ private fun SettingsScreen(
             }
 
             if (jarvisEnabled) {
+                val jarvisDiagStatus by dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.diagnosticStatus.collectAsState()
                 OutlinedTextField(
                     value = jarvisWakeWord,
                     onValueChange = {
@@ -4972,6 +4973,11 @@ private fun SettingsScreen(
                     label = { Text("唤醒词 (默认：贾维斯)") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
+                )
+                Text(
+                    "监听状态：$jarvisDiagStatus",
+                    color = Mint,
+                    fontSize = 11.sp
                 )
 
                 Text("借力开发者能力", color = White, fontSize = 13.sp, fontWeight = FontWeight.Medium)

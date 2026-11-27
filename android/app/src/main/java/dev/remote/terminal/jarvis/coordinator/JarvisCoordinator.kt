@@ -1,6 +1,7 @@
 package dev.remote.terminal.jarvis.coordinator
 
 import android.content.Context
+import android.os.SystemClock
 import android.util.Log
 import dev.remote.terminal.jarvis.api.JarvisAction
 import dev.remote.terminal.jarvis.api.JarvisConfig
@@ -30,6 +31,7 @@ import java.util.concurrent.CopyOnWriteArrayList
 object JarvisCoordinator : VoicePerceptorCallback {
 
     private const val TAG = "JarvisCoordinator"
+    private const val CONVERSATION_WINDOW_MS = 15_000L
     private val scope = CoroutineScope(Dispatchers.Main)
 
     val config = JarvisConfig()
@@ -42,11 +44,20 @@ object JarvisCoordinator : VoicePerceptorCallback {
     private var perceptor: VoicePerceptor? = null
     private var listeningTimeoutJob: kotlinx.coroutines.Job? = null
 
+    @Volatile
+    private var conversationAwakeUntilMs: Long = 0L
+
+    @Volatile
+    private var wakeConfirmedThisTurn: Boolean = false
+
     private val _state = MutableStateFlow(JarvisState.DISABLED)
     val state: StateFlow<JarvisState> = _state.asStateFlow()
 
     private val _subtitle = MutableStateFlow("")
     val subtitle: StateFlow<String> = _subtitle.asStateFlow()
+
+    private val _diagnosticStatus = MutableStateFlow("未启动")
+    val diagnosticStatus: StateFlow<String> = _diagnosticStatus.asStateFlow()
 
     var hapticFeedbackProvider: (() -> Unit)? = null
 
@@ -68,7 +79,9 @@ object JarvisCoordinator : VoicePerceptorCallback {
         val sco = BluetoothScoManager(app)
         scoManager = sco
         speaker = JarvisSpeaker(app, sco, earconManager, config)
-        intentRouter = JarvisIntentRouter()
+        intentRouter = JarvisIntentRouter(
+            wakeWordProvider = { config.wakeWord }
+        )
 
         if (config.enabled) {
             start()
@@ -83,6 +96,7 @@ object JarvisCoordinator : VoicePerceptorCallback {
         ) == android.content.pm.PackageManager.PERMISSION_GRANTED
         if (!hasAudioPermission) {
             Log.w(TAG, "Cannot start Jarvis without RECORD_AUDIO permission")
+            _diagnosticStatus.value = "未授予麦克风权限"
             _subtitle.value = "请先授予麦克风权限"
             updateState(JarvisState.DISABLED)
             return
@@ -90,22 +104,37 @@ object JarvisCoordinator : VoicePerceptorCallback {
 
         config.enabled = true
         speaker?.rebuildSynthesizer()
+        // 启动含 MICROPHONE 前台服务类型的保活服务，防止熄屏/后台被系统静音
+        runCatching { dev.remote.terminal.ssh.TerminalKeepAliveService.start(ctx) }
+            .onFailure { Log.w(TAG, "Failed to start TerminalKeepAliveService for Jarvis: ${it.message}") }
 
         val p = JarvisPerceptorFactory.createPerceptor(ctx, config)
+        if (p is OfflineJarvisPerceptor) {
+            p.wakeWordProvider = { config.wakeWord }
+            p.onDiagnosticChanged = { status ->
+                _diagnosticStatus.value = status
+            }
+        }
         perceptor = p
         p.start(this)
 
         updateState(JarvisState.STANDBY)
-        Log.i(TAG, "Jarvis master coordinator started in STANDBY mode")
+        Log.i(TAG, "Jarvis master coordinator started in STANDBY mode (wakeWord=\"${config.wakeWord}\")")
     }
 
     fun stop() {
         config.enabled = false
+        conversationAwakeUntilMs = 0L
+        wakeConfirmedThisTurn = false
+        _diagnosticStatus.value = "已关闭"
+        listeningTimeoutJob?.cancel()
+        listeningTimeoutJob = null
         perceptor?.stop()
         perceptor?.release()
         perceptor = null
         speaker?.stop()
         scoManager?.stopChannel()
+        _subtitle.value = ""
         updateState(JarvisState.DISABLED)
         Log.i(TAG, "Jarvis master coordinator stopped")
     }
@@ -121,23 +150,36 @@ object JarvisCoordinator : VoicePerceptorCallback {
         if (!config.enabled) {
             start()
         }
+        if (speakTestPhrase) {
+            onWakeWordDetected(config.wakeWord)
+            scope.launch {
+                kotlinx.coroutines.delay(220)
+                speakWithState("先生，我在，当前语音音量跟随系统媒体音量，随时为您效劳。") {
+                    openFollowUpListeningWindow()
+                }
+            }
+            return
+        }
         val p = perceptor
         if (p is OfflineJarvisPerceptor) {
             p.triggerWakeWordDetected()
         } else {
             onWakeWordDetected(config.wakeWord)
         }
-        if (speakTestPhrase) {
-            scope.launch {
-                kotlinx.coroutines.delay(260)
-                speakWithState("先生，我在，当前语音音量跟随系统媒体音量，随时为您效劳。")
-            }
+    }
+
+    override fun onListeningWindowOpened() {
+        scope.launch {
+            wakeConfirmedThisTurn = false
+            updateState(JarvisState.LISTENING)
         }
     }
 
     override fun onWakeWordDetected(keyword: String) {
         scope.launch {
-            Log.i(TAG, "Wake word detected: $keyword (listening silently until speech or action)")
+            Log.i(TAG, "Wake word confirmed: $keyword")
+            conversationAwakeUntilMs = SystemClock.elapsedRealtime() + CONVERSATION_WINDOW_MS
+            wakeConfirmedThisTurn = true
             hapticFeedbackProvider?.invoke()
             updateState(JarvisState.LISTENING)
             earconManager.playWakeChime()
@@ -152,16 +194,32 @@ object JarvisCoordinator : VoicePerceptorCallback {
 
     override fun onSpeechRecognized(text: String, isFinal: Boolean) {
         scope.launch {
+            val hasWake = intentRouter?.containsWakeWord(text) == true
+            val inWindow = SystemClock.elapsedRealtime() < conversationAwakeUntilMs
             if (!isFinal) {
-                Log.d(TAG, "Partial speech: \"$text\"")
-                _subtitle.value = text
+                Log.d(TAG, "Partial speech: \"$text\" (hasWake=$hasWake, inWindow=$inWindow)")
+                if (hasWake || inWindow) {
+                    _subtitle.value = text
+                }
                 return@launch
             }
 
+            if (!hasWake && !inWindow) {
+                Log.d(TAG, "Ignoring speech without wake word \"${config.wakeWord}\": \"$text\"")
+                _subtitle.value = ""
+                updateState(if (config.enabled) JarvisState.STANDBY else JarvisState.DISABLED)
+                return@launch
+            }
+
+            if (hasWake && !wakeConfirmedThisTurn) {
+                wakeConfirmedThisTurn = true
+                hapticFeedbackProvider?.invoke()
+                earconManager.playWakeChime()
+            }
+            conversationAwakeUntilMs = SystemClock.elapsedRealtime() + CONVERSATION_WINDOW_MS
             Log.i(TAG, "Final speech recognized: \"$text\"")
             _subtitle.value = text
             updateState(JarvisState.PROCESSING)
-            earconManager.playThinkingChime()
 
             val context = JarvisContext(
                 currentWorkspaceName = currentWorkspaceName,
@@ -172,6 +230,9 @@ object JarvisCoordinator : VoicePerceptorCallback {
             )
 
             val action = intentRouter?.resolveIntent(text, context) ?: JarvisAction.None
+            if (action !is JarvisAction.DirectReply && action != JarvisAction.None) {
+                earconManager.playThinkingChime()
+            }
             executeAction(action)
         }
     }
@@ -204,7 +265,9 @@ object JarvisCoordinator : VoicePerceptorCallback {
                 speakWithState(action.voiceReply)
             }
             is JarvisAction.DirectReply -> {
-                speakWithState(action.voiceReply)
+                speakWithState(action.voiceReply) {
+                    openFollowUpListeningWindow()
+                }
             }
             is JarvisAction.ExecuteTool -> {
                 updateState(JarvisState.EXECUTING)
@@ -235,17 +298,35 @@ object JarvisCoordinator : VoicePerceptorCallback {
         }
     }
 
-    fun speakWithState(message: String) {
+    fun speakWithState(message: String, onFinished: (() -> Unit)? = null) {
         _subtitle.value = message
         hapticFeedbackProvider?.invoke()
         updateState(JarvisState.SPEAKING)
-        speaker?.speak(message) {
+        val currentSpeaker = speaker
+        if (currentSpeaker == null) {
+            updateState(if (config.enabled) JarvisState.STANDBY else JarvisState.DISABLED)
+            onFinished?.invoke()
+            return
+        }
+        currentSpeaker.speak(message) {
             scope.launch {
-                updateState(JarvisState.STANDBY)
+                updateState(if (config.enabled) JarvisState.STANDBY else JarvisState.DISABLED)
+                onFinished?.invoke()
                 kotlinx.coroutines.delay(2500)
                 if (_state.value == JarvisState.STANDBY) {
                     _subtitle.value = ""
                 }
+            }
+        }
+    }
+
+    private fun openFollowUpListeningWindow() {
+        if (!config.enabled) return
+        if (SystemClock.elapsedRealtime() >= conversationAwakeUntilMs) return
+        scope.launch {
+            kotlinx.coroutines.delay(180)
+            if (config.enabled && _state.value == JarvisState.STANDBY && SystemClock.elapsedRealtime() < conversationAwakeUntilMs) {
+                (perceptor as? OfflineJarvisPerceptor)?.openCommandWindow()
             }
         }
     }
@@ -307,19 +388,19 @@ object JarvisCoordinator : VoicePerceptorCallback {
             }
         }
 
-        val ack = action.voiceReply ?: "好的先生，正在与 $targetAgentName 沟通。"
-        speakWithState(ack)
-        earconManager.playThinkingChime()
-
         val baseline = dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.readScreenHandler?.invoke(targetSessionId, 10).orEmpty()
         val sent = dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.sendTextHandler?.invoke(action.message, targetSessionId, true)
             ?: (activeTerminalController?.let { it.send("${action.message}\n"); true } ?: false)
 
         if (!sent) {
             earconManager.playAlertChime()
-            speakWithState("先生，未能连接到目标开发者的终端会话。")
+            speakWithState("先生，当前暂无已连接的开发者终端，您可以先连接主机，或让我切换工作区。")
             return
         }
+
+        val ack = action.voiceReply ?: "好的先生，正在与 $targetAgentName 沟通。"
+        speakWithState(ack)
+        earconManager.playThinkingChime()
 
         var replyFound = false
         var lastRead = baseline

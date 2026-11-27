@@ -59,6 +59,7 @@ interface VoicePerceptor {
 }
 
 interface VoicePerceptorCallback {
+    fun onListeningWindowOpened() {}
     fun onWakeWordDetected(keyword: String)
     fun onSpeechStart()
     fun onSpeechRecognized(text: String, isFinal: Boolean)

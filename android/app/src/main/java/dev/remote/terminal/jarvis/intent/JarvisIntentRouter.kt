@@ -17,7 +17,8 @@ import java.net.URL
  */
 class JarvisIntentRouter(
     private val syncUrlProvider: () -> String = { "" },
-    private val syncTokenProvider: () -> String = { "" }
+    private val syncTokenProvider: () -> String = { "" },
+    private val wakeWordProvider: () -> String = { "贾维斯" }
 ) : IntentRouter {
 
     companion object {
@@ -83,7 +84,38 @@ class JarvisIntentRouter(
         private val HelpRegex = Regex(
             """(?i)(?:你能做什么|帮助|功能|指令|help|who are you)"""
         )
+
+        private val GreetingRegex = Regex(
+            """(?i)^\s*(?:在吗|你在吗|在不在|你好|您好|听得到吗|听得见吗|能听见吗|能听到吗|早上好|晚上好|喂)[?？!！.。]*${'$'}"""
+        )
+
+        private val DIGIT_MAP = mapOf(
+            '零' to '0', '一' to '1', '二' to '2', '两' to '2', '三' to '3',
+            '四' to '4', '五' to '5', '六' to '6', '七' to '7', '八' to '8', '九' to '9'
+        )
     }
+
+    fun wakeVariants(): List<String> {
+        val configured = wakeWordProvider().trim()
+        val items = linkedSetOf<String>()
+        if (configured.isNotBlank()) {
+            items.add(configured)
+            val mapped = buildString {
+                configured.forEach { ch -> append(DIGIT_MAP[ch] ?: ch) }
+            }
+            if (mapped != configured) items.add(mapped)
+        }
+        items.addAll(listOf("贾维斯", "查维斯", "加维斯", "家维斯", "贾维", "jarvis"))
+        return items.sortedByDescending { it.length }
+    }
+
+    fun containsWakeWord(text: String): Boolean {
+        val lower = text.trim().lowercase()
+        return wakeVariants().any { w -> lower.contains(w.lowercase()) }
+    }
+
+    private fun buildWakePattern(): String =
+        wakeVariants().joinToString("|") { Regex.escape(it) }
 
     override suspend fun resolveIntent(text: String, context: JarvisContext): JarvisAction = withContext(Dispatchers.Default) {
         val rawText = text.trim()
@@ -91,16 +123,21 @@ class JarvisIntentRouter(
 
         Log.d(TAG, "Resolving intent for input: \"$rawText\"")
 
-        // 纯唤醒词响应
-        val pureWakeRegex = Regex("""^(?:贾维斯|查维斯|加维斯|家维斯|贾维|jarvis)[，,、\s!！?？]*${'$'}""", RegexOption.IGNORE_CASE)
+        val wakePattern = buildWakePattern()
+        val pureWakeRegex = Regex("""^(?:$wakePattern)[，,、\s!！?？.。]*${'$'}""", RegexOption.IGNORE_CASE)
         if (pureWakeRegex.matches(rawText)) {
-            Log.i(TAG, "Pure wake word matched")
-            return@withContext JarvisAction.DirectReply("先生，我在，请指示。")
+            Log.i(TAG, "Pure wake word matched for \"${wakeWordProvider()}\"")
+            return@withContext JarvisAction.DirectReply("我在，请讲。")
         }
 
-        // 去除指令句首的唤醒词前缀（如："贾维斯确认" -> "确认"，"贾维斯，切换到xxx" -> "切换到xxx"）
-        val wakeWordPrefix = Regex("""^(?:贾维斯|查维斯|加维斯|家维斯|贾维|jarvis)[，,、\s]*""", RegexOption.IGNORE_CASE)
+        // 去除指令句首的唤醒词前缀（如："老六，查看状态" -> "查看状态"）
+        val wakeWordPrefix = Regex("""^(?:$wakePattern)[，,、\s:：]*""", RegexOption.IGNORE_CASE)
         val cleanText = rawText.replace(wakeWordPrefix, "").trim().ifBlank { rawText }
+
+        if (GreetingRegex.matches(cleanText)) {
+            Log.i(TAG, "Tier-1 matched: Greeting / Presence check (0 Token)")
+            return@withContext JarvisAction.DirectReply("我在，听得非常清楚，请指示。")
+        }
 
         // 1. Tier-1 本地 0-Token 拦截
         if (ConfirmRegex.matches(cleanText)) {

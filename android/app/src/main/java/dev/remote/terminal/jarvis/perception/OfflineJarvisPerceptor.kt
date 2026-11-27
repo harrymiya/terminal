@@ -38,7 +38,9 @@ class OfflineJarvisPerceptor(
         private const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
         private const val FRAME_SIZE_MS = 20
         private const val SAMPLES_PER_FRAME = (SAMPLE_RATE * FRAME_SIZE_MS) / 1000 // 320 samples
-        private const val ENERGY_THRESHOLD = 200.0 // 灵敏度静音门限 (降低阈值提升拾音灵敏度)
+        private const val ENERGY_THRESHOLD = 360.0 // 过滤环境底噪的最小门槛
+        private const val POST_ASR_COOLDOWN_MS = 1800L
+        private const val POST_SPEAKING_ECHO_GUARD_MS = 650L
     }
 
     private val scope = CoroutineScope(Dispatchers.IO)
@@ -51,8 +53,12 @@ class OfflineJarvisPerceptor(
 
     @Volatile private var isListeningCommand = false
     @Volatile private var allowPreferOffline = true
+    @Volatile private var lastAsrFinishedAtMs = 0L
+    @Volatile private var lastSpeakingSeenAtMs = 0L
     private var speechRecognizer: SpeechRecognizer? = null
     private var callback: VoicePerceptorCallback? = null
+    var wakeWordProvider: () -> String = { wakeWord }
+    var onDiagnosticChanged: ((String) -> Unit)? = null
 
     override fun start(callback: VoicePerceptorCallback) {
         if (isRunning) return
@@ -61,14 +67,17 @@ class OfflineJarvisPerceptor(
         ) == android.content.pm.PackageManager.PERMISSION_GRANTED
         if (!hasAudioPermission) {
             Log.w(TAG, "Cannot start OfflineJarvisPerceptor: RECORD_AUDIO not granted")
+            onDiagnosticChanged?.invoke("未授予麦克风权限")
             callback.onError("缺少麦克风权限")
             return
         }
         this.callback = callback
         isRunning = true
+        val currentWake = wakeWordProvider().ifBlank { "贾维斯" }
+        onDiagnosticChanged?.invoke("监听待命中 (唤醒词: $currentWake)")
         initOfflineRecognizer()
         startAudioCaptureLoop()
-        Log.i(TAG, "Offline Jarvis Perceptor started (WakeWord=\"$wakeWord\")")
+        Log.i(TAG, "Offline Jarvis Perceptor started (WakeWord=\"$currentWake\")")
     }
 
     private fun initOfflineRecognizer() {
@@ -76,12 +85,16 @@ class OfflineJarvisPerceptor(
             try {
                 val available = SpeechRecognizer.isRecognitionAvailable(context)
                 Log.i(TAG, "SpeechRecognizer.isRecognitionAvailable=$available")
+                if (!available) {
+                    onDiagnosticChanged?.invoke("系统语音识别服务不可用")
+                }
                 if (available) {
                     speechRecognizer?.destroy()
                     speechRecognizer = SpeechRecognizer.createSpeechRecognizer(context).apply {
                         setRecognitionListener(object : RecognitionListener {
                             override fun onReadyForSpeech(params: Bundle?) {
                                 Log.d(TAG, "ASR ready for speech")
+                                onDiagnosticChanged?.invoke("语音识别引擎已就绪")
                             }
 
                             override fun onBeginningOfSpeech() {
@@ -98,11 +111,23 @@ class OfflineJarvisPerceptor(
                             override fun onError(error: Int) {
                                 Log.w(TAG, "ASR recognition error code=$error")
                                 watchdogJob?.cancel()
+                                watchdogJob = null
                                 if ((error == SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED || error == SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE || error == 12 || error == 13) && allowPreferOffline) {
                                     allowPreferOffline = false
                                     Log.i(TAG, "Offline speech pack unavailable (code=$error), falling back to system recognizer")
+                                    onDiagnosticChanged?.invoke("离线语音包不可用，切换系统识别")
                                     startAsrListening()
                                 } else {
+                                    lastAsrFinishedAtMs = android.os.SystemClock.elapsedRealtime()
+                                    val errHint = when (error) {
+                                        SpeechRecognizer.ERROR_AUDIO -> "麦克风被占用或无输入"
+                                        SpeechRecognizer.ERROR_NO_MATCH -> "未识别到清晰语音，继续待命"
+                                        SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "说话超时，继续待命"
+                                        SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "语音识别网络异常"
+                                        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "缺少录音权限"
+                                        else -> "语音识别异常 (code=$error)"
+                                    }
+                                    onDiagnosticChanged?.invoke(errHint)
                                     if (error == SpeechRecognizer.ERROR_CLIENT || error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) {
                                         initOfflineRecognizer()
                                     }
@@ -113,9 +138,14 @@ class OfflineJarvisPerceptor(
 
                             override fun onResults(results: Bundle?) {
                                 watchdogJob?.cancel()
+                                watchdogJob = null
+                                lastAsrFinishedAtMs = android.os.SystemClock.elapsedRealtime()
                                 val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                                 val recognizedText = matches?.firstOrNull() ?: ""
                                 Log.i(TAG, "ASR Final text: \"$recognizedText\"")
+                                onDiagnosticChanged?.invoke(
+                                    if (recognizedText.isNotBlank()) "最近识别：$recognizedText" else "未识别到内容，继续待命"
+                                )
                                 resumeAudioRecordCapture()
                                 if (recognizedText.isNotBlank()) {
                                     callback?.onSpeechRecognized(recognizedText, isFinal = true)
@@ -171,6 +201,7 @@ class OfflineJarvisPerceptor(
 
                 if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
                     Log.e(TAG, "AudioRecord initialization failed")
+                    onDiagnosticChanged?.invoke("录音硬件初始化失败")
                     callback?.onError("录音硬件初始化失败")
                     return@launch
                 }
@@ -178,11 +209,17 @@ class OfflineJarvisPerceptor(
                 audioRecord?.startRecording()
                 val frameBuffer = ShortArray(SAMPLES_PER_FRAME)
                 var consecutiveSpeechFrames = 0
-                var ambientRms = 65.0
+                var ambientRms = 120.0
 
                 while (isActive && isRunning) {
                     val isSpeaking = dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.state.value == dev.remote.terminal.jarvis.api.JarvisState.SPEAKING
-                    if (isListeningCommand || isSpeaking) {
+                    if (isSpeaking) {
+                        lastSpeakingSeenAtMs = android.os.SystemClock.elapsedRealtime()
+                    }
+                    val now = android.os.SystemClock.elapsedRealtime()
+                    val inCooldown = (now - lastAsrFinishedAtMs) < POST_ASR_COOLDOWN_MS ||
+                        (now - lastSpeakingSeenAtMs) < POST_SPEAKING_ECHO_GUARD_MS
+                    if (isListeningCommand || isSpeaking || inCooldown) {
                         consecutiveSpeechFrames = 0
                         kotlinx.coroutines.delay(120)
                         continue
@@ -196,15 +233,15 @@ class OfflineJarvisPerceptor(
                     val readCount = record.read(frameBuffer, 0, SAMPLES_PER_FRAME)
                     if (readCount <= 0) continue
 
-                    // 1. Tier-0: 自适应门限 VAD 音频能量与人声活动检测
+                    // 1. Tier-0: 自适应门限 VAD 音频能量与人声活动检测（静默打开识别，不响提示音）
                     val rms = calculateRms(frameBuffer, readCount)
-                    val adaptiveThreshold = (ambientRms * 2.4).coerceIn(110.0, 380.0)
-                    if (rms > adaptiveThreshold && rms > ENERGY_THRESHOLD * 0.55) {
+                    val adaptiveThreshold = (ambientRms * 3.0).coerceIn(ENERGY_THRESHOLD, 1400.0)
+                    if (rms > adaptiveThreshold) {
                         consecutiveSpeechFrames++
-                        if (!isListeningCommand && consecutiveSpeechFrames >= 3) {
+                        if (!isListeningCommand && consecutiveSpeechFrames >= 2) {
                             consecutiveSpeechFrames = 0
-                            Log.d(TAG, "VAD triggered wake (rms=${rms.toInt()}, threshold=${adaptiveThreshold.toInt()})")
-                            triggerWakeWordDetected()
+                            Log.d(TAG, "VAD detected speech onset (rms=${rms.toInt()}, threshold=${adaptiveThreshold.toInt()})")
+                            triggerSpeechListeningWindow()
                         }
                     } else {
                         ambientRms = ambientRms * 0.96 + rms * 0.04
@@ -213,9 +250,11 @@ class OfflineJarvisPerceptor(
                 }
             } catch (e: SecurityException) {
                 Log.e(TAG, "RECORD_AUDIO permission missing: ${e.message}")
+                onDiagnosticChanged?.invoke("缺少麦克风权限")
                 callback?.onError("缺少麦克风权限")
             } catch (e: Exception) {
                 Log.e(TAG, "Error in audio capture loop: ${e.message}")
+                onDiagnosticChanged?.invoke("拾音异常: ${e.message}")
             } finally {
                 isRunning = false
                 safeReleaseAudioRecord()
@@ -224,13 +263,34 @@ class OfflineJarvisPerceptor(
     }
 
     /**
-     * 外部手动唤醒触发点（如耳机物理按键触发）或 VAD 命中唤醒词触发
+     * 外部手动唤醒触发点（如耳机物理按键触发）
      */
     fun triggerWakeWordDetected() {
+        openAsrSession(manualWake = true)
+    }
+
+    /**
+     * 对话激活窗口内免唤醒词再次开启识别（例如回答“我在”后继续倾听后续指令）
+     */
+    fun openCommandWindow() {
+        openAsrSession(manualWake = false)
+    }
+
+    private fun triggerSpeechListeningWindow() {
+        openAsrSession(manualWake = false)
+    }
+
+    private fun openAsrSession(manualWake: Boolean) {
         if (isListeningCommand) return
         isListeningCommand = true
-        Log.i(TAG, "Wake word \"$wakeWord\" detected, activating command window")
-        callback?.onWakeWordDetected(wakeWord)
+        val currentWake = wakeWordProvider().ifBlank { "贾维斯" }
+        if (manualWake) {
+            Log.i(TAG, "Manual wake triggered (WakeWord=\"$currentWake\"), activating command window")
+            callback?.onWakeWordDetected(currentWake)
+        } else {
+            Log.d(TAG, "Silent speech listening window opened (WakeWord=\"$currentWake\")")
+            callback?.onListeningWindowOpened()
+        }
 
         // 暂停底层 VAD 录音出让麦克风句柄，防止与 SpeechRecognizer 产生硬件资源冲突
         try {
@@ -245,6 +305,8 @@ class OfflineJarvisPerceptor(
             kotlinx.coroutines.delay(9500L)
             if (isListeningCommand) {
                 Log.w(TAG, "SpeechRecognizer watchdog timeout, cancelling and resuming VAD")
+                lastAsrFinishedAtMs = android.os.SystemClock.elapsedRealtime()
+                onDiagnosticChanged?.invoke("语音识别超时，已恢复待命")
                 cancelListening()
                 callback?.onError("asr_watchdog_timeout")
             }
@@ -278,6 +340,9 @@ class OfflineJarvisPerceptor(
                 if (recognizer == null) {
                     Log.w(TAG, "SpeechRecognizer unavailable on this device")
                     watchdogJob?.cancel()
+                    watchdogJob = null
+                    lastAsrFinishedAtMs = android.os.SystemClock.elapsedRealtime()
+                    onDiagnosticChanged?.invoke("系统语音识别服务不可用")
                     kotlinx.coroutines.delay(500)
                     resumeAudioRecordCapture()
                     callback?.onError("recognizer_unavailable")
@@ -295,6 +360,10 @@ class OfflineJarvisPerceptor(
                 recognizer.startListening(intent)
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to start speech recognizer: ${e.message}")
+                watchdogJob?.cancel()
+                watchdogJob = null
+                lastAsrFinishedAtMs = android.os.SystemClock.elapsedRealtime()
+                onDiagnosticChanged?.invoke("语音识别启动失败")
                 resumeAudioRecordCapture()
                 callback?.onError("start_failed")
             }
