@@ -567,6 +567,12 @@ class LocalStore(context: Context) {
     fun loadJarvisTargetAgentCommand(): String = preferences.getString("jarvis_target_agent_command", "") ?: ""
     fun saveJarvisTargetAgentCommand(cmd: String) = preferences.edit().putString("jarvis_target_agent_command", cmd).apply()
 
+    fun loadJarvisModel(): String = preferences.getString("jarvis_model", "Gemini 3.8 Flash") ?: "Gemini 3.8 Flash"
+    fun saveJarvisModel(model: String) = preferences.edit().putString("jarvis_model", model).apply()
+
+    fun loadJarvisEffort(): String = preferences.getString("jarvis_effort", "low") ?: "low"
+    fun saveJarvisEffort(effort: String) = preferences.edit().putString("jarvis_effort", effort).apply()
+
     fun saveTiledMode(tiled: Boolean) {
         preferences.edit().putBoolean("tiled_mode", tiled).apply()
     }

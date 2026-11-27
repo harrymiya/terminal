@@ -127,7 +127,31 @@ object JarvisCoordinator : VoicePerceptorCallback {
         p.start(this)
 
         updateState(JarvisState.STANDBY)
-        Log.i(TAG, "Jarvis master coordinator started in STANDBY mode (wakeWord=\"${config.wakeWord}\")")
+        Log.i(TAG, "Jarvis master coordinator started in STANDBY mode (wakeWord=\"${config.wakeWord}\", model=\"${config.targetModel}\", effort=\"${config.targetEffort}\")")
+        warmupDeveloperWorker()
+    }
+
+    fun warmupDeveloperWorker() {
+        if (!config.enabled) return
+        val store = storeProvider?.invoke() ?: return
+        val hosts = hostsProvider?.invoke().orEmpty()
+        val agents = agentsProvider?.invoke().orEmpty()
+        val targetHost = hosts.firstOrNull { config.targetHostId.isNotBlank() && it.id == config.targetHostId }
+            ?: hosts.firstOrNull { it.id == selectedHostIdProvider() }
+            ?: hosts.firstOrNull() ?: return
+        val targetAgent = agents.firstOrNull { config.targetAgentCommand.isNotBlank() && it.command == config.targetAgentCommand }
+            ?: agents.firstOrNull() ?: return
+        val targetDir = currentWorkspacePath?.takeIf { it.isNotBlank() }
+            ?: selectedDirectoryProvider()?.takeIf { it.isNotBlank() }
+            ?: targetHost.directories.firstOrNull()?.path
+        BackgroundDeveloperBridge.warmup(
+            host = targetHost,
+            agent = targetAgent,
+            directory = targetDir,
+            model = config.targetModel,
+            effort = config.targetEffort,
+            store = store
+        )
     }
 
     fun stop() {
@@ -139,6 +163,7 @@ object JarvisCoordinator : VoicePerceptorCallback {
         listeningTimeoutJob = null
         chatJob?.cancel()
         chatJob = null
+        BackgroundDeveloperBridge.resetWorkers()
         perceptor?.stop()
         perceptor?.release()
         perceptor = null
@@ -405,7 +430,9 @@ object JarvisCoordinator : VoicePerceptorCallback {
                 agent = targetAgent,
                 directory = targetDirectory,
                 userPrompt = action.message,
-                store = store
+                store = store,
+                model = config.targetModel,
+                effort = config.targetEffort
             )
             result.onSuccess { reply ->
                 conversationAwakeUntilMs = SystemClock.elapsedRealtime() + CONVERSATION_WINDOW_MS

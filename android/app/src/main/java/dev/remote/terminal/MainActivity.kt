@@ -458,6 +458,8 @@ private fun RemoteTerminalApp(store: LocalStore) {
         dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.asrEngineMode = store.loadJarvisAsrMode()
         dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.targetHostId = store.loadJarvisTargetHostId()
         dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.targetAgentCommand = store.loadJarvisTargetAgentCommand()
+        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.targetModel = store.loadJarvisModel()
+        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.targetEffort = store.loadJarvisEffort()
         dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.hapticFeedbackProvider = {
             val vibrator = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
                 appContext.getSystemService(android.os.VibratorManager::class.java)?.defaultVibrator
@@ -4950,6 +4952,8 @@ private fun SettingsScreen(
             var jarvisAsrMode by remember { mutableStateOf(store.loadJarvisAsrMode()) }
             var jarvisTargetHostId by remember { mutableStateOf(store.loadJarvisTargetHostId()) }
             var jarvisTargetAgentCmd by remember { mutableStateOf(store.loadJarvisTargetAgentCommand()) }
+            var jarvisModel by remember { mutableStateOf(store.loadJarvisModel()) }
+            var jarvisEffort by remember { mutableStateOf(store.loadJarvisEffort()) }
 
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Column(Modifier.weight(1f)) {
@@ -5098,11 +5102,87 @@ private fun SettingsScreen(
                                 jarvisTargetAgentCmd = a.command
                                 store.saveJarvisTargetAgentCommand(a.command)
                                 dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.targetAgentCommand = a.command
+                                dev.remote.terminal.jarvis.coordinator.BackgroundDeveloperBridge.resetWorkers()
+                                dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.warmupDeveloperWorker()
                             }
                         ) {
                             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                                 AgentMark(a.icon, 14.dp)
                                 Text(a.name, color = if (isSel) Mint else White, fontSize = 12.sp)
+                            }
+                        }
+                    }
+                }
+
+                Text("模型选择", color = Muted, fontSize = 11.sp)
+                val modelPresets = listOf(
+                    "" to "默认",
+                    "Gemini 3.8 Flash" to "Flash 3.8 (极速)",
+                    "Gemini 4 Hydrogen" to "Hydrogen 4",
+                    "Gemini 4 Neon" to "Neon 4",
+                    "Claude Sonnet 5.5" to "Sonnet 5.5",
+                    "gpt-6-luna" to "Codex 6 Luna",
+                    "gpt-5.6-luna" to "Codex 5.6 Luna",
+                    "gpt-5.6-terra" to "Codex 5.6 Terra"
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    modelPresets.forEach { (value, label) ->
+                        val isSel = jarvisModel == value
+                        Surface(
+                            color = if (isSel) Mint.copy(alpha = 0.2f) else Panel,
+                            shape = RoundedCornerShape(12.dp),
+                            border = BorderStroke(1.dp, if (isSel) Mint else Edge),
+                            modifier = Modifier.clip(RoundedCornerShape(12.dp)).clickable {
+                                jarvisModel = value
+                                store.saveJarvisModel(value)
+                                dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.targetModel = value
+                                dev.remote.terminal.jarvis.coordinator.BackgroundDeveloperBridge.resetWorkers()
+                                dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.warmupDeveloperWorker()
+                            }
+                        ) {
+                            Box(Modifier.padding(horizontal = 12.dp, vertical = 7.dp)) {
+                                Text(label, color = if (isSel) Mint else White, fontSize = 12.sp)
+                            }
+                        }
+                    }
+                }
+                OutlinedTextField(
+                    value = jarvisModel,
+                    onValueChange = {
+                        jarvisModel = it
+                        store.saveJarvisModel(it)
+                        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.targetModel = it
+                    },
+                    label = { Text("自定义模型名称 (留空走开发者默认)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Text("推理思考等级 (Effort)", color = Muted, fontSize = 11.sp)
+                val effortPresets = listOf("low" to "低 (极速)", "medium" to "中", "high" to "高", "xhigh" to "极高", "max" to "极限", "auto" to "默认")
+                Row(
+                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    effortPresets.forEach { (value, label) ->
+                        val isSel = jarvisEffort == value
+                        Surface(
+                            color = if (isSel) Mint.copy(alpha = 0.2f) else Panel,
+                            shape = RoundedCornerShape(12.dp),
+                            border = BorderStroke(1.dp, if (isSel) Mint else Edge),
+                            modifier = Modifier.clip(RoundedCornerShape(12.dp)).clickable {
+                                jarvisEffort = value
+                                store.saveJarvisEffort(value)
+                                dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.targetEffort = value
+                                dev.remote.terminal.jarvis.coordinator.BackgroundDeveloperBridge.resetWorkers()
+                                dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.warmupDeveloperWorker()
+                            }
+                        ) {
+                            Box(Modifier.padding(horizontal = 12.dp, vertical = 7.dp)) {
+                                Text(label, color = if (isSel) Mint else White, fontSize = 12.sp)
                             }
                         }
                     }

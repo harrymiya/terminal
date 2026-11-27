@@ -16,20 +16,28 @@ import dev.remote.terminal.data.antigravityExecutable
 import dev.remote.terminal.data.codexExecutable
 import dev.remote.terminal.data.endpoints
 import dev.remote.terminal.jarvis.mcp.JarvisToolRegistry
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
+import java.io.BufferedReader
 import java.io.ByteArrayOutputStream
 import java.io.IOException
+import java.io.InputStreamReader
+import java.io.OutputStream
 import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * 后台直连 AI 开发者桥接器（支持 MCP 双向联动）：
- * 1. 不依赖界面中是否打开终端窗口，直接通过后台 SSH ChannelExec 唤醒远端主机上的开发者 CLI；
- * 2. 将手机端 Remote Dev 全部 MCP 操作能力与实时状态注入开发者上下文，允许开发者通过 [[RDT_MCP:...]] 调度 App；
- * 3. 在主线程安全执行 MCP 动作；若是读取/查询类工具，自动把结果回传给开发者做第二轮整合播报；
- * 4. 保持多轮 conversation_id 连续上下文，返回精简、无思维链的纯语音友好文本。
+ * 后台直连 AI 开发者桥接器（支持常驻 stream-json 长连接与 MCP 双向联动）：
+ * 1. 对 agy/agy2 维护后台常驻 stream-json 进程，跳过每次 ~8 秒冷启动耗时，二轮及预热首轮均可 2~3 秒极速响应；
+ * 2. 支持用户自由配置目标模型 (如 Gemini 3.8 Flash / Gemini 4 Hydrogen / Claude Sonnet 5.5) 与推理强度 (effort)；
+ * 3. 首轮自动注入 Remote Dev 全量 MCP 能力，后续轮次仅附轻量增量状态，大幅削减 Token 消耗；
+ * 4. 在主线程安全执行 MCP 动作；读状态/读屏类工具自动触发二次整合播报。
  */
 object BackgroundDeveloperBridge {
 
@@ -45,13 +53,61 @@ object BackgroundDeveloperBridge {
         val isLan: Boolean
     )
 
+    private class PersistentAgyWorker(
+        val workerKey: String,
+        val session: Session,
+        val channel: ChannelExec,
+        val stdin: OutputStream,
+        val stdout: BufferedReader,
+        var mcpPrimed: Boolean = false
+    ) {
+        val mutex = Mutex()
+        fun isAlive(): Boolean = session.isConnected && channel.isConnected && !channel.isClosed
+        fun closeQuietly() {
+            runCatching { stdin.close() }
+            runCatching { channel.disconnect() }
+        }
+    }
+
     private val sessionCache = ConcurrentHashMap<String, CachedSession>()
     private val conversationIds = ConcurrentHashMap<String, String>()
     private val codexThreadIds = ConcurrentHashMap<String, String>()
+    private val streamWorkers = ConcurrentHashMap<String, PersistentAgyWorker>()
+    private val warmupScope = CoroutineScope(Dispatchers.IO)
 
-    fun clearConversations() {
+    fun resetWorkers() {
+        streamWorkers.values.forEach { it.closeQuietly() }
+        streamWorkers.clear()
         conversationIds.clear()
         codexThreadIds.clear()
+    }
+
+    /**
+     * 预热常驻开发者后台进程（仅建立 SSH 会话与常驻 stream-json 管道，不耗费大模型 Token）。
+     */
+    fun warmup(
+        host: HostProfile,
+        agent: AgentPreset,
+        directory: String?,
+        model: String,
+        effort: String,
+        store: LocalStore
+    ) {
+        val effectiveCmd = resolveEffectiveCommand(agent.command, model)
+        if (antigravityExecutable(effectiveCmd) == null) return
+        warmupScope.launch {
+            runCatching {
+                val cached = getOrOpenSession(host, store)
+                val workerKey = buildWorkerKey(host.id, effectiveCmd, directory, model, effort)
+                val existing = streamWorkers[workerKey]
+                if (existing == null || !existing.isAlive()) {
+                    spawnPersistentAgyWorker(cached.session, workerKey, effectiveCmd, directory, model, effort)
+                    Log.i(TAG, "Pre-warmed persistent stream-json worker ($workerKey)")
+                }
+            }.onFailure {
+                Log.d(TAG, "Warmup skipped (${it.message})")
+            }
+        }
     }
 
     suspend fun askDeveloper(
@@ -59,63 +115,268 @@ object BackgroundDeveloperBridge {
         agent: AgentPreset,
         directory: String?,
         userPrompt: String,
-        store: LocalStore
+        store: LocalStore,
+        model: String = "",
+        effort: String = "low"
     ): Result<String> = withContext(Dispatchers.IO) {
         try {
+            val effectiveCmd = resolveEffectiveCommand(agent.command, model)
             val cached = getOrOpenSession(host, store)
-            val convKey = "${host.id}:${agent.command}:${directory.orEmpty()}"
+            val convKey = buildWorkerKey(host.id, effectiveCmd, directory, model, effort)
             val appStateJson = withContext(Dispatchers.Main) {
                 runCatching { JarvisToolRegistry.appStateProvider?.invoke()?.toString() }.getOrNull()
-            }.orEmpty().take(1800)
+            }.orEmpty().take(1600)
 
-            val fullPrompt = buildPromptWithMcp(userPrompt, appStateJson)
-            val firstReply = invokeDeveloperOnce(cached.session, agent.command, directory, fullPrompt, convKey)
-                .getOrElse { return@withContext Result.failure(it) }
+            val firstReply = invokeDeveloperTurn(
+                session = cached.session,
+                command = effectiveCmd,
+                directory = directory,
+                convKey = convKey,
+                userPrompt = userPrompt,
+                appStateSnapshot = appStateJson,
+                model = model,
+                effort = effort
+            ).getOrElse { return@withContext Result.failure(it) }
 
             val processed = executeEmbeddedMcpToolsAndMaybeFollowUp(
                 rawReply = firstReply,
                 session = cached.session,
-                command = agent.command,
+                command = effectiveCmd,
                 directory = directory,
-                convKey = convKey
+                convKey = convKey,
+                model = model,
+                effort = effort
             )
             Result.success(processed)
         } catch (e: Exception) {
             Log.e(TAG, "Background developer call failed: ${e.message}", e)
             sessionCache.remove(host.id)?.let { runCatching { it.session.disconnect() } }
+            streamWorkers.values.forEach { it.closeQuietly() }
+            streamWorkers.clear()
             Result.failure(e)
         }
     }
 
-    private suspend fun invokeDeveloperOnce(
+    private fun isCodexModelName(model: String): Boolean {
+        val m = model.trim().lowercase()
+        return m.startsWith("gpt-5") || m.startsWith("gpt-6") || m.startsWith("gpt-reserve") || m.contains("codex")
+    }
+
+    private fun isAgyModelName(model: String): Boolean {
+        val m = model.trim().lowercase()
+        return m.startsWith("gemini") || m.startsWith("claude") || m.startsWith("orchestrator") || m.startsWith("gpt-oss")
+    }
+
+    private fun resolveEffectiveCommand(agentCommand: String, model: String): String {
+        if (isCodexModelName(model) && codexExecutable(agentCommand) == null) {
+            return "codex"
+        }
+        if (isAgyModelName(model) && codexExecutable(agentCommand) != null) {
+            // 用户选了 Codex 开发者但模型名仍是 Gemini/Claude 预设时保留原开发者走自身默认模型
+            return agentCommand
+        }
+        return agentCommand
+    }
+
+    private fun buildWorkerKey(
+        hostId: String,
+        command: String,
+        directory: String?,
+        model: String,
+        effort: String
+    ): String = "$hostId|$command|${directory.orEmpty()}|${model.trim()}|${effort.trim()}"
+
+    private suspend fun invokeDeveloperTurn(
+        session: Session,
+        command: String,
+        directory: String?,
+        convKey: String,
+        userPrompt: String,
+        appStateSnapshot: String,
+        model: String,
+        effort: String,
+        isMcpFollowUp: Boolean = false
+    ): Result<String> {
+        // 对 agy / agy2 优先走常驻 stream-json 长连接，避开每次 ~8s CLI 冷启动
+        if (antigravityExecutable(command) != null) {
+            val streamResult = trySendViaPersistentWorker(
+                session = session,
+                workerKey = convKey,
+                command = command,
+                directory = directory,
+                model = model,
+                effort = effort,
+                userPrompt = userPrompt,
+                appStateSnapshot = appStateSnapshot,
+                isMcpFollowUp = isMcpFollowUp
+            )
+            if (streamResult.isSuccess) return streamResult
+            Log.w(TAG, "Persistent worker fallback to one-shot: ${streamResult.exceptionOrNull()?.message}")
+        }
+
+        val prompt = if (isMcpFollowUp) {
+            userPrompt
+        } else {
+            buildPromptWithMcp(userPrompt, appStateSnapshot, compact = conversationIds[convKey] != null)
+        }
+        return invokeOneShotExec(session, command, directory, prompt, convKey, model, effort)
+    }
+
+    private suspend fun trySendViaPersistentWorker(
+        session: Session,
+        workerKey: String,
+        command: String,
+        directory: String?,
+        model: String,
+        effort: String,
+        userPrompt: String,
+        appStateSnapshot: String,
+        isMcpFollowUp: Boolean
+    ): Result<String> {
+        val worker = getOrSpawnWorker(session, workerKey, command, directory, model, effort)
+            ?: return Result.failure(IOException("无法启动常驻开发者进程"))
+
+        return worker.mutex.withLock {
+            try {
+                if (!worker.isAlive()) {
+                    streamWorkers.remove(workerKey, worker)
+                    worker.closeQuietly()
+                    return@withLock Result.failure(IOException("常驻进程已断开"))
+                }
+
+                val promptText = when {
+                    isMcpFollowUp -> userPrompt
+                    !worker.mcpPrimed -> buildPromptWithMcp(userPrompt, appStateSnapshot, compact = false)
+                    else -> buildPromptWithMcp(userPrompt, appStateSnapshot, compact = true)
+                }
+
+                val eventJson = JSONObject().apply {
+                    put("event", "user")
+                    put("message", JSONObject().apply {
+                        put("role", "user")
+                        put("content", JSONArray().put(JSONObject().apply {
+                            put("type", "text")
+                            put("text", promptText)
+                        }))
+                    })
+                }.toString() + "\n"
+
+                val t0 = SystemClock.elapsedRealtime()
+                worker.stdin.write(eventJson.toByteArray(Charsets.UTF_8))
+                worker.stdin.flush()
+
+                val deadline = t0 + EXEC_TIMEOUT_MS
+                while (SystemClock.elapsedRealtime() < deadline) {
+                    val line = worker.stdout.readLine()
+                        ?: throw IOException("常驻开发者输出流意外结束")
+                    val trimmed = line.trim()
+                    if (!trimmed.startsWith("{")) continue
+                    val obj = runCatching { JSONObject(trimmed) }.getOrNull() ?: continue
+                    val event = obj.optString("event")
+                    if (event == "result") {
+                        val resObj = obj.optJSONObject("result") ?: obj
+                        val status = resObj.optString("status", "")
+                        val cid = resObj.optString("conversation_id")
+                        if (cid.isNotBlank()) conversationIds[workerKey] = cid
+                        if (status.equals("SUCCESS", ignoreCase = true) || resObj.has("response")) {
+                            worker.mcpPrimed = true
+                            val elapsed = SystemClock.elapsedRealtime() - t0
+                            Log.i(TAG, "Stream worker turn completed in ${elapsed}ms")
+                            return@withLock Result.success(resObj.optString("response"))
+                        } else {
+                            val err = resObj.optString("error", "模型返回异常")
+                            throw IOException(err)
+                        }
+                    }
+                }
+                throw IOException("开发者响应超时，请稍后再试。")
+            } catch (e: Exception) {
+                streamWorkers.remove(workerKey, worker)
+                worker.closeQuietly()
+                Result.failure(e)
+            }
+        }
+    }
+
+    @Synchronized
+    private fun getOrSpawnWorker(
+        session: Session,
+        workerKey: String,
+        command: String,
+        directory: String?,
+        model: String,
+        effort: String
+    ): PersistentAgyWorker? {
+        val existing = streamWorkers[workerKey]
+        if (existing != null && existing.isAlive()) {
+            return existing
+        }
+        existing?.closeQuietly()
+        streamWorkers.remove(workerKey)
+        return runCatching {
+            spawnPersistentAgyWorker(session, workerKey, command, directory, model, effort)
+        }.getOrNull()
+    }
+
+    private fun spawnPersistentAgyWorker(
+        session: Session,
+        workerKey: String,
+        command: String,
+        directory: String?,
+        model: String,
+        effort: String
+    ): PersistentAgyWorker {
+        val agyBin = antigravityExecutable(command) ?: "agy"
+        val inv = if (agyBin.matches(Regex("[A-Za-z0-9_]+"))) agyBin else shellQuote(agyBin)
+        val modelEffortFlags = buildAgyModelAndEffortFlags(model, effort)
+        val agyArgs = "--disable-slash-commands $modelEffortFlags --input-format stream-json --output-format stream-json"
+        val cliCmd = "if type $inv >/dev/null 2>&1; then $inv $agyArgs; " +
+            "elif [ -x \"\$HOME/.local/bin/$agyBin\" ]; then \"\$HOME/.local/bin/$agyBin\" $agyArgs; " +
+            "else agy $agyArgs; fi"
+        val wrapped = buildRemoteShellCommand(directory, cliCmd)
+
+        val channel = session.openChannel("exec") as ChannelExec
+        channel.setCommand(wrapped)
+        val stdin = channel.outputStream
+        val stdout = BufferedReader(InputStreamReader(channel.inputStream, Charsets.UTF_8))
+        channel.connect(12_000)
+
+        val worker = PersistentAgyWorker(workerKey, session, channel, stdin, stdout)
+        streamWorkers[workerKey] = worker
+        return worker
+    }
+
+    private suspend fun invokeOneShotExec(
         session: Session,
         command: String,
         directory: String?,
         prompt: String,
-        convKey: String
+        convKey: String,
+        model: String,
+        effort: String
     ): Result<String> {
         val cliCommand = buildAgentExecCommand(
             command = command,
             prompt = prompt,
             existingConvId = conversationIds[convKey],
-            existingCodexThreadId = codexThreadIds[convKey]
+            existingCodexThreadId = codexThreadIds[convKey],
+            model = model,
+            effort = effort
         )
         val wrappedRemoteCmd = buildRemoteShellCommand(directory, cliCommand)
 
-        Log.i(TAG, "Sending voice turn via $command [dir=$directory, conv=${conversationIds[convKey]?.take(8) ?: "new"}]")
+        Log.i(TAG, "Sending one-shot turn via $command [model=${model.ifBlank { "default" }}, effort=$effort]")
         val execResult = runExec(session, wrappedRemoteCmd, EXEC_TIMEOUT_MS)
         val rawOut = execResult.stdout.trim()
         val rawErr = execResult.stderr.trim()
-        Log.d(TAG, "Exec exit=${execResult.exitCode}, outLen=${rawOut.length}, errLen=${rawErr.length}")
 
         val parsed = parseDeveloperResponse(command, rawOut, rawErr, execResult.exitCode, convKey)
         if (parsed.isSuccess) return parsed
 
-        // 若复用旧 conversation_id 失效，自动开启新会话重试一次
         if (conversationIds.remove(convKey) != null || codexThreadIds.remove(convKey) != null) {
             val freshCmd = buildRemoteShellCommand(
                 directory,
-                buildAgentExecCommand(command, prompt, null, null)
+                buildAgentExecCommand(command, prompt, null, null, model, effort)
             )
             val retry = runExec(session, freshCmd, EXEC_TIMEOUT_MS)
             return parseDeveloperResponse(command, retry.stdout.trim(), retry.stderr.trim(), retry.exitCode, convKey)
@@ -128,7 +389,9 @@ object BackgroundDeveloperBridge {
         session: Session,
         command: String,
         directory: String?,
-        convKey: String
+        convKey: String,
+        model: String,
+        effort: String
     ): String {
         val matches = MCP_TAG_REGEX.findAll(rawReply).toList()
         if (matches.isEmpty()) {
@@ -161,11 +424,20 @@ object BackgroundDeveloperBridge {
 
         val visibleWithoutTags = rawReply.replace(MCP_TAG_REGEX, "").trim()
         if (needsFollowUp && toolResults.isNotEmpty()) {
-            val followPrompt = "这是刚调用手机端 MCP 返回的实际结果，请直接用1到3句精简中文口语回答用户，不要再输出思维链、Markdown 或 RDT_MCP 标签：\n" +
+            val followPrompt = "这是刚调用手机端 MCP 返回的实际结果，请直接用1到3句精简中文口语回答用户，不要输出思维链、Markdown 或 RDT_MCP 标签：\n" +
                 toolResults.joinToString("\n")
-            val followReply = invokeDeveloperOnce(session, command, directory, followPrompt, convKey).getOrNull()
+            val followReply = invokeDeveloperTurn(
+                session = session,
+                command = command,
+                directory = directory,
+                convKey = convKey,
+                userPrompt = followPrompt,
+                appStateSnapshot = "",
+                model = model,
+                effort = effort,
+                isMcpFollowUp = true
+            ).getOrNull()
             if (!followReply.isNullOrBlank()) {
-                // 若第二轮又附带了动作类 MCP，也一并执行
                 val secondMatches = MCP_TAG_REGEX.findAll(followReply).toList()
                 for (m in secondMatches) {
                     val obj = runCatching { JSONObject(m.groupValues[1].trim()) }.getOrNull() ?: continue
@@ -182,27 +454,48 @@ object BackgroundDeveloperBridge {
         return sanitizeForSpeech(visibleWithoutTags).ifBlank { lastVoiceSummary ?: "操作已完成。" }
     }
 
-    private fun buildPromptWithMcp(userPrompt: String, appStateSnapshot: String): String {
+    private fun buildPromptWithMcp(userPrompt: String, appStateSnapshot: String, compact: Boolean): String {
+        if (compact) {
+            val stateHint = if (appStateSnapshot.isNotBlank()) "最新App状态：${appStateSnapshot.take(600)}\n" else ""
+            return "${stateHint}请用1到3句精简中文口语回答（无思维链、无Markdown）；如需操作手机端请末尾附 [[RDT_MCP:...]]：\n用户说：$userPrompt"
+        }
         val stateLine = if (appStateSnapshot.isNotBlank()) "当前手机端状态快照：$appStateSnapshot\n" else ""
-        return """你是用户的 AI 开发者助手，同时拥有手机端 Remote Dev App 的全部 MCP 操作权限（你可以替用户做任何人能做的界面和终端操作）。
-可用 MCP 工具（需要执行操作时，请在回复末尾附带一行或多行 [[RDT_MCP:{"tool":"工具名","arguments":{...}}]]）：
-- get_app_state() // 获取主机、工作区、开发者列表与所有终端会话状态
-- select_host(host_id?, host_name?, host_index?) // 切换选中主机
-- select_agent(agent_id?, agent_name?) // 切换选中开发者预设
-- open_terminal(host_id?, workspace_path?, workspace_name?, agent_command?) // 在手机端打开指定工作区与开发者终端
-- focus_terminal(session_id?, session_index?) // 聚焦切换到某个已打开的终端标签
-- close_terminal(session_id?, session_index?) // 关闭终端会话
-- reconnect_terminal(session_id?) // 重连已断开的终端
-- send_terminal_text(text, session_id?, press_enter?) // 向打开的终端发送文本并回车
-- send_terminal_keys(keys, session_id?) // 发送按键如 enter, tab, escape, ctrl+c, ctrl+d, up, down
-- read_terminal_screen(session_id?, lines?) // 读取某终端最近输出
-- set_view_mode(tiled) // true=平铺视图, false=标签视图
-- add_workspace(path, name?, host_id?) / delete_workspace(path, host_id?) // 增删工作区
-- trigger_sync() // 立即同步主机与会话
-- navigate_screen(screen) // 跳转页面: home / terminal / settings / manage / agents / logs
-- vibrate_phone(duration_ms?) / get_device_state() // 震动提醒或获取手机电量状态
-${stateLine}规则：直接用1到3句精简中文口语回答（不要输出思维链、过程说明或Markdown代码块）；如果用户让你查看手机/终端状态或操作 Remote Dev App，直接附带对应 [[RDT_MCP:...]]。
+        return """你是用户的 AI 开发者助手，同时拥有手机端 Remote Dev App 的全部 MCP 操作权限（可替用户做界面与终端一切操作）。
+可用 MCP 工具（需要执行操作时，在回复末尾附 [[RDT_MCP:{"tool":"工具名","arguments":{...}}]]）：
+- get_app_state() / get_device_state() / read_terminal_screen(session_id?, lines?)
+- open_terminal(host_id?, workspace_path?, workspace_name?, agent_command?) / focus_terminal(session_id?, session_index?) / close_terminal(session_id?, session_index?) / reconnect_terminal(session_id?)
+- send_terminal_text(text, session_id?, press_enter?) / send_terminal_keys(keys, session_id?)
+- select_host(host_id?, host_name?, host_index?) / select_agent(agent_id?, agent_name?) / set_view_mode(tiled)
+- add_workspace(path, name?, host_id?) / delete_workspace(path, host_id?) / trigger_sync() / navigate_screen(screen) / vibrate_phone(duration_ms?)
+${stateLine}规则：直接用1到3句精简中文口语回答（不要思维链或Markdown代码块）。
 用户说：$userPrompt"""
+    }
+
+    private fun buildAgyModelAndEffortFlags(model: String, effort: String): String {
+        val m = model.trim()
+        val e = effort.trim().lowercase()
+        return buildString {
+            if (m.isNotBlank()) {
+                if (m.contains("(")) {
+                    // 例如 "Gemini 3.8 Flash (Low)" 自身已包含强度后缀，禁止重复传 --effort
+                    append("--model ").append(shellQuote(m))
+                } else if (m.contains("Flash", ignoreCase = true)) {
+                    val suffix = when (e) {
+                        "high", "xhigh", "max" -> "High"
+                        "medium" -> "Medium"
+                        else -> "Low"
+                    }
+                    append("--model ").append(shellQuote("$m ($suffix)"))
+                } else {
+                    append("--model ").append(shellQuote(m))
+                    if (e.isNotBlank() && e != "auto") {
+                        append(" --effort ").append(shellQuote(e))
+                    }
+                }
+            } else if (e.isNotBlank() && e != "auto") {
+                append("--effort ").append(shellQuote(e))
+            }
+        }.trim()
     }
 
     private data class ExecOutput(val exitCode: Int, val stdout: String, val stderr: String)
@@ -260,16 +553,20 @@ ${stateLine}规则：直接用1到3句精简中文口语回答（不要输出思
         command: String,
         prompt: String,
         existingConvId: String?,
-        existingCodexThreadId: String?
+        existingCodexThreadId: String?,
+        model: String,
+        effort: String
     ): String {
         val quotedPrompt = shellQuote(prompt)
+        val m = model.trim()
+        val e = effort.trim().lowercase()
 
         val agyBin = antigravityExecutable(command)
         if (agyBin != null) {
             val inv = if (agyBin.matches(Regex("[A-Za-z0-9_]+"))) agyBin else shellQuote(agyBin)
             val resumeFlag = if (!existingConvId.isNullOrBlank()) "-r ${shellQuote(existingConvId)} " else ""
-            val agyArgs = "--effort low $resumeFlag-p $quotedPrompt --output-format json"
-            // 直接将 $inv 放在命令首位以保证 bash 原位展开 ~/.bashrc 中的 alias（不可存入 $_cli 变量）
+            val modelEffortFlags = buildAgyModelAndEffortFlags(m, e)
+            val agyArgs = "--disable-slash-commands $modelEffortFlags $resumeFlag-p $quotedPrompt --output-format json".trim()
             return "if type $inv >/dev/null 2>&1; then $inv $agyArgs; " +
                 "elif [ -x \"\$HOME/.local/bin/$agyBin\" ]; then \"\$HOME/.local/bin/$agyBin\" $agyArgs; " +
                 "else agy $agyArgs; fi"
@@ -278,25 +575,33 @@ ${stateLine}规则：直接用1到3句精简中文口语回答（不要输出思
         val codexBin = codexExecutable(command)
         if (codexBin != null) {
             val inv = if (codexBin.matches(Regex("[A-Za-z0-9_]+"))) codexBin else shellQuote(codexBin)
+            val codexModel = m.takeIf { it.isNotBlank() && !isAgyModelName(it) }.orEmpty()
+            val modelFlag = if (codexModel.isNotBlank()) "-m ${shellQuote(codexModel)} " else ""
+            val codexEffort = when (e) {
+                "low", "medium", "high", "xhigh", "max" -> e
+                else -> ""
+            }
+            val effortFlag = if (codexEffort.isNotBlank()) "-c model_reasoning_effort=${shellQuote(codexEffort)} " else ""
             return if (!existingCodexThreadId.isNullOrBlank()) {
-                "$inv exec --json resume ${shellQuote(existingCodexThreadId)} $quotedPrompt"
+                "$inv exec $modelFlag$effortFlag--skip-git-repo-check --json resume ${shellQuote(existingCodexThreadId)} $quotedPrompt"
             } else {
-                "$inv exec --json $quotedPrompt"
+                "$inv exec $modelFlag$effortFlag--skip-git-repo-check --json $quotedPrompt"
             }
         }
 
         val firstToken = command.trim().split(Regex("\\s+")).firstOrNull().orEmpty()
         val binName = firstToken.substringAfterLast('/')
+        val modelFlag = if (m.isNotBlank()) "--model ${shellQuote(m)} " else ""
         return when (binName) {
             "claude" -> {
                 val inv = if (firstToken.matches(Regex("[A-Za-z0-9_]+"))) firstToken else shellQuote(firstToken)
                 val resumeFlag = if (!existingConvId.isNullOrBlank()) "-r ${shellQuote(existingConvId)} " else ""
-                "$inv $resumeFlag-p $quotedPrompt --output-format json"
+                "$inv $modelFlag$resumeFlag-p $quotedPrompt --output-format json"
             }
             "opencode" -> {
                 val inv = if (firstToken.matches(Regex("[A-Za-z0-9_]+"))) firstToken else shellQuote(firstToken)
                 val resumeFlag = if (!existingConvId.isNullOrBlank()) "-s ${shellQuote(existingConvId)} " else ""
-                "$inv run $resumeFlag$quotedPrompt"
+                "$inv run $modelFlag$resumeFlag$quotedPrompt"
             }
             else -> "${command.trim()} -p $quotedPrompt"
         }

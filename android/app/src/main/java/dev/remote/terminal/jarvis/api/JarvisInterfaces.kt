@@ -23,7 +23,9 @@ data class JarvisConfig(
     var speechRate: Float = 1.08f,             // 语速 (管家风格干练)
     var speechPitch: Float = 0.85f,            // 音高 (管家风格沉稳磁性)
     var targetHostId: String = "",             // 借力开发者所在目标主机ID (为空自动选择当前活动会话)
-    var targetAgentCommand: String = ""        // 借力开发者的命令标识 (为空自动选择)
+    var targetAgentCommand: String = "",       // 借力开发者的命令标识 (为空自动选择)
+    var targetModel: String = "Gemini 3.8 Flash", // 借力开发者使用的模型（默认极速 Flash）
+    var targetEffort: String = "low"           // 推理思考深度 (low / medium / high / xhigh / auto)
 )
 
 data class JarvisContext(
