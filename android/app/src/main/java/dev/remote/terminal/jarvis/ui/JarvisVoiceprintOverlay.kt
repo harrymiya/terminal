@@ -15,10 +15,8 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -46,7 +44,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
@@ -67,14 +68,14 @@ import dev.remote.terminal.jarvis.coordinator.JarvisCoordinator
 import kotlinx.coroutines.launch
 import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.pow
 import kotlin.math.roundToInt
 import kotlin.math.sin
 
 /**
  * 钢铁侠贾维斯式霓虹悬浮声纹 HUD (Jarvis Voiceprint HUD Overlay)。
- * 位于屏幕下方中部悬浮，展示多层霓虹色彩动态正弦波浪声纹曲线，
- * 说话时联动马达微震，并在波形下方实时展示管家字幕与状态输出。
- * 支持横向左右滑动手势直接划走关闭提示与中止当前对话窗口。
+ * 仅在检测到用户说话、意图处理、终端执行或语音播报时悬浮展示（后台静默倾听时不打扰用户）。
+ * 边框采用由内向外渐变至完全透明的宽霓虹光晕，声纹曲线两端渐隐，中部高振幅脉冲，并支持左右划走关闭。
  */
 @Composable
 fun JarvisVoiceprintOverlay(
@@ -83,7 +84,11 @@ fun JarvisVoiceprintOverlay(
     val state by JarvisCoordinator.state.collectAsState()
     val subtitle by JarvisCoordinator.subtitle.collectAsState()
 
-    val isWorking = state != JarvisState.DISABLED && (state != JarvisState.STANDBY || subtitle.isNotBlank())
+    val isWorking = when (state) {
+        JarvisState.DISABLED -> false
+        JarvisState.STANDBY, JarvisState.LISTENING -> subtitle.isNotBlank()
+        JarvisState.PROCESSING, JarvisState.EXECUTING, JarvisState.SPEAKING -> true
+    }
     val offsetX = remember { Animatable(0f) }
     val scope = rememberCoroutineScope()
     val density = LocalDensity.current
@@ -156,59 +161,85 @@ private fun JarvisHudCard(
     subtitle: String,
     modifier: Modifier = Modifier
 ) {
-    val neonBorderBrush = Brush.horizontalGradient(
-        listOf(
-            Color(0xFF00F5FF), // 霓虹青
-            Color(0xFFFF007F), // 霓虹品红
-            Color(0xFF7000FF), // 霓虹电光紫
-            Color(0xFF00F5FF)
-        )
-    )
-
     val cardBackground = Brush.verticalGradient(
         listOf(
-            Color(0xEE08101E),
-            Color(0xFA030712)
+            Color(0xEB08101E),
+            Color(0xF6030712)
         )
     )
 
-    Column(
-        modifier = modifier
-            .widthIn(min = 240.dp, max = 360.dp)
-            .shadow(elevation = 16.dp, shape = RoundedCornerShape(22.dp), spotColor = Color(0xFF00E5FF), ambientColor = Color(0xFFFF007F))
-            .clip(RoundedCornerShape(22.dp))
-            .background(cardBackground)
-            .border(BorderStroke(1.2.dp, neonBorderBrush), RoundedCornerShape(22.dp))
-            .padding(horizontal = 16.dp, vertical = 12.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        // 1. 顶部状态指示徽章 (Status Badge)
-        HudStatusBadge(state)
+    val glowWidthDp = 16.dp
+    val cornerRadiusDp = 22.dp
 
-        // 2. 霓虹声纹动态曲线 (Neon Voiceprint Curves Canvas)
-        NeonWaveformCanvas(
-            state = state,
+    Box(
+        modifier = modifier
+            .widthIn(min = 250.dp, max = 370.dp)
+            .padding(glowWidthDp)
+            .drawBehind {
+                val maxSpread = glowWidthDp.toPx()
+                val baseCorner = cornerRadiusDp.toPx()
+                val layers = 14
+                for (i in 0 until layers) {
+                    val t = i.toFloat() / (layers - 1)
+                    val spread = t * maxSpread
+                    // 由内向外平方衰减至 0（外缘完全透明）
+                    val falloff = (1f - t) * (1f - t)
+                    val alphaScale = falloff * 0.42f
+                    val ringStrokeWidth = (maxSpread / layers) * 1.45f
+                    val brush = Brush.horizontalGradient(
+                        listOf(
+                            Color(0xFF00F5FF).copy(alpha = alphaScale),
+                            Color(0xFFFF007F).copy(alpha = alphaScale),
+                            Color(0xFF7000FF).copy(alpha = alphaScale),
+                            Color(0xFF00F5FF).copy(alpha = alphaScale)
+                        )
+                    )
+                    drawRoundRect(
+                        brush = brush,
+                        topLeft = Offset(-spread, -spread),
+                        size = Size(size.width + spread * 2f, size.height + spread * 2f),
+                        cornerRadius = CornerRadius(baseCorner + spread, baseCorner + spread),
+                        style = Stroke(width = ringStrokeWidth)
+                    )
+                }
+            }
+    ) {
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(38.dp)
-        )
+                .clip(RoundedCornerShape(cornerRadiusDp))
+                .background(cardBackground)
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            // 1. 顶部状态指示徽章 (Status Badge)
+            HudStatusBadge(state)
 
-        // 3. 底部文字输出与字幕 (Subtitle Text Output)
-        if (subtitle.isNotBlank()) {
-            Text(
-                text = subtitle,
-                color = Color(0xFFF1F5F9),
-                fontSize = 13.sp,
-                lineHeight = 18.sp,
-                fontWeight = FontWeight.Medium,
-                textAlign = TextAlign.Center,
-                maxLines = 3,
-                overflow = TextOverflow.Ellipsis,
+            // 2. 霓虹声纹动态曲线 (两端渐变透明，中部大振幅)
+            NeonWaveformCanvas(
+                state = state,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 4.dp, vertical = 2.dp)
+                    .height(50.dp)
             )
+
+            // 3. 底部文字输出与字幕 (Subtitle Text Output)
+            if (subtitle.isNotBlank()) {
+                Text(
+                    text = subtitle,
+                    color = Color(0xFFF1F5F9),
+                    fontSize = 13.sp,
+                    lineHeight = 18.sp,
+                    fontWeight = FontWeight.Medium,
+                    textAlign = TextAlign.Center,
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 4.dp, vertical = 2.dp)
+                )
+            }
         }
     }
 }
@@ -318,15 +349,15 @@ private fun NeonWaveformCanvas(
             strokeWidth = 1.dp.toPx()
         )
 
-        // 2. 第一层：霓虹电光青波 (主基频波)
+        // 2. 第一层：霓虹电光青波 (主基频波，中部大振幅，两端透明)
         val pathCyan = Path()
-        val baseAmp1 = (height * 0.38f) * ampMultiplier
+        val baseAmp1 = (height * 0.48f) * ampMultiplier
         val freq1 = 2.4f
 
         for (x in 0..width.toInt() step 2) {
             val progress = x / width
-            // 两端施加正弦包络，使波浪平滑归零于左右边缘
-            val envelope = sin(progress * PI).toFloat()
+            // 中部聚焦包络：两端平滑归零，中部区域振幅显著增强
+            val envelope = sin(progress * PI).pow(1.75).toFloat()
             val angle = (progress * freq1 * 2 * PI + phase).toFloat()
             val y = centerY + sin(angle) * baseAmp1 * envelope
 
@@ -336,20 +367,24 @@ private fun NeonWaveformCanvas(
         drawPath(
             path = pathCyan,
             brush = Brush.horizontalGradient(
-                listOf(Color(0xFF00E5FF), Color(0xFF00FFC2), Color(0xFF00B0FF))
+                0.0f to Color.Transparent,
+                0.18f to Color(0xFF00E5FF),
+                0.50f to Color(0xFF00FFC2),
+                0.82f to Color(0xFF00B0FF),
+                1.0f to Color.Transparent
             ),
-            style = Stroke(width = 2.5.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
+            style = Stroke(width = 2.6.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
         )
 
-        // 3. 第二层：霓虹品红波 (谐波，反向相位偏移)
+        // 3. 第二层：霓虹品红波 (谐波，两端透明，中部高亮)
         val pathMagenta = Path()
-        val baseAmp2 = (height * 0.32f) * ampMultiplier
+        val baseAmp2 = (height * 0.41f) * ampMultiplier
         val freq2 = 3.6f
         val phaseOffset2 = (PI * 0.65).toFloat()
 
         for (x in 0..width.toInt() step 2) {
             val progress = x / width
-            val envelope = sin(progress * PI).toFloat()
+            val envelope = sin(progress * PI).pow(1.75).toFloat()
             val angle = (progress * freq2 * 2 * PI - phase + phaseOffset2).toFloat()
             val y = centerY + sin(angle) * baseAmp2 * envelope
 
@@ -359,20 +394,24 @@ private fun NeonWaveformCanvas(
         drawPath(
             path = pathMagenta,
             brush = Brush.horizontalGradient(
-                listOf(Color(0xFFFF2A85), Color(0xFFFF007F), Color(0xFFFF77A9))
+                0.0f to Color.Transparent,
+                0.18f to Color(0xFFFF2A85),
+                0.50f to Color(0xFFFF007F),
+                0.82f to Color(0xFFFF77A9),
+                1.0f to Color.Transparent
             ),
-            style = Stroke(width = 2.0.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
+            style = Stroke(width = 2.1.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
         )
 
-        // 4. 第三层：电光紫高频微波 (增加科技细腻质感)
+        // 4. 第三层：电光紫高频微波 (两端透明，增加中间脉冲层次)
         val pathPurple = Path()
-        val baseAmp3 = (height * 0.22f) * ampMultiplier
+        val baseAmp3 = (height * 0.30f) * ampMultiplier
         val freq3 = 5.2f
         val phaseOffset3 = (PI * 1.3).toFloat()
 
         for (x in 0..width.toInt() step 3) {
             val progress = x / width
-            val envelope = sin(progress * PI).toFloat()
+            val envelope = sin(progress * PI).pow(1.75).toFloat()
             val angle = (progress * freq3 * 2 * PI + phase * 1.4f + phaseOffset3).toFloat()
             val y = centerY + sin(angle) * baseAmp3 * envelope
 
@@ -382,9 +421,13 @@ private fun NeonWaveformCanvas(
         drawPath(
             path = pathPurple,
             brush = Brush.horizontalGradient(
-                listOf(Color(0xFF7C4DFF), Color(0xFF651FFF), Color(0xFFB388FF))
+                0.0f to Color.Transparent,
+                0.20f to Color(0xFF7C4DFF),
+                0.50f to Color(0xFF651FFF),
+                0.80f to Color(0xFFB388FF),
+                1.0f to Color.Transparent
             ),
-            style = Stroke(width = 1.4.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
+            style = Stroke(width = 1.5.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
         )
     }
 }

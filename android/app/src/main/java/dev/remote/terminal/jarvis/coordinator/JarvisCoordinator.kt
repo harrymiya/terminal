@@ -137,8 +137,7 @@ object JarvisCoordinator : VoicePerceptorCallback {
 
     override fun onWakeWordDetected(keyword: String) {
         scope.launch {
-            Log.i(TAG, "Wake word detected: $keyword")
-            _subtitle.value = "先生，我在。"
+            Log.i(TAG, "Wake word detected: $keyword (listening silently until speech or action)")
             hapticFeedbackProvider?.invoke()
             updateState(JarvisState.LISTENING)
             earconManager.playWakeChime()
@@ -420,7 +419,7 @@ object JarvisCoordinator : VoicePerceptorCallback {
         }
         when (newState) {
             JarvisState.LISTENING -> {
-                if (_subtitle.value.isBlank() || _subtitle.value == "先生，我在。") _subtitle.value = "先生，我在，请讲..."
+                // 持续后台倾听时不弹出提示框，保持字幕为空，直到用户说话或系统行动时再显式弹窗
                 listeningTimeoutJob?.cancel()
                 listeningTimeoutJob = scope.launch {
                     kotlinx.coroutines.delay(10_000L)
