@@ -31,6 +31,8 @@ object JarvisToolRegistry {
     var publicKeyProvider: (() -> String?)? = null
     var addWorkspaceHandler: ((path: String, name: String, hostId: String?) -> Boolean)? = null
     var deleteWorkspaceHandler: ((path: String, hostId: String?) -> Boolean)? = null
+    var vibrateHandler: ((durationMs: Long?) -> Unit)? = null
+    var deviceStateProvider: (() -> JSONObject)? = null
 
     init {
         registerBuiltinMcpTools()
@@ -358,6 +360,64 @@ object JarvisToolRegistry {
                 } else {
                     McpToolResult(isError = true, content = "Failed to send to agent", voiceSummary = "向开发者发送失败。")
                 }
+            }
+        })
+
+        // 17. speak_to_user
+        register(object : JarvisMcpTool {
+            override val definition = McpToolDefinition(
+                name = "speak_to_user",
+                description = "通过手机蓝牙耳机/扬声器直接向用户语音播报消息 (TTS)。",
+                inputSchema = JSONObject().apply {
+                    put("type", "object")
+                    put("properties", JSONObject().apply {
+                        put("message", JSONObject().put("type", "string").put("description", "需要播报给用户的自然语言消息"))
+                    })
+                    put("required", JSONArray().put("message"))
+                }
+            )
+            override suspend fun execute(arguments: JSONObject): McpToolResult {
+                val msg = arguments.optString("message", "")
+                return if (msg.isNotBlank()) {
+                    dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.speakWithState(msg)
+                    McpToolResult(content = "Spoke: $msg", voiceSummary = "已向用户耳语播报。")
+                } else {
+                    McpToolResult(isError = true, content = "Empty message", voiceSummary = "播报内容为空。")
+                }
+            }
+        })
+
+        // 18. vibrate_phone
+        register(object : JarvisMcpTool {
+            override val definition = McpToolDefinition(
+                name = "vibrate_phone",
+                description = "触发手机震动提醒用户 (如紧急告警或任务完成)。",
+                inputSchema = JSONObject().apply {
+                    put("type", "object")
+                    put("properties", JSONObject().apply {
+                        put("duration_ms", JSONObject().put("type", "integer").put("description", "震动时长毫秒数，默认 350ms"))
+                    })
+                }
+            )
+            override suspend fun execute(arguments: JSONObject): McpToolResult {
+                val dur = arguments.optLong("duration_ms", 350L)
+                vibrateHandler?.invoke(dur)
+                return McpToolResult(content = "Vibrated for ${dur}ms", voiceSummary = "已触发手机震动提醒。")
+            }
+        })
+
+        // 19. get_device_state
+        register(object : JarvisMcpTool {
+            override val definition = McpToolDefinition(
+                name = "get_device_state",
+                description = "获取手机端硬件及系统状态（电量、充电状态、会话数）。"
+            )
+            override suspend fun execute(arguments: JSONObject): McpToolResult {
+                val state = deviceStateProvider?.invoke() ?: JSONObject()
+                return McpToolResult(
+                    content = state.toString(2),
+                    voiceSummary = "当前手机电量为 ${state.optInt("battery_level", -1)}%。"
+                )
             }
         })
     }

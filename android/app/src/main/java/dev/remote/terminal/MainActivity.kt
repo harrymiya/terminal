@@ -1094,6 +1094,25 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 quotaKey(sessionTask.host, sessionTask.agent.command)?.let(quotas::get)
             }
             state.buffer.onAgentTitle = { title -> mainHandler.post { applySessionTitle(state, title, "agent") } }
+            state.buffer.onJarvisCommand = { cmd, payload ->
+                mainHandler.post {
+                    when (cmd.lowercase()) {
+                        "speak" -> dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.speakWithState(payload)
+                        "vibrate" -> alertConfirmation(appContext)
+                        "tile" -> {
+                            val tiled = payload.equals("true", true) || payload == "1"
+                            tiledMode = tiled
+                            store.saveTiledMode(tiled)
+                        }
+                        "focus" -> {
+                            val idx = payload.toIntOrNull()
+                            if (idx != null && idx in sessions.indices) {
+                                activePage = idx
+                            }
+                        }
+                    }
+                }
+            }
             state.controller = SshTerminalController(
                 task = task, store = store, restoreOnly = restoredTask != null && !attachOrCreate,
                 onStatus = { value ->
@@ -1439,6 +1458,22 @@ private fun RemoteTerminalApp(store: LocalStore) {
                     saveHosts(hosts.map { if (it.id == host.id) updatedHost else it })
                     true
                 } else false
+            }
+
+            dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.vibrateHandler = { _ ->
+                alertConfirmation(appContext)
+            }
+
+            dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.deviceStateProvider = {
+                val batteryManager = appContext.getSystemService(Context.BATTERY_SERVICE) as? android.os.BatteryManager
+                val battery = batteryManager?.getIntProperty(android.os.BatteryManager.BATTERY_PROPERTY_CAPACITY) ?: -1
+                val isCharging = batteryManager?.isCharging == true
+                org.json.JSONObject().apply {
+                    put("battery_level", battery)
+                    put("is_charging", isCharging)
+                    put("sessions_count", sessions.size)
+                    put("tiled_mode", tiledMode)
+                }
             }
         }
 

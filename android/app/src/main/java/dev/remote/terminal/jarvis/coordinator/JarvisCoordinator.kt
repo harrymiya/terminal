@@ -212,7 +212,7 @@ object JarvisCoordinator : VoicePerceptorCallback {
         }
     }
 
-    private fun speakWithState(message: String) {
+    fun speakWithState(message: String) {
         updateState(JarvisState.SPEAKING)
         speaker?.speak(message) {
             scope.launch {

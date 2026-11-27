@@ -49,6 +49,7 @@ class TerminalBuffer(initialColumns: Int = 80, initialRows: Int = 32) {
     private var parser = 0
     private val escape = StringBuilder()
     var onAgentTitle: ((String) -> Unit)? = null
+    var onJarvisCommand: ((command: String, payload: String) -> Unit)? = null
     private var pendingHighSurrogate: Char? = null
     private val scrollbackRows = ArrayDeque<List<TerminalCell>>()
     private var discardedScrollbackRows = 0L
@@ -227,11 +228,25 @@ class TerminalBuffer(initialColumns: Int = 80, initialRows: Int = 32) {
 
     private fun handleOsc(value: String) {
         val marker = "0;RDT_TITLE:"
-        if (!value.startsWith(marker)) return
-        val title = runCatching {
-            String(Base64.decode(value.removePrefix(marker), Base64.DEFAULT), Charsets.UTF_8)
-        }.getOrNull()?.trim().orEmpty()
-        if (title.isNotEmpty() && title.length <= 512) onAgentTitle?.invoke(title)
+        if (value.startsWith(marker)) {
+            val title = runCatching {
+                String(Base64.decode(value.removePrefix(marker), Base64.DEFAULT), Charsets.UTF_8)
+            }.getOrNull()?.trim().orEmpty()
+            if (title.isNotEmpty() && title.length <= 512) onAgentTitle?.invoke(title)
+            return
+        }
+
+        val jarvisPrefix = when {
+            value.startsWith("0;JARVIS:") -> "0;JARVIS:"
+            value.startsWith("1337;JARVIS:") -> "1337;JARVIS:"
+            else -> null
+        }
+        if (jarvisPrefix != null) {
+            val body = value.removePrefix(jarvisPrefix)
+            val cmd = body.substringBefore(':')
+            val payload = if (body.contains(':')) body.substringAfter(':') else ""
+            onJarvisCommand?.invoke(cmd, payload)
+        }
     }
 
     private fun executeCsi(raw: String, command: Char) {
