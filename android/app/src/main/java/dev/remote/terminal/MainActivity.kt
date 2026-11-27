@@ -2547,6 +2547,9 @@ private fun RemoteTerminalApp(store: LocalStore) {
                                 put(org.json.JSONObject().apply {
                                     put("id", sid)
                                     put("host", h.name)
+                                put("host_id", h.id)
+                                put("title", item.optString("display_name").ifBlank { item.optString("directory_name") })
+                                put("display_name", item.optString("display_name"))
                                     put("workspace", item.optString("directory_name"))
                                     put("path", item.optString("directory_path"))
                                     put("agent", item.optString("agent_name"))
@@ -2560,10 +2563,40 @@ private fun RemoteTerminalApp(store: LocalStore) {
                         put("sessions", tasksArr)
                         put("shared_tasks", sharedArr)
                     }
+                    val localSummary = sessions.take(4).joinToString("；") { session ->
+                        val status = when {
+                            session.needsAction -> "需要确认"
+                            session.isStreaming -> "正在输出"
+                            session.isSessionConnected -> session.status.ifBlank { "已连接" }
+                            else -> session.status.ifBlank { "未连接" }
+                        }
+                        val lastLine = session.buffer.visibleTextTail(4).lineSequence()
+                            .map { it.trim() }.lastOrNull { it.isNotBlank() }.orEmpty()
+                        "${sessionDisplayLabel(session.task)}：$status${if (lastLine.isNotBlank()) "，最近输出 ${lastLine.take(36)}" else ""}"
+                    }
+                    val sharedSummary = startupShared.asSequence()
+                        .filter { (_, item) -> item.optString("id").replace("-", "") !in attachedIds }
+                        .take(4)
+                        .map { (host, item) ->
+                            val name = item.optString("display_name").ifBlank { item.optString("directory_name") }.ifBlank { "未命名实例" }
+                            val status = item.optString("status").ifBlank { "待接入/远端共享" }
+                            "$name（${host.name}）：$status"
+                        }
+                        .toList()
+                        .joinToString("；")
+                    val summaryParts = buildList {
+                        if (localSummary.isNotBlank()) add("本地任务：$localSummary")
+                        if (sharedSummary.isNotBlank()) add("远端共享实例：$sharedSummary")
+                    }
+                    val totalTasks = sessions.size + sharedArr.length()
+                    val voiceSummary = when {
+                        totalTasks == 0 -> "当前没有运行中的本地任务或远端共享实例。"
+                        else -> "当前有 ${sessions.size} 个本地任务、${sharedArr.length()} 个远端共享实例。${summaryParts.joinToString("。", postfix = "。")}"
+                    }
                     dev.remote.terminal.jarvis.mcp.ToolOpResult(
                         ok = true,
                         detail = root.toString(),
-                        voiceSummary = "当前有 ${sessions.size} 个本地任务、${sharedArr.length()} 个待附着共享任务。",
+                        voiceSummary = voiceSummary,
                         expectsFollowUp = true
                     )
                 } else {

@@ -42,6 +42,10 @@ class JarvisIntentRouter(
             """(?i)^\s*(?:现在|目前)?(?:什么情况|进度如何|进度怎么样|好了吗|完成了吗|当前状态|状态怎么样|status)[?？!！.。]*$"""
         )
 
+        private val InstanceStatusQueryRegex = Regex(
+            """(?i)(?:(?:请|帮我)?(?:查看|看下|看一下|看看|查查|查一下|查询|列出|汇报|告诉我|了解).{0,12}(?:工作区\s*)?(?:远端|远程|本地)?(?:实例|任务|会话)|(?:工作区\s*)?(?:远端|远程|本地)?(?:实例|任务|会话)(?:的)?(?:(?:现在|目前|当前|实时)?(?:列表|状态(?:怎么样|如何|是什么)?|进度(?:如何|怎么样)?|情况)|最近在做什么|正在做什么|在做什么))"""
+        )
+
         private val ReadScreenRegex = Regex(
             """(?i)(?:读屏幕|看屏幕|念屏幕|屏幕内容|显示什么|输出什么)"""
         )
@@ -225,12 +229,8 @@ class JarvisIntentRouter(
         }
 
         if (AppStateRegex.containsMatchIn(cleanText)) {
-            Log.i(TAG, "Routing global app state request to the Jarvis manager")
-            return@withContext JarvisAction.ChatWithDeveloper(
-                agentName = null,
-                message = cleanText,
-                memoryContext = context.memoryContext,
-            )
+            Log.i(TAG, "Tier-1 matched: MCP get_app_state")
+            return@withContext JarvisAction.ExecuteTool("get_app_state")
         }
 
         val hostMatch = SwitchHostRegex.find(cleanText)
@@ -257,13 +257,9 @@ class JarvisIntentRouter(
             }
         }
 
-        if (StatusQueryRegex.containsMatchIn(cleanText)) {
-            Log.i(TAG, "Routing task status request to the Jarvis manager")
-            return@withContext JarvisAction.ChatWithDeveloper(
-                agentName = null,
-                message = cleanText,
-                memoryContext = context.memoryContext,
-            )
+        if (StatusQueryRegex.matches(cleanText) || InstanceStatusQueryRegex.containsMatchIn(cleanText)) {
+            Log.i(TAG, "Tier-1 matched: MCP get_task_status for local and shared instances")
+            return@withContext JarvisAction.ExecuteTool("get_task_status")
         }
 
         if (HelpRegex.containsMatchIn(cleanText)) {
