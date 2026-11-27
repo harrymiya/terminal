@@ -2125,8 +2125,35 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 }
             }
 
+            suspend fun resolveOrAttachShared(selector: dev.remote.terminal.jarvis.mcp.SessionSelector, waitMs: Long = 450L): TerminalSessionState? {
+                resolveSessionMatch(selector)?.let { return it }
+                if (!selector.hasAnyFilter()) return null
+                val wsQuery = selector.workspacePath ?: selector.workspaceName ?: selector.query ?: selector.sessionId ?: selector.agentName
+                val matches = startupShared.filter { (host, item) ->
+                    val hostMatches = selector.hostName.isNullOrBlank() ||
+                        host.id.equals(selector.hostName, true) || host.name.contains(selector.hostName, true)
+                    val id = item.optString("id")
+                    val directoryName = item.optString("directory_name")
+                    val directoryPath = item.optString("directory_path")
+                    val displayName = item.optString("display_name")
+                    val agentName = item.optString("agent_name")
+                    val queryMatches = wsQuery != null && listOf(id, directoryName, directoryPath, displayName, agentName)
+                        .filter { it.isNotBlank() }
+                        .any { candidate ->
+                            candidate.equals(wsQuery, true) ||
+                                candidate.contains(wsQuery, true) ||
+                                (candidate == id && id.replace("-", "").startsWith(wsQuery.replace("-", ""), true))
+                        }
+                    hostMatches && queryMatches
+                }
+                val sharedMatch = matches.singleOrNull() ?: return null
+                openSharedSession(sharedMatch.first, sharedMatch.second, activate = false)
+                if (waitMs > 0) kotlinx.coroutines.delay(waitMs)
+                return resolveSessionMatch(selector)
+            }
+
             dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.focusTerminalHandler = { selector ->
-                val target = resolveSessionMatch(selector)
+                val target = resolveOrAttachShared(selector, waitMs = 650L)
                 val index = if (target != null) sessions.indexOf(target) else -1
                 if (target != null && index in sessions.indices) {
                     activePage = index
@@ -2134,14 +2161,14 @@ private fun RemoteTerminalApp(store: LocalStore) {
                     route = AppRoute.TERMINAL
                     dev.remote.terminal.jarvis.mcp.ToolOpResult(
                         true,
-                        "Focused session ${target.task.id} (${target.task.directory.name})",
-                        "已为您切换到工作区 ${target.task.directory.name}（${target.task.agent.name}）。"
+                        "Attached and focused session ${target.task.id} (${target.task.displayName})",
+                        "已接入并打开实例 ${sessionDisplayLabel(target.task)}（${target.task.host.name}）。"
                     )
                 } else {
                     dev.remote.terminal.jarvis.mcp.ToolOpResult(
                         false,
-                        "Session not found. Open sessions: [${openSessionsHint()}]",
-                        "未找到对应工作区会话。当前已打开：${openSessionsHint()}。"
+                        "No unique local or shared session matched the selector. Open sessions: [${openSessionsHint()}]",
+                        "没有找到唯一匹配的本地或远端实例。请提供更具体的实例名称或主机名。当前已打开：${openSessionsHint()}。"
                     )
                 }
             }
@@ -2333,30 +2360,6 @@ private fun RemoteTerminalApp(store: LocalStore) {
                         voiceSummary = if (sessions.isEmpty()) "当前没有打开的工作区终端，请先打开终端。" else "未找到对应工作区会话，当前已打开：$hint。"
                     )
                 }
-            }
-
-            suspend fun resolveOrAttachShared(selector: dev.remote.terminal.jarvis.mcp.SessionSelector, waitMs: Long = 450L): TerminalSessionState? {
-                resolveSessionMatch(selector)?.let { return it }
-                if (!selector.hasAnyFilter()) return null
-                val wsQuery = selector.workspacePath ?: selector.workspaceName ?: selector.query ?: selector.sessionId ?: selector.agentName
-                val sharedMatch = startupShared.firstOrNull { (_, item) ->
-                    val sid = item.optString("id")
-                    val dName = item.optString("directory_name")
-                    val dPath = item.optString("directory_path")
-                    val disp = item.optString("display_name")
-                    val agName = item.optString("agent_name")
-                    wsQuery != null && (
-                        sid.equals(wsQuery, true) ||
-                            sid.replace("-", "").startsWith(wsQuery.replace("-", ""), true) ||
-                            dName.contains(wsQuery, true) ||
-                            dPath.contains(wsQuery, true) ||
-                            disp.contains(wsQuery, true) ||
-                            agName.contains(wsQuery, true)
-                        )
-                } ?: return null
-                openSharedSession(sharedMatch.first, sharedMatch.second, activate = false)
-                if (waitMs > 0) kotlinx.coroutines.delay(waitMs)
-                return resolveSessionMatch(selector)
             }
 
             dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.sendKeysHandler = { keys, selector, sync, waitMs ->

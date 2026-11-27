@@ -86,6 +86,14 @@ class JarvisIntentRouter(
             """(?i)(?:系统状态|应用状态|全部状态|整体状态)"""
         )
 
+        private val OpenInstancePrefixRegex = Regex(
+            """(?i)^\s*(?:(?:请|麻烦|帮我)\s*){0,2}(?:(?:查看|看下|看一下|看看|核对|检查).{0,8}?(?:并)?\s*)?(?:打开|接入|进入|切换到|切到|聚焦到|聚焦)\s*"""
+        )
+
+        private val InstanceTargetRegex = Regex(
+            """(?i)(?:远端|远程|共享)?\s*(?:工作区\s*)?(?:实例|任务|会话)"""
+        )
+
         private val TalkToAgentRegex = Regex(
             """(?i)^(?:跟|向|让|对|问一下|问问|告诉|让开发者)\s*([a-zA-Z0-9_\u4e00-\u9fa5\-]+)?\s*(?:说|聊|问|查|做|执行|看一下|分析下|排查下)?[\s:：,，]*(.+)"""
         )
@@ -129,6 +137,14 @@ class JarvisIntentRouter(
 
     private fun buildWakePattern(): String =
         wakeVariants().joinToString("|") { Regex.escape(it) }
+
+    private fun extractInstanceQuery(text: String): String {
+        var query = text.replaceFirst(OpenInstancePrefixRegex, "").trim()
+        query = query.replace(Regex("""(?i)^(?:(?:一下|下|当前|这个|那个)\s*)*(?:(?:远端|远程|共享)\s*)*(?:工作区\s*)?(?:实例|任务|会话)\s*"""), "")
+        query = query.replace(Regex("""(?i)^(?:叫|名称是|名为|名叫|标题是|为|是|[:：])\s*"""), "")
+        query = query.replace(Regex("""(?i)\s*(?:(?:远端|远程|共享)\s*)?(?:工作区\s*)?(?:实例|任务|会话)\s*$"""), "")
+        return query.trim().trim('“', '”', '"', '「', '」', '『', '』', '。', '！', '!', '?', '？', ' ', '，', ',')
+    }
 
     override suspend fun resolveIntent(text: String, context: JarvisContext): JarvisAction = withContext(Dispatchers.Default) {
         val rawText = text.trim()
@@ -231,6 +247,19 @@ class JarvisIntentRouter(
         if (AppStateRegex.containsMatchIn(cleanText)) {
             Log.i(TAG, "Tier-1 matched: MCP get_app_state")
             return@withContext JarvisAction.ExecuteTool("get_app_state")
+        }
+
+        if (OpenInstancePrefixRegex.containsMatchIn(cleanText) && InstanceTargetRegex.containsMatchIn(cleanText)) {
+            val query = extractInstanceQuery(cleanText)
+            if (query.isBlank()) {
+                Log.i(TAG, "Tier-1 matched: MCP get_task_status before opening an unspecified instance")
+                return@withContext JarvisAction.ExecuteTool("get_task_status")
+            }
+            Log.i(TAG, "Tier-1 matched: MCP focus_terminal / attach shared instance [$query]")
+            return@withContext JarvisAction.ExecuteTool(
+                "focus_terminal",
+                JSONObject().put("query", query)
+            )
         }
 
         val hostMatch = SwitchHostRegex.find(cleanText)
