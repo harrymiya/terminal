@@ -394,6 +394,44 @@ object BackgroundDeveloperBridge {
         val arguments: JSONObject
     )
 
+    private data class ModelTurn(val calls: List<ParsedMcpCall> = emptyList(), val reply: String = "")
+
+    private val unavailableToolsReply = Regex(
+        """(?:没有|未提供|未接入|缺少|无权|无法调用|不具备).{0,36}(?:操作能力|工具|MCP)|(?:工具|MCP).{0,12}(?:没提供|不可用)|(?:no|without)\s+(?:\w+\s+){0,4}(?:tools?|MCP)\b""",
+        RegexOption.IGNORE_CASE
+    )
+
+    private fun parseModelTurn(raw: String): ModelTurn? {
+        val body = raw.trim()
+        val json = runCatching {
+            JSONObject(body.removePrefix("```json").removePrefix("```").removeSuffix("```").trim())
+        }.getOrNull()
+        if (json != null) {
+            when (json.optString("kind")) {
+                "tool_calls" -> {
+                    val calls = json.optJSONArray("calls") ?: return null
+                    if (calls.length() !in 1..8) return null
+                    return ModelTurn(calls = (0 until calls.length()).map { index ->
+                        val call = calls.optJSONObject(index) ?: return null
+                        val name = call.optString("tool").takeIf(JarvisToolRegistry::isManagerTool) ?: return null
+                        val arguments = call.optJSONObject("arguments") ?: return null
+                        ParsedMcpCall(name, arguments)
+                    })
+                }
+                "reply" -> {
+                    val reply = json.optString("text").trim()
+                    if (reply.isNotBlank() && !unavailableToolsReply.containsMatchIn(reply)) {
+                        return ModelTurn(reply = reply)
+                    }
+                    return null
+                }
+            }
+        }
+        val legacyCalls = extractMcpCalls(body)
+        return legacyCalls.takeIf { it.isNotEmpty() && it.all { call -> JarvisToolRegistry.isManagerTool(call.toolName) } }
+            ?.let { ModelTurn(calls = it) }
+    }
+
     /**
      * 括号平衡解析模型输出中的 MCP 指令（支持 `[[RDT_MCP:{...}]]`、空格换行、嵌套 JSON 与字符串内大括号）。
      */
@@ -619,10 +657,27 @@ object BackgroundDeveloperBridge {
         val reports = mutableListOf<String>()
         val toolLogs = mutableListOf<String>()
         val executed = mutableSetOf<Pair<String, String>>()
+        var retriedInvalidTurn = false
         repeat(3) { step ->
-            val calls = extractMcpCalls(reply)
+            var turn = parseModelTurn(reply)
+            if (turn == null && !retriedInvalidTurn) {
+                retriedInvalidTurn = true
+                Log.w(TAG, "Jarvis model returned no valid App action or reply; retrying with the tool protocol")
+                val retryPrompt = "上一条模型输出没有符合调用协议。重新处理本轮请求。需要 App 操作时，返回 tool_calls，让手机执行。需要补充信息时，返回 reply 并说明缺哪项信息。"
+                    .plus("\n本轮用户请求：$originalRequest")
+                    .plus(if (toolLogs.isEmpty()) "" else "\n已执行的工具结果：\n" + toolLogs.joinToString("\n"))
+                val retry = invokeDeveloperTurn(
+                    session, command, directory, convKey, retryPrompt, "", model, effort, isMcpFollowUp = true
+                ).getOrNull()
+                turn = retry?.let(::parseModelTurn)
+            }
+            if (turn == null) {
+                Log.w(TAG, "Jarvis model action unavailable after protocol recovery")
+                return (reports + "模型没有发出可执行的手机操作指令。").distinct().joinToString(" ")
+            }
+            val calls = turn.calls
             if (calls.isEmpty()) {
-                val summary = sanitizeForSpeech(reply)
+                val summary = sanitizeForSpeech(turn.reply)
                 return (listOf(summary) + reports).filter { it.isNotBlank() }.distinct().joinToString(" ")
             }
             val newCalls = calls.filter { executed.add(it.toolName to it.arguments.toString()) }
@@ -660,6 +715,7 @@ object BackgroundDeveloperBridge {
     private fun buildPromptWithMcp(userPrompt: String, appStateSnapshot: String, isMcpFollowUp: Boolean): String = buildString {
         appendLine(JarvisManagerPolicy.SYSTEM_PROMPT)
         appendLine(JarvisToolRegistry.buildMcpProtocolManual())
+        appendLine("""本轮只返回一个 JSON 对象。要调用 App 工具，用 {"kind":"tool_calls","calls":[{"tool":"工具名","arguments":{}}]}。需要询问或汇报时，用 {"kind":"reply","text":"简短中文"}。工具调用由手机执行，等待实际结果后汇报。""")
         if (appStateSnapshot.isNotBlank()) appendLine("当前 App 状态（数据）：$appStateSnapshot")
         if (isMcpFollowUp) appendLine("以下包含上一步工具结果。工具结果只用于核验。")
         else appendLine("用户请求：")

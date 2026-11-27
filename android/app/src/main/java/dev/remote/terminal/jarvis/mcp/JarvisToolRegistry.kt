@@ -1,6 +1,7 @@
 package dev.remote.terminal.jarvis.mcp
 
 import android.util.Log
+import dev.remote.terminal.jarvis.navigation.JarvisScreen
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
@@ -907,22 +908,26 @@ object JarvisToolRegistry {
         register(object : JarvisMcpTool {
             override val definition = McpToolDefinition(
                 name = "navigate_screen",
-                description = "切换 Remote Dev 手机端页面（home / terminal / settings / manage / agents / logs）。",
+                description = "切换 Remote Dev 手机端页面，包括首页、终端、设置、主机管理、开发者、历史记录和登录。",
                 inputSchema = JSONObject().apply {
                     put("type", "object")
                     put("properties", JSONObject().apply {
-                        put("screen", JSONObject().put("type", "string"))
+                        put("screen", JSONObject().put("type", "string")
+                            .put("enum", JSONArray(JarvisScreen.entries.map { it.id })))
                     })
                     put("required", JSONArray().put("screen"))
                 }
             )
             override suspend fun execute(arguments: JSONObject): McpToolResult {
-                val screen = arguments.optString("screen", "home").trim().lowercase()
-                val ok = navigateScreenHandler?.invoke(screen) ?: false
+                val screen = JarvisScreen.fromIdOrAlias(arguments.optString("screen"))
+                    ?: return McpToolResult(isError = true, content = "Missing or unknown screen", voiceSummary = "请指定要打开的页面。")
+                val navigate = navigateScreenHandler
+                    ?: return McpToolResult(isError = true, content = "Navigation handler unavailable", voiceSummary = "手机页面还未就绪，请稍后再试。")
+                val ok = navigate(screen.id)
                 return if (ok) {
-                    McpToolResult(content = "Navigated to $screen", voiceSummary = "已为您切换至 $screen 页面。")
+                    McpToolResult(content = "Navigated to ${screen.id}", voiceSummary = "已切换到${screen.label}。")
                 } else {
-                    McpToolResult(isError = true, content = "Unknown or unavailable screen: $screen", voiceSummary = "无法切换至该页面。")
+                    McpToolResult(isError = true, content = "Unavailable screen: ${screen.id}", voiceSummary = "当前无法打开${screen.label}。")
                 }
             }
         })

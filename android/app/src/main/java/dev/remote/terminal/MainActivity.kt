@@ -480,6 +480,8 @@ private enum class AppRoute { HOME, MANAGE, TERMINAL, AGENTS, LOGS, SETTINGS, LO
 
 @Composable
 private fun RemoteTerminalApp(store: LocalStore) {
+    val keyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
+    val focusManager = androidx.compose.ui.platform.LocalFocusManager.current
     val appContext = LocalContext.current.applicationContext
     MaterialTheme(colorScheme = darkColorScheme(
         primary = Mint, onPrimary = Ink, secondary = Blue, background = Ink, surface = Panel,
@@ -2515,16 +2517,12 @@ private fun RemoteTerminalApp(store: LocalStore) {
             }
 
             dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.navigateScreenHandler = { screen ->
-                val nextRoute = when (screen.trim().lowercase()) {
-                    "home", "主页" -> AppRoute.HOME
-                    "terminal", "终端" -> if (sessions.isNotEmpty()) AppRoute.TERMINAL else null
-                    "settings", "设置" -> AppRoute.SETTINGS
-                    "manage", "管理", "工作区", "主机" -> AppRoute.MANAGE
-                    "agents", "开发者" -> AppRoute.AGENTS
-                    "logs", "history", "历史", "日志" -> AppRoute.LOGS
-                    else -> null
+                val nextRoute = AppRoute.entries.firstOrNull {
+                    it.name.equals(screen, true) && (it != AppRoute.TERMINAL || sessions.isNotEmpty())
                 }
                 if (nextRoute != null) {
+                    focusManager.clearFocus()
+                    keyboard?.hide()
                     route = nextRoute
                     true
                 } else false

@@ -6,6 +6,7 @@ import dev.remote.terminal.jarvis.api.JarvisAction
 import dev.remote.terminal.jarvis.api.JarvisContext
 import dev.remote.terminal.jarvis.api.JarvisManagerPolicy
 import dev.remote.terminal.jarvis.mcp.JarvisToolRegistry
+import dev.remote.terminal.jarvis.navigation.JarvisScreen
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -198,6 +199,11 @@ class JarvisIntentRouter(
         // 去除指令句首的唤醒词前缀（如："老六，查看状态" -> "查看状态"）
         val wakeWordPrefix = Regex("""^(?:(?:喂|嘿|嗨|哈喽|呼叫|胡教|胡作|网络|叫)\s*)*(?:$wakePattern)[，,、\s:：]*""", RegexOption.IGNORE_CASE)
         val cleanText = rawText.replace(wakeWordPrefix, "").trim().ifBlank { rawText }
+
+        JarvisScreen.fromCommand(cleanText)?.let { screen ->
+            Log.i(TAG, "Routing App navigation locally: ${screen.id}")
+            return@withContext JarvisAction.ExecuteTool("navigate_screen", JSONObject().put("screen", screen.id))
+        }
 
         if (GreetingRegex.matches(cleanText)) {
             Log.i(TAG, "Tier-1 matched: Greeting / Presence check (0 Token)")
