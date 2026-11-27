@@ -4,6 +4,7 @@ import android.util.Log
 import dev.remote.terminal.jarvis.api.IntentRouter
 import dev.remote.terminal.jarvis.api.JarvisAction
 import dev.remote.terminal.jarvis.api.JarvisContext
+import dev.remote.terminal.jarvis.api.JarvisManagerPolicy
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -210,8 +211,12 @@ class JarvisIntentRouter(
         }
 
         if (AppStateRegex.containsMatchIn(cleanText)) {
-            Log.i(TAG, "Tier-1 matched: MCP get_app_state (0 Token)")
-            return@withContext JarvisAction.ExecuteTool("get_app_state")
+            Log.i(TAG, "Routing global app state request to the Jarvis manager")
+            return@withContext JarvisAction.ChatWithDeveloper(
+                agentName = null,
+                message = cleanText,
+                memoryContext = context.memoryContext,
+            )
         }
 
         val hostMatch = SwitchHostRegex.find(cleanText)
@@ -231,18 +236,20 @@ class JarvisIntentRouter(
             if (matchesConfiguredAgent && prompt.isNotBlank()) {
                 Log.i(TAG, "Tier-1 matched: Talk to agent [$rawAgent]: \"$prompt\"")
                 return@withContext JarvisAction.ChatWithDeveloper(
-                    agentName = rawAgent,
-                    message = prompt,
-                    voiceReply = "好的先生，正在与${rawAgent}沟通。",
+                    agentName = null,
+                    message = cleanText,
                     memoryContext = context.memoryContext,
                 )
             }
         }
 
         if (StatusQueryRegex.containsMatchIn(cleanText)) {
-            Log.i(TAG, "Tier-1 matched: Status Query (0 Token)")
-            val summary = generateLocalStatusSummary(context)
-            return@withContext JarvisAction.QueryStatus(summary)
+            Log.i(TAG, "Routing task status request to the Jarvis manager")
+            return@withContext JarvisAction.ChatWithDeveloper(
+                agentName = null,
+                message = cleanText,
+                memoryContext = context.memoryContext,
+            )
         }
 
         if (HelpRegex.containsMatchIn(cleanText)) {
@@ -254,14 +261,6 @@ class JarvisIntentRouter(
         return@withContext resolveWithCompressedLlm(cleanText, context)
     }
 
-    private fun generateLocalStatusSummary(context: JarvisContext): String {
-        val ws = context.currentWorkspaceName ?: "当前工作区"
-        val lastOutput = context.lastTerminalOutput?.trim() ?: ""
-        val lastLine = lastOutput.lines().lastOrNull { it.isNotBlank() } ?: "暂无输出"
-        val sanitizedLine = lastLine.take(40)
-        return "先生，${ws} 终端最后状态为：$sanitizedLine"
-    }
-
     /**
      * 骨架式元数据请求：不传全量终端日志，仅传当前环境与工作区列表，消耗极低 Token。
      */
@@ -269,10 +268,10 @@ class JarvisIntentRouter(
         val serverUrl = syncUrlProvider().trimEnd('/')
         val token = syncTokenProvider()
         if (serverUrl.isBlank()) {
-            // 没有配置中枢同步服务器时，默认直接借力当前终端正在运行的 AI 开发者
+            // 没有配置中枢同步服务器时，交由本机贾维斯管理模型处理并通过 MCP 派发
             Log.w(TAG, "No sync server configured for LLM parsing, routing as ChatWithDeveloper")
             return@withContext JarvisAction.ChatWithDeveloper(
-                null, userPrompt, "好的先生，已将任务交由当前开发者处理。", context.memoryContext
+                null, userPrompt, "我会先检查全局状态并派发给合适的开发者。", context.memoryContext
             )
         }
 
@@ -291,6 +290,7 @@ class JarvisIntentRouter(
             val appState = runCatching { dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.appStateProvider?.invoke() }.getOrNull()
             val payload = JSONObject().apply {
                 put("voice_input", userPrompt)
+                put("system_prompt", JarvisManagerPolicy.SYSTEM_PROMPT)
                 put("context", JSONObject().apply {
                     put("current_workspace", context.currentWorkspaceName ?: "")
                     put("workspaces", org.json.JSONArray(context.workspaces))
@@ -320,21 +320,53 @@ class JarvisIntentRouter(
                 if (json.has("tool")) {
                     val toolName = json.getString("tool")
                     val toolArgs = json.optJSONObject("arguments") ?: JSONObject()
-                    JarvisAction.ExecuteTool(toolName, toolArgs, voiceReply)
+                    if (toolName in setOf(
+                            "dispatch_task", "run_terminal_command", "run_in_workspace",
+                            "send_terminal_text", "send_terminal_keys", "chat_with_agent", "open_terminal"
+                        )) {
+                        // Task work must pass through the manager prompt and MCP enforcement locally.
+                        JarvisAction.ChatWithDeveloper(
+                            agentName = null,
+                            message = userPrompt,
+                            memoryContext = context.memoryContext,
+                        )
+                    } else {
+                        JarvisAction.ExecuteTool(toolName, toolArgs, voiceReply)
+                    }
                 } else if (targetWs.isNotBlank() && targetWs != context.currentWorkspaceName) {
-                    JarvisAction.SwitchWorkspace(targetWs, voiceReply)
+                    JarvisAction.ChatWithDeveloper(
+                        agentName = null,
+                        message = userPrompt,
+                        memoryContext = context.memoryContext,
+                    )
                 } else if (cmd.isNotBlank()) {
-                    JarvisAction.InjectKeystroke(cmd.let { if (it.endsWith("\n")) it else "$it\n" }, voiceReply)
+                    JarvisAction.ChatWithDeveloper(
+                        agentName = null,
+                        message = userPrompt,
+                        memoryContext = context.memoryContext,
+                    )
                 } else {
-                    JarvisAction.DirectReply(voiceReply)
+                    JarvisAction.ChatWithDeveloper(
+                        agentName = null,
+                        message = userPrompt,
+                        memoryContext = context.memoryContext,
+                    )
                 }
             } else {
-                Log.w(TAG, "Jarvis dispatch server returned HTTP $responseCode, fallback to direct input")
-                JarvisAction.InjectKeystroke("$userPrompt\n", "好的先生，已为您提交任务。")
+                Log.w(TAG, "Jarvis dispatch server returned HTTP $responseCode, routing through the local manager")
+                JarvisAction.ChatWithDeveloper(
+                    agentName = null,
+                    message = userPrompt,
+                    memoryContext = context.memoryContext,
+                )
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to dispatch via remote LLM: ${e.message}")
-            JarvisAction.InjectKeystroke("$userPrompt\n", "网络请求异常，已直接将指令注入当前终端。")
+            JarvisAction.ChatWithDeveloper(
+                agentName = null,
+                message = userPrompt,
+                memoryContext = context.memoryContext,
+            )
         }
     }
 }

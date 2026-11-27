@@ -605,20 +605,27 @@ object JarvisCoordinator : VoicePerceptorCallback {
             ?: hosts.firstOrNull { it.id == selectedHostIdProvider() }
             ?: hosts.firstOrNull()
 
-        val targetAgent = when {
-            !action.agentName.isNullOrBlank() -> {
-                val q = action.agentName.trim().lowercase()
-                agents.firstOrNull {
-                    it.name.lowercase().contains(q) || it.command.lowercase().contains(q)
-                }
+        val hostAgents = targetHost?.let { dev.remote.terminal.data.hostAgents(it, agents) }.orEmpty()
+        val requestedAgent = action.agentName?.trim()?.takeIf { it.isNotBlank() }
+        val targetAgent = if (requestedAgent != null) {
+            val exactMatches = hostAgents.filter {
+                it.name.equals(requestedAgent, true) || it.command.equals(requestedAgent, true)
             }
-            else -> null
-        } ?: agents.firstOrNull { config.targetAgentCommand.isNotBlank() && it.command == config.targetAgentCommand }
-            ?: agents.firstOrNull()
+            val matches = if (exactMatches.isNotEmpty()) exactMatches else hostAgents.filter {
+                it.name.contains(requestedAgent, true) || it.command.contains(requestedAgent, true)
+            }
+            matches.singleOrNull()
+        } else {
+            hostAgents.firstOrNull { config.targetAgentCommand.isNotBlank() && it.command == config.targetAgentCommand }
+                ?: hostAgents.firstOrNull()
+        }
 
-        val targetDirectory = currentWorkspacePath?.takeIf { it.isNotBlank() }
-            ?: selectedDirectoryProvider()?.takeIf { it.isNotBlank() }
-            ?: targetHost?.directories?.firstOrNull()?.path
+        val targetDirectory = targetHost?.let { host ->
+            val requestedPaths = listOfNotNull(currentWorkspacePath, selectedDirectoryProvider()).filter { it.isNotBlank() }
+            requestedPaths.firstNotNullOfOrNull { path ->
+                host.directories.firstOrNull { it.path.equals(path, true) }?.path
+            } ?: host.directories.firstOrNull()?.path
+        }
 
         if (store != null && targetHost != null && targetAgent != null) {
             _subtitle.value = "${targetAgent.name} 思考中..."
@@ -646,65 +653,15 @@ object JarvisCoordinator : VoicePerceptorCallback {
             return
         }
 
-        // 兜底：若用户尚未在设置中配置可用主机/开发者，尝试透传到当前打开的终端会话
-        val baseline = kotlinx.coroutines.withContext(Dispatchers.Main) {
-            dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.executeTool(
-                "read_terminal_screen",
-                org.json.JSONObject().put("lines", 10)
-            ).content
+        earconManager.playAlertChime()
+        val message = when {
+            store == null -> "当前无法访问调度配置，暂时无法派发或监工。"
+            targetHost == null -> "目前没有可用主机，请先在 Remote Dev 中添加或连接主机。"
+            requestedAgent != null && targetAgent == null -> "在目标主机上没有找到唯一的开发者 ${requestedAgent}，请检查开发者配置。"
+            targetAgent == null -> "目标主机没有配置可用开发者，请先在 Remote Dev 中添加开发者。"
+            else -> "目标主机没有配置工作区，请先在 Remote Dev 中添加工作区。"
         }
-        val sent = kotlinx.coroutines.withContext(Dispatchers.Main) {
-            !dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.executeTool(
-                "send_terminal_text",
-                org.json.JSONObject().put("text", prompt).put("press_enter", true)
-            ).isError
-        } || (activeTerminalController?.let {
-            it.send(action.message.trimEnd('\r', '\n'))
-            kotlinx.coroutines.delay(120)
-            it.send("\r")
-            true
-        } ?: false)
-
-        if (!sent) {
-            earconManager.playAlertChime()
-            speakWithState("请先在主页添加主机与开发者，再开始对话。")
-            return
-        }
-
-        var replyFound = false
-        var lastRead = baseline
-        var unchangedCount = 0
-        for (sec in 1..15) {
-            kotlinx.coroutines.delay(1000)
-            val currentTail = kotlinx.coroutines.withContext(Dispatchers.Main) {
-                dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.executeTool(
-                    "read_terminal_screen",
-                    org.json.JSONObject().put("lines", 10)
-                ).content
-            }
-            if (currentTail != lastRead && currentTail.isNotBlank()) {
-                lastRead = currentTail
-                unchangedCount = 0
-            } else if (lastRead != baseline && lastRead.isNotBlank()) {
-                unchangedCount++
-                if (unchangedCount >= 2) {
-                    replyFound = true
-                    break
-                }
-            }
-        }
-
-        if (replyFound || (lastRead != baseline && lastRead.isNotBlank())) {
-            conversationAwakeUntilMs = SystemClock.elapsedRealtime() + CONVERSATION_WINDOW_MS
-            earconManager.playActionSuccessChime()
-            val reply = cleanTerminalOutput(lastRead)
-            recordMemoryTurn(action.message, reply)
-            speakWithState(reply) {
-                openFollowUpListeningWindow()
-            }
-        } else {
-            speakWithState("终端仍在处理中。")
-        }
+        speakWithState(message) { openFollowUpListeningWindow() }
     }
 
     private fun cleanTerminalOutput(raw: String): String {

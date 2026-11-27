@@ -1636,7 +1636,20 @@ private fun RemoteTerminalApp(store: LocalStore) {
                                 put("external_address", h.externalAddress)
                                 put("workspaces", org.json.JSONArray().apply {
                                     h.directories.forEach { d ->
-                                        put("${d.name}(${d.path})")
+                                        put(org.json.JSONObject().apply {
+                                            put("id", d.id)
+                                            put("name", d.name)
+                                            put("path", d.path)
+                                        })
+                                    }
+                                })
+                                put("agents", org.json.JSONArray().apply {
+                                    dev.remote.terminal.data.hostAgents(h, agents).forEach { a ->
+                                        put(org.json.JSONObject().apply {
+                                            put("id", a.id)
+                                            put("name", a.name)
+                                            put("command", a.command)
+                                        })
                                     }
                                 })
                             })
@@ -1644,7 +1657,11 @@ private fun RemoteTerminalApp(store: LocalStore) {
                     })
                     put("agents", org.json.JSONArray().apply {
                         agents.forEach { a ->
-                            put("${a.name}(${a.command})")
+                            put(org.json.JSONObject().apply {
+                                put("id", a.id)
+                                put("name", a.name)
+                                put("command", a.command)
+                            })
                         }
                     })
                 }
@@ -1758,6 +1775,255 @@ private fun RemoteTerminalApp(store: LocalStore) {
                         }
                     }
                 }
+            }
+
+            dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.dispatchTaskHandler = dispatch@{ args ->
+                val taskPrompt = args.optString("task_prompt").ifBlank { args.optString("prompt") }.trim()
+                if (taskPrompt.isBlank()) {
+                    return@dispatch dev.remote.terminal.jarvis.mcp.ToolOpResult(false, "Missing task_prompt", "没有提供要派发的任务内容。")
+                }
+
+                val requestedHostId = args.optString("host_id").trim().takeIf { it.isNotBlank() }
+                val requestedHostName = args.optString("host_name").ifBlank { args.optString("host") }.trim().takeIf { it.isNotBlank() }
+                val requestedWorkspacePath = args.optString("workspace_path").ifBlank { args.optString("directory_path") }.trim().takeIf { it.isNotBlank() }
+                val requestedWorkspaceName = args.optString("workspace_name").ifBlank { args.optString("directory_name") }.ifBlank { args.optString("workspace") }.trim().takeIf { it.isNotBlank() }
+                val requestedAgentId = args.optString("agent_id").trim().takeIf { it.isNotBlank() }
+                val requestedAgentName = args.optString("agent_name").ifBlank { args.optString("agent") }.trim().takeIf { it.isNotBlank() }
+                val requestedSessionId = args.optString("session_id").trim().takeIf { it.isNotBlank() }
+                val focus = args.optBoolean("focus", false)
+
+                val resolution = withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    fun failure(message: String, voice: String) = Triple<TerminalSessionState?, dev.remote.terminal.jarvis.mcp.ToolOpResult?, Boolean>(
+                        null, dev.remote.terminal.jarvis.mcp.ToolOpResult(false, message, voice), false
+                    )
+
+                    if (requestedSessionId != null) {
+                        val exactId = requestedSessionId.replace("-", "")
+                        var forced = sessions.firstOrNull { it.task.id.replace("-", "").equals(exactId, true) }
+                        if (forced == null) {
+                            val shared = startupShared.firstOrNull { (_, item) -> item.optString("id").replace("-", "").equals(exactId, true) }
+                            if (shared != null) {
+                                openSharedSession(shared.first, shared.second, activate = focus)
+                                forced = sessions.firstOrNull { it.task.id.replace("-", "").equals(exactId, true) }
+                            }
+                        }
+                        if (forced == null) return@withContext failure("Task session not found: $requestedSessionId", "没有找到任务会话 $requestedSessionId。")
+                        if (requestedHostId != null && forced.task.host.id != requestedHostId) return@withContext failure("session_id does not match host_id", "会话与指定主机不匹配。")
+                        if (requestedWorkspacePath != null && !forced.task.directory.path.equals(requestedWorkspacePath, true)) return@withContext failure("session_id does not match workspace_path", "会话与指定工作区不匹配。")
+                        if (requestedWorkspaceName != null && !forced.task.directory.name.equals(requestedWorkspaceName, true)) return@withContext failure("session_id does not match workspace_name", "会话与指定工作区不匹配。")
+                        if (requestedAgentId != null && forced.task.agent.id != requestedAgentId) return@withContext failure("session_id does not match agent_id", "会话与指定开发者不匹配。")
+                        if (focus) {
+                            activePage = sessions.indexOf(forced).coerceAtLeast(0)
+                            route = AppRoute.TERMINAL
+                        }
+                        return@withContext Triple(forced, null, false)
+                    }
+
+                    val activeSession = sessions.getOrNull(activePage)
+                    val hasWorkspaceTarget = requestedWorkspacePath != null || requestedWorkspaceName != null
+                    val hostCandidates = when {
+                        requestedHostId != null -> hosts.filter { it.id.equals(requestedHostId, true) }
+                        requestedHostName != null -> {
+                            val exact = hosts.filter { it.name.equals(requestedHostName, true) }
+                            if (exact.isNotEmpty()) exact else hosts.filter { it.name.contains(requestedHostName, true) }
+                        }
+                        hasWorkspaceTarget -> hosts
+                        activeSession != null -> listOf(activeSession.task.host)
+                        hosts.firstOrNull { it.id == selectedHostId } != null -> listOf(hosts.first { it.id == selectedHostId })
+                        hosts.size == 1 -> hosts
+                        else -> emptyList()
+                    }
+                    if (hostCandidates.isEmpty()) {
+                        return@withContext failure("Host not found or missing", "请指定有效主机，或先查看当前主机与工作区列表。")
+                    }
+                    if ((requestedHostId != null || requestedHostName != null) && hostCandidates.size > 1) {
+                        val options = hostCandidates.joinToString("、") { "${it.name}(${it.id})" }
+                        return@withContext failure("Ambiguous host: $options", "主机名称有多个匹配项，请指定主机 ID。")
+                    }
+
+                    val directoryCandidates = hostCandidates.flatMap { host -> host.directories.map { host to it } }
+                    val matchedDirectory: Pair<dev.remote.terminal.data.HostProfile, dev.remote.terminal.data.ProjectDirectory>? = when {
+                        requestedWorkspacePath != null -> {
+                            val exact = directoryCandidates.filter { (_, dir) -> dir.path.equals(requestedWorkspacePath, true) }
+                            val partial = if (exact.isEmpty()) directoryCandidates.filter { (_, dir) -> dir.path.contains(requestedWorkspacePath, true) } else exact
+                            partial.singleOrNull()
+                        }
+                        requestedWorkspaceName != null -> {
+                            val exact = directoryCandidates.filter { (_, dir) -> dir.name.equals(requestedWorkspaceName, true) }
+                            val partial = if (exact.isEmpty()) directoryCandidates.filter { (_, dir) ->
+                                dir.name.contains(requestedWorkspaceName, true) || dir.path.contains(requestedWorkspaceName, true)
+                            } else exact
+                            partial.singleOrNull()
+                        }
+                        activeSession != null && hostCandidates.any { it.id == activeSession.task.host.id } ->
+                            activeSession.task.host to activeSession.task.directory
+                        hostCandidates.size == 1 && hostCandidates.first().directories.size == 1 -> directoryCandidates.singleOrNull()
+                        else -> null
+                    }
+                    val ephemeralDirectory = if (
+                        matchedDirectory == null && requestedWorkspacePath != null && requestedWorkspacePath.startsWith("/") &&
+                        (requestedHostId != null || requestedHostName != null) && hostCandidates.size == 1 &&
+                        directoryCandidates.none { (_, dir) -> dir.path.equals(requestedWorkspacePath, true) }
+                    ) {
+                        hostCandidates.single() to dev.remote.terminal.data.ProjectDirectory(
+                            UUID.randomUUID().toString(),
+                            requestedWorkspaceName ?: requestedWorkspacePath.substringAfterLast('/').ifBlank { requestedWorkspacePath },
+                            requestedWorkspacePath
+                        )
+                    } else null
+                    val resolvedDirectory = matchedDirectory ?: ephemeralDirectory
+                    val targetHost = resolvedDirectory?.first
+                    val effectiveDirectory = resolvedDirectory?.second
+                    if (effectiveDirectory == null) {
+                        val choices = directoryCandidates.map { (host, dir) -> "${host.name}/${dir.name}(${dir.path})" }
+                        val hostLabel = hostCandidates.joinToString("、") { it.name }.ifBlank { "目标主机" }
+                        val detail = if (choices.isEmpty()) "No configured workspaces on $hostLabel" else "Workspace is ambiguous or missing. Candidates: ${choices.joinToString(", ")}"
+                        return@withContext failure(detail, "请指定唯一的主机和工作区名称或绝对路径。")
+                    }
+                    if (targetHost == null) return@withContext failure("Workspace host could not be resolved", "无法确定目标工作区所属主机。")
+
+                    val availableAgents = dev.remote.terminal.data.hostAgents(targetHost, agents)
+                    val agentMatches = when {
+                        requestedAgentId != null -> availableAgents.filter { it.id == requestedAgentId }
+                        requestedAgentName != null -> {
+                            val exact = availableAgents.filter {
+                                it.name.equals(requestedAgentName, true) || it.command.equals(requestedAgentName, true)
+                            }
+                            if (exact.isNotEmpty()) exact else availableAgents.filter {
+                                it.name.contains(requestedAgentName, true) || it.command.contains(requestedAgentName, true)
+                            }
+                        }
+                        else -> emptyList()
+                    }
+                    val targetAgent = when {
+                        requestedAgentId != null || requestedAgentName != null -> {
+                            if (agentMatches.size == 1) agentMatches.first() else null
+                        }
+                        else -> {
+                            val existingForWorkspace = sessions.filter {
+                                it.task.host.id == targetHost.id && it.task.directory.path.equals(effectiveDirectory.path, true)
+                            }
+                            when {
+                                existingForWorkspace.size == 1 -> existingForWorkspace.first().task.agent
+                                existingForWorkspace.size > 1 -> existingForWorkspace.firstOrNull { sessions.indexOf(it) == activePage }?.task?.agent
+                                    ?: dev.remote.terminal.data.hostSelectedAgent(targetHost, availableAgents, store)
+                                else -> dev.remote.terminal.data.hostSelectedAgent(targetHost, availableAgents, store)
+                            }
+                        }
+                    }
+                    if ((requestedAgentId != null || requestedAgentName != null) && targetAgent == null) {
+                        val options = availableAgents.joinToString("、") { "${it.name}(${it.command})" }
+                        val voice = if (agentMatches.size > 1) "开发者名称有多个匹配项，请指定开发者 ID。" else "目标主机上没有找到指定开发者。"
+                        return@withContext failure("Developer not found or ambiguous. Available: $options", voice)
+                    }
+                    if (targetAgent == null) return@withContext failure("No developer configured for ${targetHost.name}", "目标主机没有配置可用开发者。")
+
+                    val openMatches = sessions.filter {
+                        it.task.host.id == targetHost.id &&
+                            it.task.directory.path.equals(effectiveDirectory.path, true) &&
+                            it.task.agent.id == targetAgent.id
+                    }
+                    if (openMatches.size > 1) {
+                        val focused = openMatches.firstOrNull { sessions.indexOf(it) == activePage }
+                        if (focused != null) {
+                            if (focus) {
+                                activePage = sessions.indexOf(focused).coerceAtLeast(0)
+                                route = AppRoute.TERMINAL
+                            }
+                            return@withContext Triple(focused, null, false)
+                        }
+                        val options = openMatches.joinToString("、") { "${it.task.displayName}(${it.task.id})" }
+                        return@withContext failure("Multiple matching sessions: $options", "同一工作区有多个开发者会话，请指定 session_id。")
+                    }
+                    if (openMatches.size == 1) {
+                        val existing = openMatches.first()
+                        if (focus) {
+                            activePage = sessions.indexOf(existing)
+                            route = AppRoute.TERMINAL
+                        }
+                        return@withContext Triple(existing, null, false)
+                    }
+
+                    val sharedMatch = startupShared.firstOrNull { (host, item) ->
+                        host.id == targetHost.id &&
+                            item.optString("directory_path").equals(effectiveDirectory.path, true) &&
+                            item.optString("agent_command").equals(targetAgent.command, true)
+                    }
+                    if (sharedMatch != null) {
+                        openSharedSession(sharedMatch.first, sharedMatch.second, activate = focus)
+                        val attached = sessions.firstOrNull {
+                            it.task.host.id == targetHost.id &&
+                                it.task.directory.path.equals(effectiveDirectory.path, true) &&
+                                it.task.agent.command.equals(targetAgent.command, true)
+                        }
+                        if (attached != null) return@withContext Triple(attached, null, false)
+                    }
+
+                    openTask(targetHost, effectiveDirectory, targetAgent, navigateToTerminal = focus)
+                    val opened = sessions.lastOrNull { it.task.host.id == targetHost.id && it.task.directory.path.equals(effectiveDirectory.path, true) && it.task.agent.id == targetAgent.id }
+                    if (opened == null) failure("Could not open developer session", "无法在目标工作区启动开发者。")
+                    else Triple(opened, null, true)
+                }
+
+                val target = resolution.first
+                if (target == null) return@dispatch resolution.second
+                    ?: dev.remote.terminal.jarvis.mcp.ToolOpResult(false, "No task session resolved", "未能确定任务会话。")
+
+                val connected = kotlinx.coroutines.withTimeoutOrNull(30_000L) {
+                    while (true) {
+                        val snapshot = withContext(kotlinx.coroutines.Dispatchers.Main) {
+                            Triple(target.isSessionConnected, target.hostFingerprint != null, target.status)
+                        }
+                        if (snapshot.first) return@withTimeoutOrNull true
+                        if (snapshot.second || snapshot.third.startsWith("远端终端已结束") || snapshot.third.startsWith("连接失败")) return@withTimeoutOrNull false
+                        kotlinx.coroutines.delay(200L)
+                    }
+                    false
+                } ?: false
+                if (!connected) {
+                    val pendingKey = withContext(kotlinx.coroutines.Dispatchers.Main) { target.hostFingerprint != null }
+                    val payload = org.json.JSONObject().apply {
+                        put("dispatched", false)
+                        put("session_id", target.task.id)
+                        put("host", target.task.host.name)
+                        put("workspace", target.task.directory.name)
+                        put("workspace_path", target.task.directory.path)
+                        put("agent", target.task.agent.name)
+                        put("pending_host_key", pendingKey)
+                    }
+                    return@dispatch dev.remote.terminal.jarvis.mcp.ToolOpResult(
+                        false,
+                        payload.toString(),
+                        if (pendingKey) "目标主机需要确认 SSH 指纹，尚未派发任务。" else "开发者实例尚未连接，任务暂未派发。",
+                        expectsFollowUp = true
+                    )
+                }
+
+                val sent = dispatchTextToSession(target, taskPrompt, pressEnter = true, sync = false)
+                if (!sent.ok) {
+                    return@dispatch dev.remote.terminal.jarvis.mcp.ToolOpResult(
+                        false,
+                        "Task dispatch failed: ${sent.detail.take(180)}",
+                        sent.voiceSummary ?: "任务派发失败。"
+                    )
+                }
+                val payload = org.json.JSONObject().apply {
+                    put("dispatched", true)
+                    put("session_id", target.task.id)
+                    put("host_id", target.task.host.id)
+                    put("host", target.task.host.name)
+                    put("workspace", target.task.directory.name)
+                    put("workspace_path", target.task.directory.path)
+                    put("agent_id", target.task.agent.id)
+                    put("agent", target.task.agent.name)
+                    put("opened_new_session", resolution.third)
+                }
+                dev.remote.terminal.jarvis.mcp.ToolOpResult(
+                    true,
+                    payload.toString(),
+                    "已将任务派发给 ${target.task.agent.name}，工作区 ${target.task.directory.name}，会话 ID ${target.task.id}。我会继续监工。",
+                    expectsFollowUp = true
+                )
             }
 
             dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.runCommandHandler = { selector, command, timeoutMs, workingDir, mode ->

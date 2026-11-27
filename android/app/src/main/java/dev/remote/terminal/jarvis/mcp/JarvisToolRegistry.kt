@@ -105,6 +105,7 @@ object JarvisToolRegistry {
         mode: String?,
         focus: Boolean
     ) -> ToolOpResult)? = null
+    var dispatchTaskHandler: (suspend (arguments: JSONObject) -> ToolOpResult)? = null
     var focusTerminalHandler: ((selector: SessionSelector) -> ToolOpResult)? = null
     var closeTerminalHandler: ((selector: SessionSelector) -> ToolOpResult)? = null
     var reconnectTerminalHandler: ((selector: SessionSelector) -> ToolOpResult)? = null
@@ -378,6 +379,47 @@ object JarvisToolRegistry {
                     content = res.detail,
                     voiceSummary = res.voiceSummary,
                     expectsFollowUp = res.expectsFollowUp
+                )
+            }
+        })
+
+        // Task dispatch is the manager-level operation: select or start a developer in any configured workspace.
+        register(object : JarvisMcpTool {
+            override val definition = McpToolDefinition(
+                name = "dispatch_task",
+                description = "将任务立即分配给指定主机、工作区和开发者。自动复用已打开的本地/共享实例；工作区尚未打开时在后台启动开发者后派发。返回 session_id 供 get_task_status 监工。",
+                inputSchema = JSONObject().apply {
+                    put("type", "object")
+                    put("properties", JSONObject().apply {
+                        put("host_id", JSONObject().put("type", "string").put("description", "目标主机 ID；优先于 host_name"))
+                        put("host_name", JSONObject().put("type", "string").put("description", "目标主机名称"))
+                        put("workspace_path", JSONObject().put("type", "string").put("description", "目标工作区绝对路径；可指定尚未打开的目录"))
+                        put("workspace_name", JSONObject().put("type", "string").put("description", "目标工作区名称；应结合主机消歧"))
+                        put("agent_id", JSONObject().put("type", "string").put("description", "目标开发者预设 ID"))
+                        put("agent_name", JSONObject().put("type", "string").put("description", "目标开发者名称或命令，如 Codex、Claude、agy2"))
+                        put("session_id", JSONObject().put("type", "string").put("description", "指定已打开或共享的任务会话 ID；用于精确复用或监工目标"))
+                        put("task_prompt", JSONObject().put("type", "string").put("description", "交给开发者执行的完整任务说明"))
+                        put("focus", JSONObject().put("type", "boolean").put("description", "是否切换到目标终端页面，默认 false；后台派发建议 false"))
+                    })
+                    put("required", JSONArray().put("task_prompt"))
+                }
+            )
+
+            override suspend fun execute(arguments: JSONObject): McpToolResult {
+                val prompt = arguments.optString("task_prompt").ifBlank { arguments.optString("prompt") }.trim()
+                if (prompt.isBlank()) {
+                    return McpToolResult(isError = true, content = "Missing task_prompt", voiceSummary = "没有提供要派发的任务内容。")
+                }
+                if (prompt.length > 12_000) {
+                    return McpToolResult(isError = true, content = "task_prompt exceeds 12000 characters", voiceSummary = "任务说明过长，无法派发。")
+                }
+                val result = dispatchTaskHandler?.invoke(arguments)
+                    ?: ToolOpResult(false, "dispatchTaskHandler unavailable", "任务派发接口不可用。")
+                return McpToolResult(
+                    isError = !result.ok,
+                    content = result.detail,
+                    voiceSummary = result.voiceSummary,
+                    expectsFollowUp = result.expectsFollowUp
                 )
             }
         })
@@ -871,7 +913,7 @@ object JarvisToolRegistry {
         register(object : JarvisMcpTool {
             override val definition = McpToolDefinition(
                 name = "get_task_status",
-                description = "在任何页面直接读取一个或全部进行中任务的状态（连接、输出流状态、待确认标记、配额与末尾屏幕输出），无需切换页面。",
+                description = "Jarvis监工入口：在任何页面读取指定任务或全部本地/共享任务的状态（连接、输出流、待确认、配额、末尾屏幕输出）。派发任务后优先用返回的session_id查询；不传筛选器可巡检全部任务。",
                 inputSchema = JSONObject().apply {
                     put("type", "object")
                     put("properties", sessionSelectorProperties().apply {
@@ -1088,13 +1130,18 @@ object JarvisToolRegistry {
         val defs = getAllDefinitions()
         if (compact) {
             // 二轮及以上对话已预热工具说明，仅保留紧凑工具索引节省 prefill Token 与延迟
-            return "可用Android MCP([[RDT_MCP:{\"tool\":\"...\",\"arguments\":{...}}]]): " +
+            return "你是手机端Jarvis总管，只指挥、派发和监工，不能亲自写代码、运行Shell或向终端发任务文本；具体开发任务只能dispatch_task。" +
+                "派发用dispatch_task(host_id或host_name,workspace_path或workspace_name,agent_id或agent_name,task_prompt,focus=false)，它会复用已打开实例或后台启动新实例；派发后用get_task_status(session_id)核验和监工。" +
+                "目标有歧义先get_app_state，不要猜。可用Android MCP([[RDT_MCP:{\"tool\":\"...\",\"arguments\":{...}}]]): " +
                 defs.joinToString(", ") { it.name }
         }
         val lines = StringBuilder()
         lines.appendLine("【Android MCP(${defs.size}) 语法 [[RDT_MCP:{\"tool\":\"名\",\"arguments\":{...}}]]】")
-        lines.appendLine("跨页面能力：无论用户当前停留在首页/设置/历史还是终端页，均可直接对 open_sessions 进行中任务发命令/读状态（传 workspace_name/title/session_index，默认不跳页）。")
-        lines.appendLine("组合键与内置斜杠命令：send_terminal_keys 自由支持 alt+m、ctrl+c、shift+tab、esc、up/down 等（设 sync=true 可看回屏）；send_terminal_text/run_in_workspace 可直接发送 codex/claude 的 /model、/status 等斜杠命令；Shell 退出码同步执行用 run_terminal_command（默认 30s）；退出唤醒用 close_awake。")
+        lines.appendLine("【Jarvis职责】你是手机端总管，统筹Remote Dev App内所有主机、工作区、开发者和任务；可读取全局状态、决定任务交给谁、立即派发、持续查看进展并向用户汇报。你不是开发者，不得亲自写代码、运行Shell/项目命令或通过终端文本/按键替开发者干活。")
+        lines.appendLine("【任务派发流程】先从get_app_state确认hosts[*].workspaces[*]和agents目录；按用户指定目标调用dispatch_task，提供host_id/host_name、workspace_path/workspace_name、agent_id/agent_name和完整task_prompt。此工具会复用已打开的本地或共享实例；若目标工作区未打开，会后台启动指定开发者并派发，不需要先调用open_terminal。返回session_id后调用get_task_status(session_id)核验是否已接收；以后监工时再次查该session_id，或不传筛选器查看所有本地任务与共享任务。只有状态和输出证实完成后才能报告已完成。")
+        lines.appendLine("【目标选择】已打开与未打开的工作区都可派发；未指定主机时可用工作区路径/名称跨主机唯一匹配。出现多个候选时先报告候选并让用户选择，不得猜测。只派发当前请求，不把派发描述成已完成。")
+        lines.appendLine("【全局操作】无论用户当前停留在首页/设置/历史还是终端页，均可直接使用Android MCP读取所有主机、工作区、开发者、已打开/共享实例、任务状态与终端屏幕，并管理Remote Dev App界面和配置。")
+        lines.appendLine("【执行边界】run_terminal_command、run_in_workspace、send_terminal_text、send_terminal_keys、chat_with_agent、open_terminal不能用于具体开发工作；需要开发者干活时只能dispatch_task。终端屏幕只能用于了解进度和结果。不要把命令执行或派发描述成已完成开发。退出唤醒用close_awake。")
         for (def in defs) {
             val props = def.inputSchema.optJSONObject("properties")
             val requiredSet = buildSet {
