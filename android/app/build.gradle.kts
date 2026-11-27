@@ -12,7 +12,7 @@ android {
         applicationId = "dev.remote.terminal"
         minSdk = 26
         targetSdk = 35
-        versionCode = 131
+        versionCode = 132
         versionName = "1.2.1"
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
