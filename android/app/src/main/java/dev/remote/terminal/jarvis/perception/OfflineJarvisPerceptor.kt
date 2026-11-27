@@ -59,6 +59,7 @@ class OfflineJarvisPerceptor(
     private val scope = CoroutineScope(Dispatchers.IO)
     private var recordJob: Job? = null
     private var audioRecord: AudioRecord? = null
+    private val audioRecordLock = Any()
 
     private var sileroVad: Vad? = null
     private var offlineRecognizer: OfflineRecognizer? = null
@@ -70,6 +71,7 @@ class OfflineJarvisPerceptor(
     @Volatile private var resetRequested: Boolean = false
     @Volatile private var lastSpeakingSeenAtMs: Long = 0L
     @Volatile private var previewDecodeBusy: Boolean = false
+    @Volatile private var scoExternallyDropped: Boolean = false
 
     private var callback: VoicePerceptorCallback? = null
     var scoManager: BluetoothScoManager? = null
@@ -157,18 +159,27 @@ class OfflineJarvisPerceptor(
             val bufferSize = maxOf(minBufSize, VAD_WINDOW_SAMPLES * 8)
 
             try {
+                if (!isActive || !isRunning) return@launch
+                scoExternallyDropped = false
                 var activeBtDevice = if (preferBluetoothMicProvider()) scoManager?.findBluetoothInputDevice() else null
-                audioRecord = createConfiguredAudioRecord(activeBtDevice, bufferSize)
+                val initialRecord = createConfiguredAudioRecord(activeBtDevice, bufferSize)
+                synchronized(audioRecordLock) {
+                    audioRecord = initialRecord
+                }
 
-                if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
+                if (!isActive || !isRunning) {
+                    safeReleaseAudioRecord()
+                    return@launch
+                }
+                if (initialRecord?.state != AudioRecord.STATE_INITIALIZED) {
                     Log.e(TAG, "AudioRecord initialization failed")
                     onDiagnosticChanged?.invoke("录音硬件初始化失败")
                     callback?.onError("录音硬件初始化失败")
                     return@launch
                 }
 
-                audioRecord?.startRecording()
-                logAudioRouting(audioRecord, activeBtDevice)
+                initialRecord.startRecording()
+                logAudioRouting(initialRecord, activeBtDevice)
                 updateIdleDiagnostic(activeBtDevice != null)
 
                 val frameBuffer = ShortArray(VAD_WINDOW_SAMPLES)
@@ -214,7 +225,7 @@ class OfflineJarvisPerceptor(
                         speechLen = 0
                         preRollRing.clear()
                         lastPreviewText = ""
-                        val desiredBt = if (preferBluetoothMicProvider()) scoManager?.findBluetoothInputDevice() else null
+                        val desiredBt = if (!scoExternallyDropped && preferBluetoothMicProvider()) scoManager?.findBluetoothInputDevice() else null
                         if (desiredBt != null && scoManager?.isScoActive != true) {
                             scoManager?.startChannel()
                             delay(150)
@@ -225,10 +236,16 @@ class OfflineJarvisPerceptor(
                         updateIdleDiagnostic(activeBtDevice != null)
                     }
 
-                    // 空闲期定期检查蓝牙耳机热插拔，自动在耳机麦/手机麦间无缝切换
-                    if (!wasInSpeech && !speechSegmentPending && !inEchoGuard && (now - lastBtPollAtMs) >= BT_POLL_INTERVAL_MS) {
+                    // 空闲期定期检查蓝牙耳机热插拔（若外部挂断 SCO 则立即切回手机麦），自动在耳机麦/手机麦间无缝切换
+                    val needImmediateScoFallback = scoExternallyDropped && activeBtDevice != null
+                    if (needImmediateScoFallback || (!wasInSpeech && !speechSegmentPending && !inEchoGuard && (now - lastBtPollAtMs) >= BT_POLL_INTERVAL_MS)) {
                         lastBtPollAtMs = now
-                        val desiredBt = if (preferBluetoothMicProvider()) scoManager?.findBluetoothInputDevice() else null
+                        val btInput = if (preferBluetoothMicProvider()) scoManager?.findBluetoothInputDevice() else null
+                        if (btInput == null) {
+                            // 耳机已断开后重置外部挂断标记，下次重连可重新使用耳机通道
+                            scoExternallyDropped = false
+                        }
+                        val desiredBt = if (scoExternallyDropped) null else btInput
                         if (desiredBt?.id != activeBtDevice?.id) {
                             Log.i(TAG, "Audio input device changed: ${activeBtDevice?.productName} -> ${desiredBt?.productName}")
                             safeReleaseAudioRecord()
@@ -236,10 +253,13 @@ class OfflineJarvisPerceptor(
                                 scoManager?.stopChannel()
                             }
                             activeBtDevice = desiredBt
-                            audioRecord = createConfiguredAudioRecord(activeBtDevice, bufferSize)
-                            if (audioRecord?.state == AudioRecord.STATE_INITIALIZED) {
-                                audioRecord?.startRecording()
-                                logAudioRouting(audioRecord, activeBtDevice)
+                            val newRecord = createConfiguredAudioRecord(activeBtDevice, bufferSize)
+                            synchronized(audioRecordLock) {
+                                audioRecord = newRecord
+                            }
+                            if (isActive && isRunning && newRecord?.state == AudioRecord.STATE_INITIALIZED) {
+                                newRecord.startRecording()
+                                logAudioRouting(newRecord, activeBtDevice)
                                 updateIdleDiagnostic(activeBtDevice != null)
                             }
                             vad.clear()
@@ -247,7 +267,7 @@ class OfflineJarvisPerceptor(
                         }
                     }
 
-                    val record = audioRecord ?: break
+                    val record = synchronized(audioRecordLock) { audioRecord } ?: break
                     if (record.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
                         try {
                             record.startRecording()
@@ -373,6 +393,8 @@ class OfflineJarvisPerceptor(
                         wasInSpeech = false
                     }
                 }
+            } catch (_: kotlinx.coroutines.CancellationException) {
+                Log.d(TAG, "Audio capture loop cancelled")
             } catch (e: SecurityException) {
                 Log.e(TAG, "RECORD_AUDIO permission missing: ${e.message}")
                 onDiagnosticChanged?.invoke("缺少麦克风权限")
@@ -383,6 +405,7 @@ class OfflineJarvisPerceptor(
             } finally {
                 isRunning = false
                 safeReleaseAudioRecord()
+                scoManager?.stopChannel()
             }
         }
     }
@@ -421,13 +444,29 @@ class OfflineJarvisPerceptor(
 
     fun returnToWakeListening() {
         resetRequested = true
-        updateIdleDiagnostic(preferBluetoothMicProvider() && scoManager?.findBluetoothInputDevice() != null)
+        updateIdleDiagnostic(!scoExternallyDropped && preferBluetoothMicProvider() && scoManager?.findBluetoothInputDevice() != null)
     }
 
-    private fun createConfiguredAudioRecord(btInput: AudioDeviceInfo?, bufferSize: Int): AudioRecord? {
+    /**
+     * 当蓝牙耳机外部挂断或 SCO 被系统断开时，立刻释放已阻塞的 SCO 录音句柄并平滑回落到手机麦，
+     * 防止 AudioRecord 卡死导致系统长时间停留在 MODE_IN_COMMUNICATION。
+     */
+    fun onScoExternallyDisconnected() {
+        scoExternallyDropped = true
+        synchronized(audioRecordLock) {
+            runCatching { audioRecord?.stop() }
+        }
+    }
+
+    private suspend fun createConfiguredAudioRecord(btInput: AudioDeviceInfo?, bufferSize: Int): AudioRecord? {
+        if (!isRunning) return null
         if (btInput != null) {
             scoManager?.startChannel()
-            Thread.sleep(150)
+            delay(150)
+            if (!isRunning) {
+                scoManager?.stopChannel()
+                return null
+            }
         }
         val source = if (btInput != null) {
             MediaRecorder.AudioSource.VOICE_COMMUNICATION
@@ -504,13 +543,15 @@ class OfflineJarvisPerceptor(
     }
 
     private fun safeReleaseAudioRecord() {
-        try {
-            audioRecord?.stop()
-            audioRecord?.release()
-        } catch (e: Exception) {
-            Log.w(TAG, "Error releasing AudioRecord: ${e.message}")
+        synchronized(audioRecordLock) {
+            try {
+                audioRecord?.stop()
+                audioRecord?.release()
+            } catch (e: Exception) {
+                Log.w(TAG, "Error releasing AudioRecord: ${e.message}")
+            }
+            audioRecord = null
         }
-        audioRecord = null
     }
 
     override fun stop() {
@@ -519,6 +560,7 @@ class OfflineJarvisPerceptor(
         recordJob?.cancel()
         recordJob = null
         safeReleaseAudioRecord()
+        scoManager?.stopChannel()
     }
 
     override fun release() {

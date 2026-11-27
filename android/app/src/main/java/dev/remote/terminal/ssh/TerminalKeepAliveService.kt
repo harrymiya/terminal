@@ -31,6 +31,12 @@ object TerminalConnectionRegistry {
     }
     fun unregister(id: String, controller: SshTerminalController) { controllers.remove(id, controller) }
     fun get(id: String): SshTerminalController? = controllers[id]
+    fun hasActiveConnections(): Boolean = controllers.isNotEmpty()
+    fun closeAll() {
+        val snapshot = controllers.values.toList()
+        controllers.clear()
+        snapshot.forEach { runCatching { it.close(terminateRemote = false) } }
+    }
     fun onDefaultNetworkAvailable(recoveryStartedAt: Long) {
         controllers.values.forEach { it.onNetworkAvailable(recoveryStartedAt) }
     }
@@ -110,7 +116,17 @@ class TerminalKeepAliveService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        // 用户从最近任务划掉 RemoteDev 时立即停止 Jarvis 与蓝牙 SCO，恢复正常听歌模式
+        runCatching { dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.stop() }
+        TerminalConnectionRegistry.closeAll()
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+        super.onTaskRemoved(rootIntent)
+    }
+
     override fun onDestroy() {
+        runCatching { dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.stop() }
         pendingNetworkChange?.let(networkChangeHandler::removeCallbacks)
         pendingNetworkChange = null
         networkCallback?.let { callback -> runCatching { connectivityManager?.unregisterNetworkCallback(callback) } }

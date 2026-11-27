@@ -293,6 +293,16 @@ class MainActivity : ComponentActivity() {
         }
         setContent { RemoteTerminalApp(LocalStore(applicationContext)) }
     }
+
+    override fun onDestroy() {
+        if (isFinishing) {
+            dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.stop()
+            if (!TerminalConnectionRegistry.hasActiveConnections()) {
+                TerminalKeepAliveService.stop(applicationContext)
+            }
+        }
+        super.onDestroy()
+    }
 }
 
 private class TerminalSessionState(
@@ -1060,7 +1070,9 @@ private fun RemoteTerminalApp(store: LocalStore) {
             sessions.removeAt(index)
             if (sessions.isEmpty()) {
                 route = AppRoute.HOME
-                TerminalKeepAliveService.stop(appContext)
+                if (!dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.enabled) {
+                    TerminalKeepAliveService.stop(appContext)
+                }
             } else {
                 activePage = when {
                     index < activePage -> activePage - 1
