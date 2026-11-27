@@ -100,14 +100,17 @@ data class HostRoute(
 )
 
 object HostRouteResolver {
-    private val activeRoutes = androidx.compose.runtime.mutableStateMapOf<String, HostRoute>()
+    private val routeCache = java.util.concurrent.ConcurrentHashMap<String, HostRoute>()
     private val resolvedHostIds = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    private val _routes = kotlinx.coroutines.flow.MutableStateFlow<Map<String, HostRoute>>(emptyMap())
+    val routes: kotlinx.coroutines.flow.StateFlow<Map<String, HostRoute>> = _routes
 
-    fun getRoute(hostId: String): HostRoute? = activeRoutes[hostId]
+    fun getRoute(hostId: String): HostRoute? = routeCache[hostId]
 
     fun updateRoute(hostId: String, route: HostRoute) {
-        activeRoutes[hostId] = route
+        routeCache[hostId] = route
         resolvedHostIds.add(hostId)
+        _routes.value = routeCache.toMap()
     }
 
     fun invalidate(hostId: String) {
@@ -128,26 +131,20 @@ object HostRouteResolver {
 
     suspend fun resolveHostRoute(host: HostProfile, force: Boolean = false): HostRoute = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
         if (!force && resolvedHostIds.contains(host.id)) {
-            activeRoutes[host.id]?.let { return@withContext it }
+            routeCache[host.id]?.let { return@withContext it }
         }
         val candidates = host.endpoints()
         for (ep in candidates) {
             val timeout = if (ep.isLan) 1200 else 1800
             if (isPortReachable(ep.address, ep.port, timeout)) {
                 val route = HostRoute(ep.address, ep.port, ep.isLan, reachable = true)
-                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
-                    activeRoutes[host.id] = route
-                    resolvedHostIds.add(host.id)
-                }
+                updateRoute(host.id, route)
                 return@withContext route
             }
         }
         val fallback = candidates.firstOrNull() ?: HostEndpoint("", 0, false)
         val route = HostRoute(fallback.address, fallback.port, fallback.isLan, reachable = false)
-        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
-            activeRoutes[host.id] = route
-            resolvedHostIds.add(host.id)
-        }
+        updateRoute(host.id, route)
         route
     }
 }

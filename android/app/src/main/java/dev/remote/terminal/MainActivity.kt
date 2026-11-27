@@ -442,37 +442,6 @@ private fun RemoteTerminalApp(store: LocalStore) {
         AutoConfirmEngine.globalEnabled = autoEnterEnabled
         AutoConfirmEngine.globalDelaySeconds = autoEnterDelaySeconds
 
-        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.storeProvider = { store }
-        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.hostsProvider = { hosts.toList() }
-        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.agentsProvider = { agents.toList() }
-        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.selectedHostIdProvider = { selectedHostId }
-        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.selectedDirectoryProvider = {
-            hosts.firstOrNull { it.id == selectedHostId }?.directories?.firstOrNull()?.path
-        }
-        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.init(appContext)
-        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.enabled = store.loadJarvisEnabled()
-        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.wakeWord = store.loadJarvisWakeWord()
-        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.autoWhisperConfirm = store.loadJarvisAutoConfirm()
-        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.notifyOnTaskFinished = store.loadJarvisNotifyFinished()
-        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.bluetoothScoEnabled = store.loadJarvisBluetoothSco()
-        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.asrEngineMode = store.loadJarvisAsrMode()
-        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.targetHostId = store.loadJarvisTargetHostId()
-        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.targetAgentCommand = store.loadJarvisTargetAgentCommand()
-        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.targetModel = store.loadJarvisModel()
-        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.targetEffort = store.loadJarvisEffort()
-        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.hapticFeedbackProvider = {
-            val vibrator = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
-                appContext.getSystemService(android.os.VibratorManager::class.java)?.defaultVibrator
-            } else {
-                @Suppress("DEPRECATION")
-                appContext.getSystemService(Context.VIBRATOR_SERVICE) as? android.os.Vibrator
-            }
-            vibrator?.vibrate(android.os.VibrationEffect.createOneShot(80, android.os.VibrationEffect.DEFAULT_AMPLITUDE))
-        }
-        if (store.loadJarvisEnabled()) {
-            dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.start()
-        }
-
         val permissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
             androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
         ) { permissions ->
@@ -482,7 +451,35 @@ private fun RemoteTerminalApp(store: LocalStore) {
             }
         }
         LaunchedEffect(Unit) {
+            dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.storeProvider = { store }
+            dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.hostsProvider = { hosts.toList() }
+            dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.agentsProvider = { agents.toList() }
+            dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.selectedHostIdProvider = { selectedHostId }
+            dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.selectedDirectoryProvider = {
+                hosts.firstOrNull { it.id == selectedHostId }?.directories?.firstOrNull()?.path
+            }
+            dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.init(appContext)
+            dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.enabled = store.loadJarvisEnabled()
+            dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.wakeWord = store.loadJarvisWakeWord()
+            dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.autoWhisperConfirm = store.loadJarvisAutoConfirm()
+            dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.notifyOnTaskFinished = store.loadJarvisNotifyFinished()
+            dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.bluetoothScoEnabled = store.loadJarvisBluetoothSco()
+            dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.asrEngineMode = store.loadJarvisAsrMode()
+            dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.targetHostId = store.loadJarvisTargetHostId()
+            dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.targetAgentCommand = store.loadJarvisTargetAgentCommand()
+            dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.targetModel = store.loadJarvisModel()
+            dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.targetEffort = store.loadJarvisEffort()
+            dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.hapticFeedbackProvider = {
+                val vibrator = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+                    appContext.getSystemService(android.os.VibratorManager::class.java)?.defaultVibrator
+                } else {
+                    @Suppress("DEPRECATION")
+                    appContext.getSystemService(Context.VIBRATOR_SERVICE) as? android.os.Vibrator
+                }
+                vibrator?.vibrate(android.os.VibrationEffect.createOneShot(80, android.os.VibrationEffect.DEFAULT_AMPLITUDE))
+            }
             if (store.loadJarvisEnabled()) {
+                dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.start()
                 val permissionsToRequest = mutableListOf(android.Manifest.permission.RECORD_AUDIO)
                 if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
                     permissionsToRequest.add(android.Manifest.permission.BLUETOOTH_CONNECT)
@@ -2368,6 +2365,7 @@ private fun HomeScreen(
                 }
             }
         } else {
+            val hostRoutes by HostRouteResolver.routes.collectAsState()
             Column(
                 modifier = Modifier.fillMaxWidth().padding(bottom = 17.dp),
                 verticalArrangement = Arrangement.spacedBy(homeCardGridGap),
@@ -2379,7 +2377,7 @@ private fun HomeScreen(
                     ) {
                         rowHosts.forEach { host ->
                             val selected = selectedHost?.id == host.id
-                            val route = HostRouteResolver.getRoute(host.id)
+                            val route = hostRoutes[host.id]
                             val hasLan = host.lanAddress.isNotBlank()
                             val hasExt = host.externalAddress.isNotBlank()
                             val isSingle = !hasLan || !hasExt || host.lanAddress.trim() == host.externalAddress.trim()
@@ -2586,6 +2584,7 @@ private fun ManageScreen(
                 }
             }
         } else {
+            val hostRoutes by HostRouteResolver.routes.collectAsState()
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 hosts.forEach { host ->
                     val selected = visibleHostId == host.id
@@ -2597,7 +2596,7 @@ private fun ManageScreen(
                             Text(host.icon, fontSize = 20.sp, modifier = Modifier.padding(horizontal = 5.dp))
                             Column(Modifier.weight(1f).padding(start = 8.dp)) {
                                 Text(host.name, color = White, fontWeight = FontWeight.Medium, fontSize = 13.sp)
-                                val route = HostRouteResolver.getRoute(host.id)
+                                val route = hostRoutes[host.id]
                                 val hasLan = host.lanAddress.isNotBlank()
                                 val hasExt = host.externalAddress.isNotBlank()
                                 val isSingle = !hasLan || !hasExt || host.lanAddress.trim() == host.externalAddress.trim()
