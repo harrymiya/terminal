@@ -334,6 +334,32 @@ object JarvisToolRegistry {
                 }
             }
         })
+
+        // 16. chat_with_agent
+        register(object : JarvisMcpTool {
+            override val definition = McpToolDefinition(
+                name = "chat_with_agent",
+                description = "向指定 AI 开发者 (如 Claude/Gemini) 发送自然语言对话并监听其答复。",
+                inputSchema = JSONObject().apply {
+                    put("type", "object")
+                    put("properties", JSONObject().apply {
+                        put("message", JSONObject().put("type", "string").put("description", "发送给开发者的问题或指令"))
+                        put("agent_name", JSONObject().put("type", "string").put("description", "目标开发者名称 (如 Claude / Gemini)，省略则为当前活跃终端"))
+                    })
+                    put("required", JSONArray().put("message"))
+                }
+            )
+            override suspend fun execute(arguments: JSONObject): McpToolResult {
+                val msg = arguments.optString("message", "")
+                val agent = arguments.optString("agent_name").takeIf { it.isNotBlank() }
+                val sent = sendTextHandler?.invoke(msg, null, true) ?: false
+                return if (sent) {
+                    McpToolResult(content = "Message sent to agent: $msg", voiceSummary = "已向开发者发送指令：$msg")
+                } else {
+                    McpToolResult(isError = true, content = "Failed to send to agent", voiceSummary = "向开发者发送失败。")
+                }
+            }
+        })
     }
 
     fun register(tool: JarvisMcpTool) {

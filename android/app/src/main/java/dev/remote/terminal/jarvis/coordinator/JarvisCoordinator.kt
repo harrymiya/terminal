@@ -196,6 +196,12 @@ object JarvisCoordinator : VoicePerceptorCallback {
                     }
                 }
             }
+            is JarvisAction.ChatWithDeveloper -> {
+                updateState(JarvisState.EXECUTING)
+                scope.launch {
+                    handleChatWithDeveloper(action)
+                }
+            }
             is JarvisAction.ErrorAction -> {
                 earconManager.playAlertChime()
                 speakWithState(action.message)
@@ -213,6 +219,87 @@ object JarvisCoordinator : VoicePerceptorCallback {
                 updateState(JarvisState.STANDBY)
             }
         }
+    }
+
+    /**
+     * 借力开发者的智能：将用户的自然语言问题发送给终端运行的 AI 开发者 (如 Claude/Gemini/Codex)，
+     * 并异步监听开发者的输出，整理后通过蓝牙耳机耳语复命。
+     */
+    private suspend fun handleChatWithDeveloper(action: JarvisAction.ChatWithDeveloper) {
+        val appState = dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.appStateProvider?.invoke()
+        val sessions = appState?.optJSONArray("sessions")
+        var targetSessionId: String? = null
+        var targetAgentName = action.agentName ?: "当前开发者"
+
+        if (action.agentName != null && sessions != null) {
+            val query = action.agentName.trim().lowercase()
+            for (i in 0 until sessions.length()) {
+                val s = sessions.getJSONObject(i)
+                val agentName = s.optString("agent_name", "").lowercase()
+                val dispName = s.optString("display_name", "").lowercase()
+                val dirName = s.optString("directory_name", "").lowercase()
+                if (agentName.contains(query) || dispName.contains(query) || dirName.contains(query)) {
+                    targetSessionId = s.optString("id")
+                    targetAgentName = s.optString("agent_name", action.agentName)
+                    dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.focusTerminalHandler?.invoke(targetSessionId, i)
+                    break
+                }
+            }
+        }
+
+        val ack = action.voiceReply ?: "好的先生，正在与 $targetAgentName 沟通。"
+        speakWithState(ack)
+        earconManager.playThinkingChime()
+
+        val baseline = dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.readScreenHandler?.invoke(targetSessionId, 10).orEmpty()
+        val sent = dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.sendTextHandler?.invoke(action.message, targetSessionId, true)
+            ?: (activeTerminalController?.let { it.send("${action.message}\n"); true } ?: false)
+
+        if (!sent) {
+            earconManager.playAlertChime()
+            speakWithState("先生，未能连接到目标开发者的终端会话。")
+            return
+        }
+
+        var replyFound = false
+        var lastRead = baseline
+        var unchangedCount = 0
+        val maxWaitSeconds = 18
+
+        for (sec in 1..maxWaitSeconds) {
+            kotlinx.coroutines.delay(1000)
+            val currentTail = dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.readScreenHandler?.invoke(targetSessionId, 10).orEmpty()
+            if (currentTail != lastRead && currentTail.isNotBlank()) {
+                lastRead = currentTail
+                unchangedCount = 0
+            } else if (lastRead != baseline && lastRead.isNotBlank()) {
+                unchangedCount++
+                if (unchangedCount >= 2) {
+                    replyFound = true
+                    break
+                }
+            }
+        }
+
+        if (replyFound) {
+            earconManager.playActionSuccessChime()
+            val cleanReply = cleanTerminalOutput(lastRead)
+            speakWithState("先生，$targetAgentName 回复：$cleanReply")
+        } else if (lastRead != baseline && lastRead.isNotBlank()) {
+            val cleanReply = cleanTerminalOutput(lastRead)
+            speakWithState("先生，$targetAgentName 最新输出：$cleanReply")
+        } else {
+            speakWithState("先生，$targetAgentName 仍在处理中。稍后有需要授权或任务完成时，我会向您汇报。")
+        }
+    }
+
+    private fun cleanTerminalOutput(raw: String): String {
+        val noAnsi = raw.replace(Regex("\u001B\\[[;?0-9]*[a-zA-Z]"), "")
+            .replace(Regex("[\r\u0000-\u0008\u000B\u000C\u000E-\u001F]"), "")
+        val lines = noAnsi.lines().map { it.trim() }.filter { it.isNotBlank() }
+        val usefulLines = lines.filterNot { it.startsWith("$") || it.startsWith(">") || it.startsWith("❯") }
+        val summary = (if (usefulLines.isNotEmpty()) usefulLines.takeLast(3) else lines.takeLast(2)).joinToString("，")
+        return summary.take(160).ifBlank { "已执行完成。" }
     }
 
     /**

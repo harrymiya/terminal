@@ -72,6 +72,10 @@ class JarvisIntentRouter(
             """(?i)(?:系统状态|应用状态|全部状态|整体状态)"""
         )
 
+        private val TalkToAgentRegex = Regex(
+            """(?i)^(?:跟|向|让|对|问一下|问问|告诉|让开发者)\s*([a-zA-Z0-9_\u4e00-\u9fa5\-]+)?\s*(?:说|聊|问|查|做|执行|看一下|分析下|排查下)?[\s:：,，]*(.+)"""
+        )
+
         private val SwitchHostRegex = Regex(
             """(?i)(?:切换到主机|换到主机|切到主机|换主机)\s*([a-zA-Z0-9_\u4e00-\u9fa5\-\.]+)"""
         )
@@ -157,6 +161,22 @@ class JarvisIntentRouter(
             return@withContext JarvisAction.ExecuteTool("select_host", JSONObject().put("host_name", targetHost))
         }
 
+        val talkMatch = TalkToAgentRegex.find(cleanText)
+        if (talkMatch != null) {
+            val rawAgent = talkMatch.groupValues[1].trim()
+            val prompt = talkMatch.groupValues[2].trim()
+            if (prompt.isNotBlank()) {
+                val isGeneric = rawAgent.isBlank() || rawAgent in listOf("开发者", "当前开发者", "终端", "agent", "助手")
+                val targetAgent = if (isGeneric) null else rawAgent
+                Log.i(TAG, "Tier-1 matched: Talk to agent [$targetAgent]: \"$prompt\"")
+                return@withContext JarvisAction.ChatWithDeveloper(
+                    agentName = targetAgent,
+                    message = prompt,
+                    voiceReply = "好的先生，正在与${targetAgent ?: "当前开发者"}沟通。"
+                )
+            }
+        }
+
         if (StatusQueryRegex.containsMatchIn(cleanText)) {
             Log.i(TAG, "Tier-1 matched: Status Query (0 Token)")
             val summary = generateLocalStatusSummary(context)
@@ -187,9 +207,9 @@ class JarvisIntentRouter(
         val serverUrl = syncUrlProvider().trimEnd('/')
         val token = syncTokenProvider()
         if (serverUrl.isBlank()) {
-            // 没有配置中枢同步服务器时，默认兜底直接将口语转化为终端回车命令
-            Log.w(TAG, "No sync server configured for LLM parsing, injecting speech as command")
-            return@withContext JarvisAction.InjectKeystroke("$userPrompt\n", "好的先生，已将任务下发到当前终端。")
+            // 没有配置中枢同步服务器时，默认直接借力当前终端正在运行的 AI 开发者
+            Log.w(TAG, "No sync server configured for LLM parsing, routing as ChatWithDeveloper")
+            return@withContext JarvisAction.ChatWithDeveloper(null, userPrompt, "好的先生，已将任务交由当前开发者处理。")
         }
 
         try {
