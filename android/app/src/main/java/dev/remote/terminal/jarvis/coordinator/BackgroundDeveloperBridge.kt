@@ -43,8 +43,13 @@ object BackgroundDeveloperBridge {
 
     private const val TAG = "JarvisDevBridge"
     private const val EXEC_TIMEOUT_MS = 60_000L
-    private val MCP_TAG_REGEX = Regex("""\[\[RDT_MCP:(\{.*?\})\]\]""", setOf(RegexOption.DOT_MATCHES_ALL))
-    private val READ_TOOLS = setOf("get_app_state", "get_device_state", "read_terminal_screen", "get_ssh_public_key")
+    private val READ_TOOLS = setOf(
+        "get_app_state",
+        "list_open_workspaces",
+        "get_device_state",
+        "read_terminal_screen",
+        "get_ssh_public_key"
+    )
 
     private data class CachedSession(
         val session: Session,
@@ -123,9 +128,7 @@ object BackgroundDeveloperBridge {
             val effectiveCmd = resolveEffectiveCommand(agent.command, model)
             val cached = getOrOpenSession(host, store)
             val convKey = buildWorkerKey(host.id, effectiveCmd, directory, model, effort)
-            val appStateJson = withContext(Dispatchers.Main) {
-                runCatching { JarvisToolRegistry.appStateProvider?.invoke()?.toString() }.getOrNull()
-            }.orEmpty().take(1600)
+            val appStateJson = buildCompactAppStateSnapshot()
 
             val firstReply = invokeDeveloperTurn(
                 session = cached.session,
@@ -384,6 +387,155 @@ object BackgroundDeveloperBridge {
         return parsed
     }
 
+    private data class ParsedMcpCall(
+        val startIndex: Int,
+        val endIndex: Int,
+        val toolName: String,
+        val arguments: JSONObject
+    )
+
+    /**
+     * 括号平衡解析模型输出中的 MCP 指令（支持 `[[RDT_MCP:{...}]]`、空格换行、嵌套 JSON 与字符串内大括号）。
+     */
+    private fun extractMcpCalls(rawReply: String): List<ParsedMcpCall> {
+        val results = mutableListOf<ParsedMcpCall>()
+        val marker = "RDT_MCP:"
+        var cursor = 0
+        while (cursor < rawReply.length) {
+            val idx = rawReply.indexOf(marker, cursor, ignoreCase = true)
+            if (idx < 0) break
+
+            val tagStart = if (idx >= 2 && rawReply.substring(idx - 2, idx) == "[[") idx - 2 else idx
+            var braceStart = idx + marker.length
+            while (braceStart < rawReply.length && rawReply[braceStart].isWhitespace()) braceStart++
+            if (braceStart >= rawReply.length || rawReply[braceStart] != '{') {
+                cursor = idx + marker.length
+                continue
+            }
+
+            var depth = 0
+            var inString = false
+            var escaped = false
+            var braceEnd = -1
+            for (i in braceStart until rawReply.length) {
+                val ch = rawReply[i]
+                if (escaped) {
+                    escaped = false
+                    continue
+                }
+                if (ch == '\\' && inString) {
+                    escaped = true
+                    continue
+                }
+                if (ch == '"') {
+                    inString = !inString
+                    continue
+                }
+                if (!inString) {
+                    if (ch == '{') depth++
+                    else if (ch == '}') {
+                        depth--
+                        if (depth == 0) {
+                            braceEnd = i
+                            break
+                        }
+                    }
+                }
+            }
+
+            if (braceEnd < 0) {
+                cursor = braceStart + 1
+                continue
+            }
+
+            val jsonStr = rawReply.substring(braceStart, braceEnd + 1)
+            var tagEnd = braceEnd + 1
+            while (tagEnd < rawReply.length && rawReply[tagEnd].isWhitespace()) tagEnd++
+            if (tagEnd + 1 < rawReply.length && rawReply[tagEnd] == ']' && rawReply[tagEnd + 1] == ']') {
+                tagEnd += 2
+            } else {
+                tagEnd = braceEnd + 1
+            }
+
+            val callObj = runCatching { JSONObject(jsonStr) }.getOrNull()
+            val toolName = callObj?.optString("tool")?.trim().orEmpty()
+            if (toolName.isNotBlank()) {
+                val args = callObj?.optJSONObject("arguments") ?: JSONObject()
+                results.add(ParsedMcpCall(tagStart, tagEnd, toolName, args))
+            }
+            cursor = tagEnd
+        }
+        return results
+    }
+
+    private fun stripMcpTags(rawReply: String, calls: List<ParsedMcpCall>): String {
+        if (calls.isEmpty()) return rawReply
+        val sb = StringBuilder(rawReply.length)
+        var pos = 0
+        for (call in calls) {
+            if (call.startIndex > pos) {
+                sb.append(rawReply, pos, call.startIndex)
+            }
+            pos = maxOf(pos, call.endIndex)
+        }
+        if (pos < rawReply.length) {
+            sb.append(rawReply, pos, rawReply.length)
+        }
+        return sb.toString()
+    }
+
+    private suspend fun buildCompactAppStateSnapshot(): String {
+        val state = withContext(Dispatchers.Main) {
+            runCatching { JarvisToolRegistry.appStateProvider?.invoke() }.getOrNull()
+        } ?: return ""
+
+        val compact = JSONObject()
+        compact.put("screen", state.optString("current_screen", ""))
+        compact.put("tiled_mode", state.optBoolean("tiled_mode", false))
+        compact.put("active_page", state.optInt("active_page", 0))
+        compact.put("auto_confirm", state.optBoolean("auto_confirm_enabled", true))
+
+        // 优先完整保留所有已打开的工作区终端实例（避免截断导致看不到 open_sessions）
+        val openSessions = state.optJSONArray("sessions") ?: JSONArray()
+        val slimSessions = JSONArray()
+        for (i in 0 until openSessions.length()) {
+            val s = openSessions.optJSONObject(i) ?: continue
+            slimSessions.put(JSONObject().apply {
+                put("index", s.optInt("index", i))
+                put("id", s.optString("id"))
+                put("workspace", s.optString("workspace").ifBlank { s.optString("directory_name") })
+                put("host", s.optString("host").ifBlank { s.optString("host_name") })
+                put("agent", s.optString("agent").ifBlank { s.optString("agent_name") })
+                put("connected", s.optBoolean("connected"))
+                put("focused", s.optBoolean("focused"))
+                put("needs_action", s.optBoolean("needs_action"))
+                val lastLine = s.optString("last_line")
+                if (lastLine.isNotBlank()) put("last_line", lastLine.take(60))
+            })
+        }
+        compact.put("open_sessions", slimSessions)
+
+        val hosts = state.optJSONArray("hosts") ?: JSONArray()
+        val slimHosts = JSONArray()
+        for (i in 0 until hosts.length()) {
+            val h = hosts.optJSONObject(i) ?: continue
+            val wsArr = h.optJSONArray("workspaces") ?: JSONArray()
+            val slimWs = JSONArray()
+            for (j in 0 until minOf(wsArr.length(), 10)) {
+                slimWs.put(wsArr.opt(j))
+            }
+            slimHosts.put(JSONObject().apply {
+                put("name", h.optString("name"))
+                put("workspaces", slimWs)
+            })
+        }
+        compact.put("hosts", slimHosts)
+
+        val agents = state.optJSONArray("agents") ?: JSONArray()
+        compact.put("agents", agents)
+        return compact.toString().take(3200)
+    }
+
     private data class McpBatchOutcome(
         val toolLogs: List<String>,
         val reports: List<String>,
@@ -392,7 +544,7 @@ object BackgroundDeveloperBridge {
     )
 
     private suspend fun executeMcpCalls(
-        matches: List<MatchResult>,
+        calls: List<ParsedMcpCall>,
         allowReadFollowUp: Boolean
     ): McpBatchOutcome {
         val toolLogs = mutableListOf<String>()
@@ -400,31 +552,25 @@ object BackgroundDeveloperBridge {
         var hasError = false
         var needsFollowUp = false
 
-        for (match in matches) {
-            val jsonStr = match.groupValues[1].trim()
-            val callObj = runCatching { JSONObject(jsonStr) }.getOrNull() ?: continue
-            val toolName = callObj.optString("tool").trim()
-            if (toolName.isBlank()) continue
-            val args = callObj.optJSONObject("arguments") ?: JSONObject()
-
-            Log.i(TAG, "Developer requested Remote Dev MCP tool: $toolName args=$args")
+        for (call in calls) {
+            Log.i(TAG, "Developer requested Remote Dev MCP tool: ${call.toolName} args=${call.arguments}")
             val result = withContext(Dispatchers.Main) {
-                JarvisToolRegistry.executeTool(toolName, args)
+                JarvisToolRegistry.executeTool(call.toolName, call.arguments)
             }
-            toolLogs.add("[$toolName] isError=${result.isError} content=${result.content.take(1200)}")
+            toolLogs.add("[${call.toolName}] isError=${result.isError} content=${result.content.take(1200)}")
 
             if (result.isError) {
                 hasError = true
                 val errSummary = result.voiceSummary?.takeIf { it.isNotBlank() }
-                    ?: "执行 ${toolName} 失败：${result.content.take(60)}"
+                    ?: "执行 ${call.toolName} 失败：${result.content.take(60)}"
                 reports.add(errSummary)
             } else {
                 val okSummary = result.voiceSummary?.takeIf { it.isNotBlank() }
-                    ?: "已完成 ${toolName} 操作。"
-                if (toolName !in READ_TOOLS && toolName != "speak_to_user") {
+                    ?: "已完成 ${call.toolName} 操作。"
+                if (call.toolName !in READ_TOOLS && call.toolName != "speak_to_user") {
                     reports.add(okSummary)
                 }
-                if (allowReadFollowUp && toolName in READ_TOOLS) {
+                if (allowReadFollowUp && call.toolName in READ_TOOLS) {
                     needsFollowUp = true
                 }
             }
@@ -447,13 +593,13 @@ object BackgroundDeveloperBridge {
         model: String,
         effort: String
     ): String {
-        val matches = MCP_TAG_REGEX.findAll(rawReply).toList()
-        if (matches.isEmpty()) {
+        val calls = extractMcpCalls(rawReply)
+        if (calls.isEmpty()) {
             return sanitizeForSpeech(rawReply)
         }
 
-        val firstBatch = executeMcpCalls(matches, allowReadFollowUp = true)
-        val visibleWithoutTags = sanitizeForSpeech(rawReply.replace(MCP_TAG_REGEX, ""))
+        val firstBatch = executeMcpCalls(calls, allowReadFollowUp = true)
+        val visibleWithoutTags = sanitizeForSpeech(stripMcpTags(rawReply, calls))
 
         if (firstBatch.needsFollowUp && firstBatch.toolLogs.isNotEmpty()) {
             val followPrompt = "这是刚调用手机端 MCP 返回的实际结果，请直接用1到3句精简中文口语向用户汇报检查结果或已完成的操作，不要输出思维链、Markdown 或 RDT_MCP 标签：\n" +
@@ -470,13 +616,13 @@ object BackgroundDeveloperBridge {
                 isMcpFollowUp = true
             ).getOrNull()
             if (!followReply.isNullOrBlank()) {
-                val secondMatches = MCP_TAG_REGEX.findAll(followReply).toList()
-                val secondBatch = if (secondMatches.isNotEmpty()) {
-                    executeMcpCalls(secondMatches, allowReadFollowUp = false)
+                val secondCalls = extractMcpCalls(followReply)
+                val secondBatch = if (secondCalls.isNotEmpty()) {
+                    executeMcpCalls(secondCalls, allowReadFollowUp = false)
                 } else {
                     null
                 }
-                val cleanFollow = sanitizeForSpeech(followReply.replace(MCP_TAG_REGEX, ""))
+                val cleanFollow = sanitizeForSpeech(stripMcpTags(followReply, secondCalls))
                 val extraReports = (firstBatch.reports + secondBatch?.reports.orEmpty()).distinct()
                 if (secondBatch?.hasError == true || firstBatch.hasError) {
                     return extraReports.joinToString(" ").ifBlank { cleanFollow }
@@ -497,19 +643,17 @@ object BackgroundDeveloperBridge {
     }
 
     private fun buildPromptWithMcp(userPrompt: String, appStateSnapshot: String, compact: Boolean): String {
+        val mcpManual = JarvisToolRegistry.buildMcpProtocolManual(compact = compact)
         if (compact) {
-            val stateHint = if (appStateSnapshot.isNotBlank()) "最新App状态：${appStateSnapshot.take(600)}\n" else ""
-            return "${stateHint}请用1到3句精简中文口语向用户汇报结果（无思维链、无Markdown）；如需操作手机端请末尾附 [[RDT_MCP:...]]：\n用户说：$userPrompt"
+            val stateHint = if (appStateSnapshot.isNotBlank()) "最新App与工作区实例状态：$appStateSnapshot\n" else ""
+            return """$mcpManual
+${stateHint}要求：如需操作手机/工作区请附 [[RDT_MCP:{"tool":"...","arguments":{...}}]]，并用1到3句精简中文口语汇报操作结果。
+用户说：$userPrompt"""
         }
-        val stateLine = if (appStateSnapshot.isNotBlank()) "当前手机端状态快照：$appStateSnapshot\n" else ""
-        return """你是用户的 AI 开发者助手，同时拥有手机端 Remote Dev App 的全部 MCP 操作权限（可替用户做界面与终端一切操作）。
-可用 MCP 工具（需要执行操作时，在回复末尾附 [[RDT_MCP:{"tool":"工具名","arguments":{...}}]]）：
-- get_app_state() / get_device_state() / read_terminal_screen(session_id?, lines?)
-- open_terminal(host_id?, workspace_path?, workspace_name?, agent_command?) / focus_terminal(session_id?, session_index?) / close_terminal(session_id?, session_index?) / reconnect_terminal(session_id?)
-- send_terminal_text(text, session_id?, press_enter?) / send_terminal_keys(keys, session_id?)
-- select_host(host_id?, host_name?, host_index?) / select_agent(agent_id?, agent_name?) / set_view_mode(tiled)
-- add_workspace(path, name?, host_id?) / delete_workspace(path, host_id?) / trigger_sync() / navigate_screen(screen) / vibrate_phone(duration_ms?)
-${stateLine}规则：直接用1到3句精简中文口语回答并清楚汇报已完成的操作与结果（不要思维链或Markdown代码块）。
+        val stateLine = if (appStateSnapshot.isNotBlank()) "当前手机端与已打开工作区实例状态：$appStateSnapshot\n" else ""
+        return """你是用户的 AI 开发者助手，同时拥有手机端 Remote Dev App 的全部 MCP 控制权限，可以自由操作所有工作区实例与安卓端界面。
+$mcpManual
+${stateLine}规则：直接用1到3句精简中文口语回答，并清楚汇报已完成的操作与结果（不要思维链或Markdown代码块）。
 用户说：$userPrompt"""
     }
 

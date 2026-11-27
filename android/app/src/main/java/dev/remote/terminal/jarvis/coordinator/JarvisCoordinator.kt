@@ -539,14 +539,23 @@ object JarvisCoordinator : VoicePerceptorCallback {
         }
 
         // 兜底：若用户尚未在设置中配置可用主机/开发者，尝试透传到当前打开的终端会话
-        val baseline = dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.readScreenHandler?.invoke(null, 10).orEmpty()
-        val sent = dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.sendTextHandler?.invoke(action.message, null, true)
-            ?: (activeTerminalController?.let {
-                it.send(action.message.trimEnd('\r', '\n'))
-                kotlinx.coroutines.delay(80)
-                it.send("\r")
-                true
-            } ?: false)
+        val baseline = kotlinx.coroutines.withContext(Dispatchers.Main) {
+            dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.executeTool(
+                "read_terminal_screen",
+                org.json.JSONObject().put("lines", 10)
+            ).content
+        }
+        val sent = kotlinx.coroutines.withContext(Dispatchers.Main) {
+            !dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.executeTool(
+                "send_terminal_text",
+                org.json.JSONObject().put("text", action.message).put("press_enter", true)
+            ).isError
+        } || (activeTerminalController?.let {
+            it.send(action.message.trimEnd('\r', '\n'))
+            kotlinx.coroutines.delay(120)
+            it.send("\r")
+            true
+        } ?: false)
 
         if (!sent) {
             earconManager.playAlertChime()
@@ -559,7 +568,12 @@ object JarvisCoordinator : VoicePerceptorCallback {
         var unchangedCount = 0
         for (sec in 1..15) {
             kotlinx.coroutines.delay(1000)
-            val currentTail = dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.readScreenHandler?.invoke(null, 10).orEmpty()
+            val currentTail = kotlinx.coroutines.withContext(Dispatchers.Main) {
+                dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.executeTool(
+                    "read_terminal_screen",
+                    org.json.JSONObject().put("lines", 10)
+                ).content
+            }
             if (currentTail != lastRead && currentTail.isNotBlank()) {
                 lastRead = currentTail
                 unchangedCount = 0

@@ -34,11 +34,11 @@ class JarvisIntentRouter(
         )
 
         private val SwitchWorkspaceRegex = Regex(
-            """(?i)(?:切换到|切到|换到|看下|查看|进入|打开)\s*([a-zA-Z0-9_\u4e00-\u9fa5\-\.]+)"""
+            """(?i)^\s*(?:切换到|切到|换到|打开工作区|切到工作区)\s*([a-zA-Z0-9_\u4e00-\u9fa5\-\.]+)\s*[。！!]*$"""
         )
 
         private val StatusQueryRegex = Regex(
-            """(?i)(?:什么情况|进度|好了吗|完成了吗|状态|当前|情况怎么样|status)"""
+            """(?i)^\s*(?:现在|目前)?(?:什么情况|进度如何|进度怎么样|好了吗|完成了吗|当前状态|状态怎么样|status)[?？!！.。]*$"""
         )
 
         private val ReadScreenRegex = Regex(
@@ -216,14 +216,15 @@ class JarvisIntentRouter(
         if (talkMatch != null) {
             val rawAgent = talkMatch.groupValues[1].trim()
             val prompt = talkMatch.groupValues[2].trim()
-            if (prompt.isNotBlank()) {
-                val isGeneric = rawAgent.isBlank() || rawAgent in listOf("开发者", "当前开发者", "终端", "agent", "助手")
-                val targetAgent = if (isGeneric) null else rawAgent
-                Log.i(TAG, "Tier-1 matched: Talk to agent [$targetAgent]: \"$prompt\"")
+            val matchesConfiguredAgent = rawAgent.isNotBlank() && context.agents.any {
+                it.equals(rawAgent, ignoreCase = true) || it.contains(rawAgent, ignoreCase = true)
+            }
+            if (matchesConfiguredAgent && prompt.isNotBlank()) {
+                Log.i(TAG, "Tier-1 matched: Talk to agent [$rawAgent]: \"$prompt\"")
                 return@withContext JarvisAction.ChatWithDeveloper(
-                    agentName = targetAgent,
+                    agentName = rawAgent,
                     message = prompt,
-                    voiceReply = "好的先生，正在与${targetAgent ?: "当前开发者"}沟通。"
+                    voiceReply = "好的先生，正在与${rawAgent}沟通。"
                 )
             }
         }
@@ -275,15 +276,20 @@ class JarvisIntentRouter(
                 conn.setRequestProperty("Authorization", "Bearer $token")
             }
 
+            val appState = runCatching { dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.appStateProvider?.invoke() }.getOrNull()
             val payload = JSONObject().apply {
                 put("voice_input", userPrompt)
                 put("context", JSONObject().apply {
                     put("current_workspace", context.currentWorkspaceName ?: "")
                     put("workspaces", org.json.JSONArray(context.workspaces))
                     put("agents", org.json.JSONArray(context.agents))
+                    if (appState != null) {
+                        put("app_state", appState)
+                    }
                 })
-                // 提供 MCP 工具名称列表，供大模型进行 Function Calling / Tool Calling
-                put("available_tools", org.json.JSONArray(dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.getAllDefinitions().map { it.name }))
+                // 将完整的 Android MCP 协议能力、操作方法说明与结构化 Schema 作为上下文发送给调度端
+                put("mcp_protocol_manual", dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.buildMcpProtocolManual(compact = false))
+                put("available_tools", dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.buildMcpToolsSchemaJson())
             }
 
             conn.outputStream.use { os ->
