@@ -1542,6 +1542,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 org.json.JSONObject().apply {
                     put("current_screen", route.name.lowercase())
                     put("selected_host_id", selectedHostId)
+                    put("selected_host_name", hosts.firstOrNull { it.id == selectedHostId }?.name.orEmpty())
                     put("selected_agent_id", selectedAgentId)
                     put("tiled_mode", tiledMode)
                     put("active_page", activePage)
@@ -1568,16 +1569,68 @@ private fun RemoteTerminalApp(store: LocalStore) {
                                 put("status", s.status)
                                 put("connected", s.isSessionConnected)
                                 put("focused", idx == activePage && route == AppRoute.TERMINAL)
+                                put("minimized", s.isMinimized)
+                                put("is_streaming", s.isStreaming)
+                                put("auto_enter_pending", s.autoEnterDeadline != null)
+                                put("pending_host_key", s.hostFingerprint != null)
                                 put("needs_action", s.needsAction)
+                                quotaKey(s.task.host, s.task.agent.command)?.let { qKey ->
+                                    quotas[qKey]?.let { qList ->
+                                        put("quotas", org.json.JSONArray().apply {
+                                            qList.forEach { q ->
+                                                put(org.json.JSONObject().apply {
+                                                    put("minutes", q.minutes)
+                                                    put("remaining_percent", q.remainingPercent)
+                                                })
+                                            }
+                                        })
+                                    }
+                                }
                                 if (tailLine.isNotBlank()) put("last_line", tailLine.take(60))
                             })
                         }
+                    })
+                    val attachedIds = sessions.map { it.task.id.replace("-", "") }.toSet()
+                    put("shared_tasks", org.json.JSONArray().apply {
+                        startupShared.forEach { (h, item) ->
+                            val sid = item.optString("id")
+                            if (sid.replace("-", "") !in attachedIds) {
+                                put(org.json.JSONObject().apply {
+                                    put("id", sid)
+                                    put("host", h.name)
+                                    put("host_id", h.id)
+                                    put("workspace", item.optString("directory_name"))
+                                    put("path", item.optString("directory_path"))
+                                    put("agent", item.optString("agent_name"))
+                                    put("agent_command", item.optString("agent_command"))
+                                    put("display_name", item.optString("display_name"))
+                                    put("status", item.optString("status"))
+                                })
+                            }
+                        }
+                    })
+                    put("settings", org.json.JSONObject().apply {
+                        put("device_layout_mode", deviceLayoutMode)
+                        put("tiled_mode", tiledMode)
+                        put("auto_confirm_enabled", autoEnterEnabled)
+                        put("auto_confirm_delay", autoEnterDelaySeconds)
+                        put("offline_mode", offlineMode)
+                        put("auto_sync_enabled", autoSyncEnabled)
+                        put("sync_interval", syncIntervalSeconds)
+                        put("quota_interval", quotaIntervalSeconds)
+                        put("jarvis_model", store.loadJarvisModel())
+                        put("jarvis_effort", store.loadJarvisEffort())
+                        put("jarvis_wake_word", store.loadJarvisWakeWord())
+                        put("jarvis_notify_finished", store.loadJarvisNotifyFinished())
+                        put("jarvis_bluetooth_sco", store.loadJarvisBluetoothSco())
                     })
                     put("hosts", org.json.JSONArray().apply {
                         hosts.forEach { h ->
                             put(org.json.JSONObject().apply {
                                 put("id", h.id)
                                 put("name", h.name)
+                                put("lan_address", h.lanAddress)
+                                put("external_address", h.externalAddress)
                                 put("workspaces", org.json.JSONArray().apply {
                                     h.directories.forEach { d ->
                                         put("${d.name}(${d.path})")
@@ -1602,19 +1655,21 @@ private fun RemoteTerminalApp(store: LocalStore) {
                     else -> null
                 }
                 if (target != null) {
-                    selectedHostId = target.id
+                    selectHost(target)
                     true
                 } else false
             }
 
             dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.selectAgentHandler = { id, name ->
+                val activeAgents = hostAgents(hosts.firstOrNull { it.id == selectedHostId }, agents)
                 val target = when {
-                    id != null -> agents.firstOrNull { it.id == id }
-                    name != null -> agents.firstOrNull { it.name.equals(name, true) || it.name.contains(name, true) || it.command.contains(name, true) }
+                    id != null -> activeAgents.firstOrNull { it.id == id } ?: agents.firstOrNull { it.id == id }
+                    name != null -> activeAgents.firstOrNull { it.name.equals(name, true) || it.name.contains(name, true) || it.command.contains(name, true) }
+                        ?: agents.firstOrNull { it.name.equals(name, true) || it.name.contains(name, true) || it.command.contains(name, true) }
                     else -> null
                 }
                 if (target != null) {
-                    selectedAgentId = target.id
+                    selectAgent(target)
                     true
                 } else false
             }
@@ -1923,31 +1978,77 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 }
             }
 
-            dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.sendKeysHandler = { keys, selector ->
-                val target = resolveSessionMatch(selector)
+            suspend fun resolveOrAttachShared(selector: dev.remote.terminal.jarvis.mcp.SessionSelector, waitMs: Long = 450L): TerminalSessionState? {
+                resolveSessionMatch(selector)?.let { return it }
+                if (!selector.hasAnyFilter()) return null
+                val wsQuery = selector.workspacePath ?: selector.workspaceName ?: selector.query ?: selector.sessionId ?: selector.agentName
+                val sharedMatch = startupShared.firstOrNull { (_, item) ->
+                    val sid = item.optString("id")
+                    val dName = item.optString("directory_name")
+                    val dPath = item.optString("directory_path")
+                    val disp = item.optString("display_name")
+                    val agName = item.optString("agent_name")
+                    wsQuery != null && (
+                        sid.equals(wsQuery, true) ||
+                            sid.replace("-", "").startsWith(wsQuery.replace("-", ""), true) ||
+                            dName.contains(wsQuery, true) ||
+                            dPath.contains(wsQuery, true) ||
+                            disp.contains(wsQuery, true) ||
+                            agName.contains(wsQuery, true)
+                        )
+                } ?: return null
+                openSharedSession(sharedMatch.first, sharedMatch.second, activate = false)
+                if (waitMs > 0) kotlinx.coroutines.delay(waitMs)
+                return resolveSessionMatch(selector)
+            }
+
+            dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.sendKeysHandler = { keys, selector, sync, waitMs ->
+                val target = resolveOrAttachShared(selector)
                 val ctrl = target?.let { dev.remote.terminal.ssh.TerminalConnectionRegistry.get(it.task.id) ?: it.controller }
                 if (target != null && ctrl != null) {
-                    keys.forEach { keyName ->
-                        val seq = dev.remote.terminal.jarvis.mcp.McpKeyMap.resolveKey(keyName) ?: keyName
-                        ctrl.send(seq)
+                    val sentSeqs = mutableListOf<String>()
+                    withContext(Dispatchers.IO) {
+                        keys.forEachIndexed { idx, keyName ->
+                            val seq = dev.remote.terminal.jarvis.mcp.McpKeyMap.resolveKey(keyName) ?: keyName
+                            ctrl.send(seq)
+                            sentSeqs.add(keyName)
+                            if (idx + 1 < keys.size) kotlinx.coroutines.delay(30L)
+                        }
                     }
                     target.clearAttention()
+                    val payload = org.json.JSONObject().apply {
+                        put("session_id", target.task.id)
+                        put("workspace", target.task.directory.name)
+                        put("keys", org.json.JSONArray(sentSeqs))
+                        if (sync) {
+                            withContext(Dispatchers.IO) {
+                                kotlinx.coroutines.delay(waitMs.coerceIn(100L, 10_000L))
+                            }
+                            val tail = target.buffer.visibleTextTail(30)
+                                .lines()
+                                .filter { it.isNotBlank() }
+                                .takeLast(30)
+                                .joinToString("\n")
+                            put("screen_tail", tail)
+                        }
+                    }
                     dev.remote.terminal.jarvis.mcp.ToolOpResult(
-                        true,
-                        "Keys $keys sent to ${target.task.directory.name}",
-                        "已向 ${target.task.directory.name} 发送按键。"
+                        ok = true,
+                        detail = payload.toString(),
+                        voiceSummary = "已向 ${target.task.directory.name} 发送按键 $keys。",
+                        expectsFollowUp = sync
                     )
                 } else {
                     dev.remote.terminal.jarvis.mcp.ToolOpResult(
-                        false,
-                        "Target session not found. Open sessions: [${openSessionsHint()}]",
-                        "未找到目标终端会话，按键发送失败。"
+                        ok = false,
+                        detail = "Target session not found. Open sessions: [${openSessionsHint()}]",
+                        voiceSummary = "未找到目标终端会话，按键发送失败。"
                     )
                 }
             }
 
             dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.readScreenHandler = { selector, lines ->
-                val target = resolveSessionMatch(selector)
+                val target = resolveOrAttachShared(selector, waitMs = 550L)
                 if (target == null) {
                     false to "未找到对应工作区会话。当前已打开：[${openSessionsHint()}]"
                 } else {
@@ -2039,6 +2140,666 @@ private fun RemoteTerminalApp(store: LocalStore) {
                     route = nextRoute
                     true
                 } else false
+            }
+
+            dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.taskStatusHandler = { selector, lines ->
+                fun buildSessionJson(idx: Int, s: TerminalSessionState): org.json.JSONObject {
+                    val tail = s.buffer.visibleTextTail(lines)
+                        .lines()
+                        .filter { it.isNotBlank() }
+                        .takeLast(lines)
+                        .joinToString("\n")
+                    return org.json.JSONObject().apply {
+                        put("index", idx)
+                        put("id", s.task.id)
+                        put("title", sessionDisplayLabel(s.task))
+                        put("workspace", s.task.directory.name)
+                        put("path", s.task.directory.path)
+                        put("host", s.task.host.name)
+                        put("agent", s.task.agent.name)
+                        put("agent_command", s.task.agent.command)
+                        put("status", s.status)
+                        put("connected", s.isSessionConnected)
+                        put("is_streaming", s.isStreaming)
+                        put("needs_action", s.needsAction)
+                        put("auto_enter_pending", s.autoEnterDeadline != null)
+                        put("minimized", s.isMinimized)
+                        put("pending_host_key", s.hostFingerprint != null)
+                        quotaKey(s.task.host, s.task.agent.command)?.let { key ->
+                            quotas[key]?.let { qList ->
+                                put("quotas", org.json.JSONArray().apply {
+                                    qList.forEach { q ->
+                                        put(org.json.JSONObject().put("minutes", q.minutes).put("remaining_percent", q.remainingPercent))
+                                    }
+                                })
+                            }
+                        }
+                        if (tail.isNotBlank()) put("screen_tail", tail)
+                    }
+                }
+
+                if (!selector.hasAnyFilter()) {
+                    val attachedIds = sessions.map { it.task.id.replace("-", "") }.toSet()
+                    val tasksArr = org.json.JSONArray().apply {
+                        sessions.forEachIndexed { idx, s -> put(buildSessionJson(idx, s)) }
+                    }
+                    val sharedArr = org.json.JSONArray().apply {
+                        startupShared.forEach { (h, item) ->
+                            val sid = item.optString("id")
+                            if (sid.replace("-", "") !in attachedIds) {
+                                put(org.json.JSONObject().apply {
+                                    put("id", sid)
+                                    put("host", h.name)
+                                    put("workspace", item.optString("directory_name"))
+                                    put("path", item.optString("directory_path"))
+                                    put("agent", item.optString("agent_name"))
+                                    put("status", item.optString("status"))
+                                })
+                            }
+                        }
+                    }
+                    val root = org.json.JSONObject().apply {
+                        put("current_screen", route.name.lowercase())
+                        put("sessions", tasksArr)
+                        put("shared_tasks", sharedArr)
+                    }
+                    dev.remote.terminal.jarvis.mcp.ToolOpResult(
+                        ok = true,
+                        detail = root.toString(),
+                        voiceSummary = "当前有 ${sessions.size} 个本地任务、${sharedArr.length()} 个待附着共享任务。",
+                        expectsFollowUp = true
+                    )
+                } else {
+                    val target = resolveOrAttachShared(selector, waitMs = 500L)
+                    if (target == null) {
+                        dev.remote.terminal.jarvis.mcp.ToolOpResult(
+                            ok = false,
+                            detail = "Target task not found. Open sessions: [${openSessionsHint()}]",
+                            voiceSummary = "未找到对应进行中任务。"
+                        )
+                    } else {
+                        val idx = sessions.indexOf(target)
+                        val info = buildSessionJson(idx, target)
+                        dev.remote.terminal.jarvis.mcp.ToolOpResult(
+                            ok = true,
+                            detail = info.toString(),
+                            voiceSummary = "${target.task.directory.name}（${target.task.agent.name}）状态：${target.status}。",
+                            expectsFollowUp = true
+                        )
+                    }
+                }
+            }
+
+            dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.manageHostHandler = { action, args ->
+                val hostId = args.optString("host_id", "").trim().takeIf { it.isNotBlank() }
+                val name = args.optString("name", "").trim()
+                fun matchHost(): HostProfile? = when {
+                    hostId != null -> hosts.firstOrNull { it.id == hostId || it.name.equals(hostId, true) }
+                    name.isNotBlank() -> hosts.firstOrNull { it.name.equals(name, true) || it.name.contains(name, true) }
+                    else -> hosts.firstOrNull { it.id == selectedHostId }
+                }
+
+                when (action) {
+                    "add" -> {
+                        val lanAddr = args.optString("lan_address", "").trim()
+                        val extAddr = args.optString("external_address", "").trim()
+                        val primaryAddr = extAddr.ifBlank { lanAddr }
+                        if (primaryAddr.isBlank()) {
+                            dev.remote.terminal.jarvis.mcp.ToolOpResult(false, "Missing lan_address or external_address", "添加主机需要提供内网或外网地址。")
+                        } else {
+                            val lanPort = args.optInt("lan_port", 22).coerceIn(1, 65535)
+                            val extPort = args.optInt("external_port", 22).coerceIn(1, 65535)
+                            val username = args.optString("username", "").trim().ifBlank { store.loadSyncUsername().ifBlank { "root" } }
+                            val password = args.optString("password", "")
+                            val icon = args.optString("icon", "⌘").ifBlank { "⌘" }
+                            val newId = java.util.UUID.randomUUID().toString()
+                            val newHost = HostProfile(
+                                id = newId,
+                                name = name.ifBlank { primaryAddr },
+                                address = primaryAddr,
+                                port = if (extAddr.isNotBlank()) extPort else lanPort,
+                                username = username,
+                                password = password,
+                                icon = icon,
+                                lanAddress = lanAddr,
+                                externalAddress = extAddr,
+                                legacyAddress = primaryAddr,
+                                lanPort = lanPort,
+                                externalPort = extPort,
+                            )
+                            saveHosts(hosts + newHost)
+                            dirtyHostProfiles.add(newHost.id)
+                            store.saveDirtyHostProfiles(dirtyHostProfiles)
+                            syncHostProfile(newHost)
+                            if (selectedHostId.isBlank()) selectHost(newHost)
+                            dev.remote.terminal.jarvis.mcp.ToolOpResult(
+                                true,
+                                org.json.JSONObject().put("id", newHost.id).put("name", newHost.name).toString(),
+                                "已添加主机 ${newHost.name}。"
+                            )
+                        }
+                    }
+                    "update" -> {
+                        val target = matchHost()
+                        if (target == null) {
+                            dev.remote.terminal.jarvis.mcp.ToolOpResult(false, "Host not found", "未找到要修改的主机。")
+                        } else {
+                            val lanAddr = if (args.has("lan_address")) args.optString("lan_address", "").trim() else target.lanAddress
+                            val extAddr = if (args.has("external_address")) args.optString("external_address", "").trim() else target.externalAddress
+                            val lanPort = if (args.has("lan_port")) args.optInt("lan_port", target.lanPort).coerceIn(1, 65535) else target.lanPort
+                            val extPort = if (args.has("external_port")) args.optInt("external_port", target.externalPort).coerceIn(1, 65535) else target.externalPort
+                            val nextName = if (args.has("name") && name.isNotBlank()) name else target.name
+                            val nextUser = args.optString("username", "").trim().ifBlank { target.username }
+                            val nextPass = args.optString("password", "").ifBlank { target.password }
+                            val nextIcon = args.optString("icon", "").ifBlank { target.icon }
+                            val primaryAddr = extAddr.ifBlank { lanAddr }.ifBlank { target.address }
+                            val updated = target.copy(
+                                name = nextName,
+                                address = primaryAddr,
+                                port = if (extAddr.isNotBlank()) extPort else lanPort,
+                                username = nextUser,
+                                password = nextPass,
+                                icon = nextIcon,
+                                lanAddress = lanAddr,
+                                externalAddress = extAddr,
+                                legacyAddress = primaryAddr,
+                                lanPort = lanPort,
+                                externalPort = extPort,
+                            )
+                            HostRouteResolver.invalidate(updated.id)
+                            saveHosts(hosts.map { if (it.id == updated.id) updated else it })
+                            sessions.forEach { s -> if (s.task.host.id == updated.id) s.task = s.task.copy(host = updated) }
+                            dirtyHostProfiles.add(updated.id)
+                            store.saveDirtyHostProfiles(dirtyHostProfiles)
+                            syncHostProfile(updated)
+                            dev.remote.terminal.jarvis.mcp.ToolOpResult(true, "Updated host ${updated.name}", "已更新主机 ${updated.name}。")
+                        }
+                    }
+                    "delete" -> {
+                        val target = matchHost()
+                        if (target == null) {
+                            dev.remote.terminal.jarvis.mcp.ToolOpResult(false, "Host not found", "未找到要删除的主机。")
+                        } else {
+                            dirtyHostProfiles.remove(target.id)
+                            store.saveDirtyHostProfiles(dirtyHostProfiles)
+                            store.removeHostPassword(target.id)
+                            saveHosts(hosts.filterNot { it.id == target.id })
+                            if (!offlineMode && syncUrl.isNotBlank() && syncToken.isNotBlank()) {
+                                scope.launch { runCatching { withContext(SyncClient.dispatcher) { SyncClient.deleteHostProfile(target.id) } } }
+                            }
+                            dev.remote.terminal.jarvis.mcp.ToolOpResult(true, "Deleted host ${target.name}", "已删除主机 ${target.name}。")
+                        }
+                    }
+                    "select" -> {
+                        val target = matchHost()
+                        if (target == null) {
+                            dev.remote.terminal.jarvis.mcp.ToolOpResult(false, "Host not found", "未找到主机。")
+                        } else {
+                            selectHost(target)
+                            dev.remote.terminal.jarvis.mcp.ToolOpResult(true, "Selected host ${target.name}", "已选中主机 ${target.name}。")
+                        }
+                    }
+                    "probe" -> {
+                        val target = matchHost()
+                        if (target == null) {
+                            dev.remote.terminal.jarvis.mcp.ToolOpResult(false, "Host not found", "未找到主机。")
+                        } else {
+                            val chosen = HostRouteResolver.resolveHostRoute(target, force = true)
+                            val (lanOk, extOk) = withContext(Dispatchers.IO) {
+                                val l = if (target.lanAddress.isNotBlank()) HostRouteResolver.isPortReachable(target.lanAddress.trim(), target.lanPort, 1500) else false
+                                val e = if (target.externalAddress.isNotBlank()) HostRouteResolver.isPortReachable(target.externalAddress.trim(), target.externalPort, 2000) else false
+                                l to e
+                            }
+                            val info = org.json.JSONObject().apply {
+                                put("host", target.name)
+                                put("selected_address", chosen.address)
+                                put("selected_port", chosen.port)
+                                put("is_lan", chosen.isLan)
+                                put("reachable", chosen.reachable)
+                                put("lan_reachable", lanOk)
+                                put("external_reachable", extOk)
+                            }
+                            dev.remote.terminal.jarvis.mcp.ToolOpResult(
+                                true,
+                                info.toString(),
+                                if (chosen.reachable) "主机 ${target.name} 可达（${chosen.address}:${chosen.port}）。" else "主机 ${target.name} 当前不可达。",
+                                expectsFollowUp = true
+                            )
+                        }
+                    }
+                    "move" -> {
+                        val target = matchHost()
+                        val toIdx = args.optInt("to_index", -1)
+                        val fromIdx = if (target != null) hosts.indexOfFirst { it.id == target.id } else -1
+                        if (target == null || fromIdx < 0 || toIdx !in hosts.indices) {
+                            dev.remote.terminal.jarvis.mcp.ToolOpResult(false, "Invalid host or to_index", "无法移动主机顺序。")
+                        } else {
+                            val reordered = hosts.toMutableList().apply { add(toIdx, removeAt(fromIdx)) }
+                            saveHosts(reordered)
+                            dirtyHostProfiles.add(target.id)
+                            store.saveDirtyHostProfiles(dirtyHostProfiles)
+                            syncHostProfile(target)
+                            dev.remote.terminal.jarvis.mcp.ToolOpResult(true, "Moved host ${target.name} to index $toIdx", "已将主机 ${target.name} 移至第 ${toIdx + 1} 位。")
+                        }
+                    }
+                    else -> dev.remote.terminal.jarvis.mcp.ToolOpResult(false, "Unknown host action: $action", "不支持的主机操作。")
+                }
+            }
+
+            dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.manageAgentHandler = { action, args ->
+                val agentId = args.optString("agent_id", "").trim().takeIf { it.isNotBlank() }
+                val name = args.optString("name", "").trim()
+                val cmd = args.optString("command", "").trim()
+                val icon = args.optString("icon", "✳").ifBlank { "✳" }
+                val activeList = currentAgents
+                fun matchAgent(): AgentPreset? = when {
+                    agentId != null -> activeList.firstOrNull { it.id == agentId }
+                    name.isNotBlank() -> activeList.firstOrNull { it.name.equals(name, true) || it.name.contains(name, true) || it.command.equals(name, true) }
+                    cmd.isNotBlank() -> activeList.firstOrNull { it.command.equals(cmd, true) || it.command.contains(cmd, true) }
+                    else -> activeList.firstOrNull { it.id == selectedAgentId }
+                }
+
+                when (action) {
+                    "select" -> {
+                        val target = matchAgent()
+                        if (target == null) {
+                            dev.remote.terminal.jarvis.mcp.ToolOpResult(false, "Agent not found", "未找到对应 AI 开发者。")
+                        } else {
+                            selectAgent(target)
+                            dev.remote.terminal.jarvis.mcp.ToolOpResult(true, "Selected agent ${target.name}", "已切换开发者为 ${target.name}。")
+                        }
+                    }
+                    "add" -> {
+                        if (name.isBlank() && cmd.isBlank()) {
+                            dev.remote.terminal.jarvis.mcp.ToolOpResult(false, "Missing name or command", "添加开发者需要名称或启动命令。")
+                        } else {
+                            val newAgent = AgentPreset(
+                                id = java.util.UUID.randomUUID().toString(),
+                                name = name.ifBlank { cmd },
+                                command = cmd.ifBlank { name },
+                                icon = icon
+                            )
+                            val updated = agents.toList() + newAgent
+                            replaceAgents(updated)
+                            selectedHost?.let { syncAgentList(it, hostAgents(it, updated)) }
+                            dev.remote.terminal.jarvis.mcp.ToolOpResult(true, "Added agent ${newAgent.name}", "已添加开发者 ${newAgent.name}。")
+                        }
+                    }
+                    "update" -> {
+                        val target = matchAgent()
+                        if (target == null) {
+                            dev.remote.terminal.jarvis.mcp.ToolOpResult(false, "Agent not found", "未找到要修改的开发者。")
+                        } else {
+                            val nextAgent = target.copy(
+                                name = name.ifBlank { target.name },
+                                command = cmd.ifBlank { target.command },
+                                icon = if (args.has("icon")) icon else target.icon
+                            )
+                            val updated = agents.map { if (it.id == target.id) nextAgent else it }
+                            replaceAgents(updated)
+                            selectedHost?.let { syncAgentList(it, hostAgents(it, updated)) }
+                            dev.remote.terminal.jarvis.mcp.ToolOpResult(true, "Updated agent ${nextAgent.name}", "已更新开发者 ${nextAgent.name}。")
+                        }
+                    }
+                    "delete" -> {
+                        val target = matchAgent()
+                        if (target == null) {
+                            dev.remote.terminal.jarvis.mcp.ToolOpResult(false, "Agent not found", "未找到要删除的开发者。")
+                        } else {
+                            val updated = agents.filterNot { it.id == target.id }
+                            replaceAgents(updated)
+                            selectedHost?.let { syncAgentList(it, hostAgents(it, updated)) }
+                            dev.remote.terminal.jarvis.mcp.ToolOpResult(true, "Deleted agent ${target.name}", "已删除开发者 ${target.name}。")
+                        }
+                    }
+                    "move" -> {
+                        val target = matchAgent()
+                        val toIdx = args.optInt("to_index", -1)
+                        val fromIdx = if (target != null) agents.indexOfFirst { it.id == target.id } else -1
+                        if (target == null || fromIdx < 0 || toIdx !in agents.indices) {
+                            dev.remote.terminal.jarvis.mcp.ToolOpResult(false, "Invalid agent or to_index", "无法调整开发者排序。")
+                        } else {
+                            val updated = agents.toMutableList().apply { add(toIdx, removeAt(fromIdx)) }
+                            replaceAgents(updated)
+                            selectedHost?.let { syncAgentList(it, hostAgents(it, updated)) }
+                            dev.remote.terminal.jarvis.mcp.ToolOpResult(true, "Moved agent ${target.name} to $toIdx", "已将开发者 ${target.name} 移至第 ${toIdx + 1} 位。")
+                        }
+                    }
+                    else -> dev.remote.terminal.jarvis.mcp.ToolOpResult(false, "Unknown agent action: $action", "不支持的开发者操作。")
+                }
+            }
+
+            dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.manageWorkspaceHandler = { action, args ->
+                val hostId = args.optString("host_id", "").trim().takeIf { it.isNotBlank() }
+                val hostName = args.optString("host_name", "").trim().takeIf { it.isNotBlank() }
+                val host = resolveHostBy(hostId, hostName)
+                val path = args.optString("path", "").trim()
+                val newPath = args.optString("new_path", "").trim()
+                val name = args.optString("name", "").trim()
+                val icon = args.optString("icon", "").trim()
+                if (host == null) {
+                    dev.remote.terminal.jarvis.mcp.ToolOpResult(false, "No host found", "未找到对应主机。")
+                } else when (action) {
+                    "list_remote" -> {
+                        runCatching {
+                            val listing = withContext(Dispatchers.IO) {
+                                dev.remote.terminal.ssh.RemoteDirectoryBrowser.listDirectories(host, store, path.ifBlank { "~" })
+                            }
+                            val payload = org.json.JSONObject().apply {
+                                put("host", host.name)
+                                put("path", listing.path)
+                                put("directories", org.json.JSONArray().apply {
+                                    listing.directories.forEach { d ->
+                                        put(org.json.JSONObject().put("name", d.name).put("path", d.path))
+                                    }
+                                })
+                            }
+                            dev.remote.terminal.jarvis.mcp.ToolOpResult(
+                                true,
+                                payload.toString(),
+                                "在 ${listing.path} 找到 ${listing.directories.size} 个子目录。",
+                                expectsFollowUp = true
+                            )
+                        }.getOrElse { err ->
+                            dev.remote.terminal.jarvis.mcp.ToolOpResult(
+                                false,
+                                "Remote directory listing failed: ${err.message}",
+                                "浏览远端目录失败：${err.message ?: "连接异常"}。"
+                            )
+                        }
+                    }
+                    "add" -> {
+                        if (path.isBlank()) {
+                            dev.remote.terminal.jarvis.mcp.ToolOpResult(false, "Missing path", "添加工作区需要指定目录路径。")
+                        } else {
+                            val dirName = name.ifBlank { path.trimEnd('/').substringAfterLast('/').ifBlank { path } }
+                            val newDir = ProjectDirectory(java.util.UUID.randomUUID().toString(), dirName, path, icon.ifBlank { "📁" })
+                            val updatedDirs = host.directories + newDir
+                            val updatedHost = host.copy(directories = updatedDirs)
+                            saveHosts(hosts.map { if (it.id == host.id) updatedHost else it })
+                            syncWorkspaceList(updatedHost, updatedDirs)
+                            dev.remote.terminal.jarvis.mcp.ToolOpResult(true, "Added workspace ${newDir.name} (${newDir.path})", "已为 ${host.name} 添加工作区 ${newDir.name}。")
+                        }
+                    }
+                    "update" -> {
+                        val targetIdx = host.directories.indexOfFirst {
+                            (path.isNotBlank() && (it.path == path || it.name.equals(path, true))) ||
+                                (name.isNotBlank() && it.name.equals(name, true))
+                        }
+                        if (targetIdx < 0) {
+                            dev.remote.terminal.jarvis.mcp.ToolOpResult(false, "Workspace not found on ${host.name}", "未找到要修改的工作区目录。")
+                        } else {
+                            val cur = host.directories[targetIdx]
+                            val nextDir = cur.copy(
+                                name = name.ifBlank { cur.name },
+                                path = newPath.ifBlank { cur.path },
+                                icon = icon.ifBlank { cur.icon }
+                            )
+                            val updatedDirs = host.directories.toMutableList().apply { this[targetIdx] = nextDir }
+                            val updatedHost = host.copy(directories = updatedDirs)
+                            saveHosts(hosts.map { if (it.id == host.id) updatedHost else it })
+                            syncWorkspaceList(updatedHost, updatedDirs)
+                            dev.remote.terminal.jarvis.mcp.ToolOpResult(true, "Updated workspace ${nextDir.name}", "已更新工作区 ${nextDir.name}。")
+                        }
+                    }
+                    "delete" -> {
+                        val updatedDirs = host.directories.filterNot {
+                            (path.isNotBlank() && (it.path == path || it.name.equals(path, true))) ||
+                                (name.isNotBlank() && it.name.equals(name, true))
+                        }
+                        if (updatedDirs.size == host.directories.size) {
+                            dev.remote.terminal.jarvis.mcp.ToolOpResult(false, "Workspace not found on ${host.name}", "未找到要删除的工作区目录。")
+                        } else {
+                            val updatedHost = host.copy(directories = updatedDirs)
+                            saveHosts(hosts.map { if (it.id == host.id) updatedHost else it })
+                            syncWorkspaceList(updatedHost, updatedDirs)
+                            dev.remote.terminal.jarvis.mcp.ToolOpResult(true, "Deleted workspace", "已删除工作区目录。")
+                        }
+                    }
+                    "move" -> {
+                        val fromIdx = host.directories.indexOfFirst {
+                            (path.isNotBlank() && (it.path == path || it.name.equals(path, true))) ||
+                                (name.isNotBlank() && it.name.equals(name, true))
+                        }
+                        val toIdx = args.optInt("to_index", -1)
+                        if (fromIdx < 0 || toIdx !in host.directories.indices) {
+                            dev.remote.terminal.jarvis.mcp.ToolOpResult(false, "Invalid workspace or to_index", "无法调整工作区排序。")
+                        } else {
+                            moveDirectory(host, fromIdx, toIdx - fromIdx)
+                            dev.remote.terminal.jarvis.mcp.ToolOpResult(true, "Moved workspace to index $toIdx", "已调整工作区排序。")
+                        }
+                    }
+                    else -> dev.remote.terminal.jarvis.mcp.ToolOpResult(false, "Unknown workspace action: $action", "不支持的工作区操作。")
+                }
+            }
+
+            dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.manageLogsHandler = { action, args ->
+                if (!offlineMode && syncUrl.isNotBlank() && syncToken.isNotBlank()) {
+                    runCatching { syncOperationLogs() }
+                }
+                val sessionId = args.optString("session_id", "").trim()
+                val query = args.optString("query", "").trim()
+                val limit = args.optInt("limit", 15).coerceIn(1, 50)
+                when (action) {
+                    "list" -> {
+                        val filtered = operationLogs.filter { entry ->
+                            if (query.isBlank() && sessionId.isBlank()) true
+                            else (sessionId.isNotBlank() && (entry.sessionId.equals(sessionId, true) || entry.sessionId.replace("-", "").startsWith(sessionId.replace("-", ""), true))) ||
+                                (query.isNotBlank() && (
+                                    entry.sessionName.contains(query, true) ||
+                                        entry.directoryName.contains(query, true) ||
+                                        entry.directoryPath.contains(query, true) ||
+                                        entry.hostName.contains(query, true) ||
+                                        entry.agentName.contains(query, true)
+                                    ))
+                        }.take(limit)
+                        val arr = org.json.JSONArray().apply {
+                            filtered.forEach { e ->
+                                put(org.json.JSONObject().apply {
+                                    put("id", e.id)
+                                    put("session_id", e.sessionId)
+                                    put("session_name", e.sessionName)
+                                    put("host", e.hostName)
+                                    put("workspace", e.directoryName)
+                                    put("path", e.directoryPath)
+                                    put("agent", e.agentName)
+                                    put("agent_command", e.agentCommand)
+                                    put("updated_at", e.updatedAt)
+                                })
+                            }
+                        }
+                        dev.remote.terminal.jarvis.mcp.ToolOpResult(
+                            true,
+                            arr.toString(),
+                            "共检索到 ${filtered.size} 条历史操作日志。",
+                            expectsFollowUp = true
+                        )
+                    }
+                    "restore" -> {
+                        val target = operationLogs.firstOrNull { e ->
+                            (sessionId.isNotBlank() && (e.sessionId.equals(sessionId, true) || e.id == sessionId || e.sessionId.replace("-", "").startsWith(sessionId.replace("-", ""), true))) ||
+                                (query.isNotBlank() && (
+                                    e.sessionName.contains(query, true) ||
+                                        e.directoryName.contains(query, true) ||
+                                        e.directoryPath.contains(query, true) ||
+                                        e.agentName.contains(query, true)
+                                    ))
+                        }
+                        if (target == null) {
+                            dev.remote.terminal.jarvis.mcp.ToolOpResult(false, "No matching history log found", "未找到匹配的历史记录。")
+                        } else {
+                            val focus = args.optBoolean("focus", false)
+                            val prevRoute = route
+                            restoreFromLog(target)
+                            if (!focus) route = prevRoute
+                            dev.remote.terminal.jarvis.mcp.ToolOpResult(
+                                true,
+                                "Restored session ${target.sessionName.ifBlank { target.directoryName }} (${target.sessionId}), focus=$focus",
+                                "已从历史记录恢复 ${target.directoryName}（${target.agentName}）。"
+                            )
+                        }
+                    }
+                    else -> dev.remote.terminal.jarvis.mcp.ToolOpResult(false, "Unknown logs action: $action", "不支持的日志操作。")
+                }
+            }
+
+            dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.updateSettingsHandler = { args ->
+                val changed = mutableListOf<String>()
+                var generatedPubKey: String? = null
+                if (args.has("device_layout_mode")) {
+                    val m = args.optString("device_layout_mode", "auto").trim().lowercase()
+                    if (m in setOf("auto", "phone", "pad")) {
+                        deviceLayoutMode = m
+                        store.saveDeviceLayoutMode(m)
+                        changed.add("device_layout_mode=$m")
+                    }
+                }
+                if (args.has("tiled_mode")) {
+                    val v = args.optBoolean("tiled_mode", tiledMode)
+                    tiledMode = v
+                    store.saveTiledMode(v)
+                    changed.add("tiled_mode=$v")
+                }
+                if (args.has("auto_confirm_enabled")) {
+                    val v = args.optBoolean("auto_confirm_enabled", autoEnterEnabled)
+                    autoEnterEnabled = v
+                    store.saveAutoEnterEnabled(v)
+                    changed.add("auto_confirm_enabled=$v")
+                }
+                if (args.has("auto_confirm_delay")) {
+                    val v = args.optInt("auto_confirm_delay", autoEnterDelaySeconds).coerceIn(1, 30)
+                    autoEnterDelaySeconds = v
+                    store.saveAutoEnterDelaySeconds(v)
+                    changed.add("auto_confirm_delay=$v")
+                }
+                if (args.has("offline_mode")) {
+                    val v = args.optBoolean("offline_mode", offlineMode)
+                    offlineMode = v
+                    store.saveOfflineMode(v)
+                    changed.add("offline_mode=$v")
+                }
+                if (args.has("auto_sync_enabled")) {
+                    val v = args.optBoolean("auto_sync_enabled", autoSyncEnabled)
+                    autoSyncEnabled = v
+                    store.saveAutoSyncEnabled(v)
+                    changed.add("auto_sync_enabled=$v")
+                }
+                if (args.has("sync_url")) {
+                    val v = args.optString("sync_url", "").trim()
+                    syncUrl = v
+                    store.saveSyncSettings(v, syncToken)
+                    changed.add("sync_url=$v")
+                }
+                if (args.has("sync_interval")) {
+                    val v = args.optInt("sync_interval", syncIntervalSeconds).coerceIn(5, 600)
+                    syncIntervalSeconds = v
+                    store.saveSyncIntervalSeconds(v)
+                    changed.add("sync_interval=$v")
+                }
+                if (args.has("quota_interval")) {
+                    val v = args.optInt("quota_interval", quotaIntervalSeconds).coerceIn(15, 300)
+                    quotaIntervalSeconds = v
+                    store.saveQuotaIntervalSeconds(v)
+                    changed.add("quota_interval=$v")
+                }
+                if (args.has("jarvis_model")) {
+                    val v = args.optString("jarvis_model", "").trim()
+                    if (v.isNotBlank()) {
+                        store.saveJarvisModel(v)
+                        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.targetModel = v
+                        changed.add("jarvis_model=$v")
+                    }
+                }
+                if (args.has("jarvis_effort")) {
+                    val v = args.optString("jarvis_effort", "").trim().lowercase()
+                    if (v.isNotBlank()) {
+                        store.saveJarvisEffort(v)
+                        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.targetEffort = v
+                        changed.add("jarvis_effort=$v")
+                    }
+                }
+                if (args.has("jarvis_wake_word")) {
+                    val v = args.optString("jarvis_wake_word", "").trim()
+                    if (v.isNotBlank()) {
+                        store.saveJarvisWakeWord(v)
+                        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.wakeWord = v
+                        changed.add("jarvis_wake_word=$v")
+                    }
+                }
+                if (args.has("jarvis_notify_finished")) {
+                    val v = args.optBoolean("jarvis_notify_finished", true)
+                    store.saveJarvisNotifyFinished(v)
+                    dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.notifyOnTaskFinished = v
+                    changed.add("jarvis_notify_finished=$v")
+                }
+                if (args.has("jarvis_bluetooth_sco")) {
+                    val v = args.optBoolean("jarvis_bluetooth_sco", true)
+                    store.saveJarvisBluetoothSco(v)
+                    dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.bluetoothScoEnabled = v
+                    changed.add("jarvis_bluetooth_sco=$v")
+                }
+                if (args.optBoolean("generate_ssh_key", false)) {
+                    generatedPubKey = withContext(Dispatchers.IO) { store.generateSshKey() }
+                    changed.add("generate_ssh_key=true")
+                }
+                val resp = org.json.JSONObject().apply {
+                    put("updated", org.json.JSONArray(changed))
+                    generatedPubKey?.let { put("ssh_public_key", it) }
+                }
+                dev.remote.terminal.jarvis.mcp.ToolOpResult(
+                    ok = changed.isNotEmpty(),
+                    detail = resp.toString(),
+                    voiceSummary = if (changed.isNotEmpty()) "已更新设置（${changed.size} 项）。" else "未检测到可更新的设置项。",
+                    expectsFollowUp = generatedPubKey != null
+                )
+            }
+
+            dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.sessionWindowHandler = { selector, action, args ->
+                when (action) {
+                    "minimize", "restore" -> {
+                        val target = resolveSessionMatch(selector)
+                        if (target == null) {
+                            dev.remote.terminal.jarvis.mcp.ToolOpResult(false, "Target session not found", "未找到目标终端会话。")
+                        } else {
+                            val minimize = action == "minimize"
+                            target.isMinimized = minimize
+                            dev.remote.terminal.jarvis.mcp.ToolOpResult(
+                                true,
+                                "Session ${target.task.directory.name} minimized=$minimize",
+                                if (minimize) "已最小化 ${target.task.directory.name} 窗口。" else "已恢复 ${target.task.directory.name} 窗口。"
+                            )
+                        }
+                    }
+                    "approve_host_key" -> {
+                        val target = resolveSessionMatch(selector) ?: sessions.firstOrNull { it.hostFingerprint != null }
+                        val fingerprint = target?.hostFingerprint
+                        if (target == null || fingerprint == null) {
+                            dev.remote.terminal.jarvis.mcp.ToolOpResult(false, "No pending SSH host key approval", "当前没有待确认的 SSH 主机指纹弹窗。")
+                        } else {
+                            val approve = args.optBoolean("approve", true)
+                            val addr = target.hostKeyAddress
+                            val port = target.hostKeyPort
+                            if (approve) {
+                                store.trustHostKey(addr, port, fingerprint)
+                                val trustedHost = target.task.host.copy(syncFingerprint = fingerprint)
+                                saveHosts(hosts.map { if (it.id == trustedHost.id) trustedHost else it })
+                                sessions.filter { it.hostKeyAddress == addr && it.hostKeyPort == port }.forEach {
+                                    it.task = it.task.copy(host = trustedHost)
+                                    it.resolveHostKey?.invoke(true)
+                                    it.hostFingerprint = null
+                                }
+                                dev.remote.terminal.jarvis.mcp.ToolOpResult(true, "Trusted host key $addr:$port ($fingerprint)", "已信任主机指纹并继续连接。")
+                            } else {
+                                sessions.filter { it.hostKeyAddress == addr && it.hostKeyPort == port }.forEach {
+                                    it.resolveHostKey?.invoke(false)
+                                    it.hostFingerprint = null
+                                }
+                                dev.remote.terminal.jarvis.mcp.ToolOpResult(true, "Rejected host key $addr:$port", "已拒绝该 SSH 主机指纹。")
+                            }
+                        }
+                    }
+                    else -> dev.remote.terminal.jarvis.mcp.ToolOpResult(false, "Unknown session window action: $action", "不支持的窗口控制操作。")
+                }
             }
         }
 

@@ -411,17 +411,44 @@ object JarvisCoordinator : VoicePerceptorCallback {
         when (action) {
             is JarvisAction.InjectKeystroke -> {
                 updateState(JarvisState.EXECUTING)
-                val ctrl = activeTerminalController
-                if (ctrl != null) {
-                    ctrl.send(action.text)
-                    earconManager.playActionSuccessChime()
-                    Log.i(TAG, "Injected keystroke to active terminal: ${action.text.replace("\n", "\\n")}")
-                } else {
-                    Log.w(TAG, "No active terminal controller to inject keystroke")
+                scope.launch {
+                    val sessionsArr = dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.appStateProvider?.invoke()?.optJSONArray("sessions")
+                    var targetSessionId: String? = null
+                    if (sessionsArr != null) {
+                        for (i in 0 until sessionsArr.length()) {
+                            val s = sessionsArr.optJSONObject(i) ?: continue
+                            if (s.optBoolean("needs_action")) {
+                                targetSessionId = s.optString("id")
+                                break
+                            }
+                        }
+                    }
+                    val ctrl = activeTerminalController
+                    if (targetSessionId != null) {
+                        val toolName = if (action.text == "\u0003") "confirm_terminal" else "send_terminal_keys"
+                        val args = if (toolName == "confirm_terminal") {
+                            org.json.JSONObject().put("session_id", targetSessionId).put("approve", true)
+                        } else {
+                            org.json.JSONObject().put("session_id", targetSessionId).put("keys", org.json.JSONArray().put("ctrl+c"))
+                        }
+                        dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.executeTool(toolName, args)
+                        earconManager.playActionSuccessChime()
+                    } else if (ctrl != null) {
+                        ctrl.send(action.text)
+                        earconManager.playActionSuccessChime()
+                        Log.i(TAG, "Injected keystroke to active terminal: ${action.text.replace("\n", "\\n")}")
+                    } else {
+                        val keyName = if (action.text == "\u0003") "ctrl+c" else "enter"
+                        dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.executeTool(
+                            "send_terminal_keys",
+                            org.json.JSONObject().put("keys", org.json.JSONArray().put(keyName))
+                        )
+                        earconManager.playActionSuccessChime()
+                    }
+                    action.voiceReply?.let { reply ->
+                        speakWithState(reply) { openFollowUpListeningWindow() }
+                    } ?: openFollowUpListeningWindow()
                 }
-                action.voiceReply?.let { reply ->
-                    speakWithState(reply) { openFollowUpListeningWindow() }
-                } ?: openFollowUpListeningWindow()
             }
             is JarvisAction.SwitchWorkspace -> {
                 updateState(JarvisState.EXECUTING)

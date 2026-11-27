@@ -47,6 +47,7 @@ object BackgroundDeveloperBridge {
     private const val EXEC_TIMEOUT_MS = 120_000L
     private val READ_TOOLS = setOf(
         "run_terminal_command",
+        "get_task_status",
         "get_app_state",
         "list_open_workspaces",
         "get_device_state",
@@ -522,11 +523,20 @@ object BackgroundDeveloperBridge {
                 put("connected", s.optBoolean("connected"))
                 put("focused", s.optBoolean("focused"))
                 if (s.optBoolean("needs_action")) put("needs_action", true)
+                if (s.optBoolean("minimized")) put("minimized", true)
+                if (s.optBoolean("pending_host_key")) put("pending_host_key", true)
+                val statusStr = s.optString("status")
+                if (statusStr.isNotBlank() && !s.optBoolean("connected")) put("status", statusStr.take(36))
                 val lastLine = s.optString("last_line")
                 if (lastLine.isNotBlank()) put("last_line", lastLine.take(48))
             })
         }
         out.put("open_sessions", slimSessions)
+
+        val sharedTasks = state.optJSONArray("shared_tasks")
+        if (sharedTasks != null && sharedTasks.length() > 0) {
+            out.put("shared_tasks", sharedTasks)
+        }
 
         if (!compact) {
             val hosts = state.optJSONArray("hosts") ?: JSONArray()
