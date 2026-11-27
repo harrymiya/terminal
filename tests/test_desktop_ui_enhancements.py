@@ -461,6 +461,18 @@ class DesktopThemeBuildTest(unittest.TestCase):
                 "Custom · proj · Codex",
             )
             self.assertEqual(
+                mod.session_display_name({"directory_name": "proj", "agent_name": "Codex",
+                                          "display_name": "Custom · proj · Codex"}),
+                "Custom · proj · Codex",
+            )
+            self.assertEqual(
+                mod.operation_log_session_name({
+                    "session_name": "Custom · proj · Codex · proj · Codex",
+                    "directory_name": "proj", "agent_name": "Codex",
+                }),
+                "Custom",
+            )
+            self.assertEqual(
                 mod.session_workspace_label({"directory_name": "proj", "agent_name": "Codex", "display_name": "Codex · proj"}),
                 "proj",
             )

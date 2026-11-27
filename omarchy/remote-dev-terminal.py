@@ -111,6 +111,19 @@ def session_workspace_label(item, agent=None):
     return f"{current} · {workspace_name}"
 
 
+def operation_log_session_name(entry):
+    """Hide duplicate formatted suffixes left by older title sync behavior."""
+    name = str(entry.get("session_name") or "").strip()
+    workspace = str(entry.get("directory_name") or entry.get("directory_path") or "").strip()
+    agent = str(entry.get("agent_name") or entry.get("agent_command") or "").strip()
+    if not name or not workspace or not agent:
+        return name
+    suffix = f" · {workspace} · {agent}"
+    while name.endswith(suffix):
+        name = name[:-len(suffix)].rstrip()
+    return name
+
+
 def agent_icon_picker(selected):
     _, catalog = agent_icon_catalog()
     model = Gtk.ListStore(str, str, GdkPixbuf.Pixbuf)
@@ -4213,7 +4226,7 @@ class App(Gtk.Window):
                                 matching_item = next((item for item in sessions if (session.get("id") and item.get("id") == session.get("id")) or (item.get("directory_path"), item.get("agent_command")) == ws), None)
                                 if matching_item and matching_item.get("id"):
                                     session["id"] = matching_item["id"]
-                                    remote_name = session_display_name(matching_item, session.get("agent"))
+                                    remote_name = matching_item.get("display_name")
                                     remote_source = matching_item.get("title_source", "default")
                                     current_item = session.get("item") or {}
                                     if remote_name and (remote_name != current_item.get("display_name")
@@ -5034,7 +5047,7 @@ class App(Gtk.Window):
             "directory_path": entry.get("directory_path", ""),
             "agent_name": entry.get("agent_name") or entry.get("agent_command", ""),
             "agent_command": entry.get("agent_command", ""),
-            "display_name": entry.get("session_name") or f"{entry.get('agent_name', '')} · {entry.get('directory_name', '')}",
+            "display_name": operation_log_session_name(entry) or f"{entry.get('agent_name', '')} · {entry.get('directory_name', '')}",
             "title_source": entry.get("title_source", "default"),
         }
         self.open_terminal(None, shared_host=host, shared_item=item, activate=True, attach_or_create=True, log_action="resume")
@@ -5102,9 +5115,10 @@ class App(Gtk.Window):
                     status_text = " · ● 已打开" if is_open else ""
                     top_lbl = Gtk.Label(label=f"[{ts}] [{client}] {action_label}{status_text}", xalign=0)
                     top_lbl.get_style_context().add_class("subtitle")
-                    main_lbl = Gtk.Label(label=entry.get("session_name") or f"{entry.get('agent_name') or entry.get('agent_command', '')} · {entry.get('directory_name') or entry.get('directory_path', '')}", xalign=0)
+                    history_name = operation_log_session_name(entry)
+                    main_lbl = Gtk.Label(label=history_name or f"{entry.get('agent_name') or entry.get('agent_command', '')} · {entry.get('directory_name') or entry.get('directory_path', '')}", xalign=0)
                     main_lbl.set_ellipsize(Pango.EllipsizeMode.END)
-                    sub_lbl = Gtk.Label(label=f"主机: {entry.get('host_name', '')} · 目录: {entry.get('directory_path', '')} · 会话: {entry.get('session_name') or entry.get('session_id', '')[:12]}", xalign=0)
+                    sub_lbl = Gtk.Label(label=f"主机: {entry.get('host_name', '')} · 目录: {entry.get('directory_path', '')} · 会话: {history_name or entry.get('session_id', '')[:12]}", xalign=0)
                     sub_lbl.get_style_context().add_class("subtitle")
                     sub_lbl.set_ellipsize(Pango.EllipsizeMode.END)
                     info.pack_start(top_lbl, False, False, 0)
