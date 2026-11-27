@@ -17,6 +17,7 @@ import dev.remote.terminal.jarvis.perception.JarvisPerceptorFactory
 import dev.remote.terminal.jarvis.perception.OfflineJarvisPerceptor
 import dev.remote.terminal.jarvis.tts.JarvisSpeaker
 import dev.remote.terminal.jarvis.model.RemoteCliModel
+import dev.remote.terminal.jarvis.model.ApiChatModel
 import dev.remote.terminal.jarvis.agent.RemoteDevAgent
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -485,6 +486,51 @@ object JarvisCoordinator : VoicePerceptorCallback {
 
     private suspend fun handleAgentRequest(action: JarvisAction.AskAgent) {
         val store = storeProvider?.invoke()
+        if (store == null) {
+            earconManager.playAlertChime()
+            speakWithState("当前无法读取 App 配置。") { openFollowUpListeningWindow() }
+            return
+        }
+        val useApi = store.loadJarvisUsesModelApi()
+        _subtitle.value = "Jarvis 正在理解请求…"
+        val memoryContext = try {
+            memoryManager?.recallContext(action.message).orEmpty()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "Jarvis memory recall failed: ${e.message}")
+            ""
+        }
+        val result = if (useApi) {
+            val settings = kotlinx.coroutines.withContext(Dispatchers.IO) { store.loadJarvisModelApiSettings() }
+            if (settings.key.isBlank()) {
+                Result.failure(IllegalStateException("请先在 Jarvis 的模型 API 设置中保存 API Key。"))
+            } else {
+                RemoteDevAgent.respond(action.message, memoryContext) { prompt ->
+                    ApiChatModel.complete(settings.url, settings.model, settings.key, prompt)
+                }
+            }
+        } else {
+            runCliModel(store, action.message, memoryContext)
+        }
+        result.onSuccess { reply ->
+            if (reply.isBlank() || !_conversationActive.value) return
+            recordMemoryTurn(action.message, reply)
+            conversationAwakeUntilMs = SystemClock.elapsedRealtime() + CONVERSATION_WINDOW_MS
+            earconManager.playActionSuccessChime()
+            speakWithState(reply) { if (_conversationActive.value) openFollowUpListeningWindow() }
+        }.onFailure { err ->
+            if (!_conversationActive.value) return
+            earconManager.playAlertChime()
+            speakWithState(err.message ?: "模型暂时无响应。")
+        }
+    }
+
+    private suspend fun runCliModel(
+        store: dev.remote.terminal.data.LocalStore,
+        request: String,
+        memoryContext: String
+    ): Result<String> {
         val hosts = hostsProvider?.invoke().orEmpty()
         val targetHost = hosts.firstOrNull { config.targetHostId.isNotBlank() && it.id == config.targetHostId }
             ?: hosts.firstOrNull { it.id == selectedHostIdProvider() }
@@ -498,39 +544,14 @@ object JarvisCoordinator : VoicePerceptorCallback {
                 RemoteCliModel.supports(it.command, model)
         }
 
-        if (store == null || targetHost == null || preset == null) {
-            earconManager.playAlertChime()
-            val reason = when {
-                store == null -> "当前无法读取 App 配置。"
-                targetHost == null -> "请先在 Remote Dev 添加可用的模型主机。"
-                else -> "请在 Jarvis 设置中选择可用的远端 CLI 模型入口。"
-            }
-            speakWithState(reason) { openFollowUpListeningWindow() }
-            return
+        if (targetHost == null) {
+            return Result.failure(IllegalStateException("请先在 Remote Dev 添加可用的模型主机。"))
         }
-
-        _subtitle.value = "Jarvis 正在理解请求…"
-        val memoryContext = try {
-            memoryManager?.recallContext(action.message).orEmpty()
-        } catch (e: kotlinx.coroutines.CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            Log.w(TAG, "Jarvis memory recall failed: ${e.message}")
-            ""
+        if (preset == null) {
+            return Result.failure(IllegalStateException("请在 Jarvis 设置中选择可用的远端 CLI 模型入口。"))
         }
-        val result = RemoteCliModel.withTurn(targetHost, preset, store, model, config.targetEffort) { complete ->
-            RemoteDevAgent.respond(action.message, memoryContext, complete)
-        }
-        result.onSuccess { reply ->
-            if (reply.isBlank() || !_conversationActive.value) return
-            recordMemoryTurn(action.message, reply)
-            conversationAwakeUntilMs = SystemClock.elapsedRealtime() + CONVERSATION_WINDOW_MS
-            earconManager.playActionSuccessChime()
-            speakWithState(reply) { if (_conversationActive.value) openFollowUpListeningWindow() }
-        }.onFailure { err ->
-            if (!_conversationActive.value) return
-            earconManager.playAlertChime()
-            speakWithState(err.message ?: "远端模型暂时无响应。")
+        return RemoteCliModel.withTurn(targetHost, preset, store, model, config.targetEffort) { complete ->
+            RemoteDevAgent.respond(request, memoryContext, complete)
         }
     }
 

@@ -570,6 +570,40 @@ class LocalStore(context: Context) {
     fun loadJarvisEffort(): String = preferences.getString("jarvis_effort", "low") ?: "low"
     fun saveJarvisEffort(effort: String) = preferences.edit().putString("jarvis_effort", effort).apply()
 
+    fun loadJarvisUsesModelApi(): Boolean = preferences.getBoolean("jarvis_model_api_enabled", false)
+    fun saveJarvisUsesModelApi(enabled: Boolean) =
+        preferences.edit().putBoolean("jarvis_model_api_enabled", enabled).apply()
+
+    fun loadJarvisModelApiUrl(): String =
+        preferences.getString("jarvis_model_api_url", null) ?: dev.remote.terminal.jarvis.model.DEFAULT_MODEL_API_URL
+
+    fun loadJarvisModelApiName(): String =
+        preferences.getString("jarvis_model_api_name", null) ?: dev.remote.terminal.jarvis.model.DEFAULT_MODEL_API_NAME
+
+    fun hasJarvisModelApiKey(): Boolean = preferences.contains("jarvis_model_api_key")
+
+    internal class ModelApiSettings(val url: String, val model: String, val key: String)
+
+    internal fun loadJarvisModelApiSettings(): ModelApiSettings {
+        val values = preferences.all
+        return ModelApiSettings(
+            values["jarvis_model_api_url"] as? String ?: dev.remote.terminal.jarvis.model.DEFAULT_MODEL_API_URL,
+            values["jarvis_model_api_name"] as? String ?: dev.remote.terminal.jarvis.model.DEFAULT_MODEL_API_NAME,
+            vault.decrypt(values["jarvis_model_api_key"] as? String)
+        )
+    }
+
+    fun saveJarvisModelApi(url: String, model: String, key: String) {
+        val encrypted = vault.encrypt(key)
+        preferences.edit()
+            .putString("jarvis_model_api_url", url)
+            .putString("jarvis_model_api_name", model)
+            .putString("jarvis_model_api_key", encrypted)
+            .apply()
+    }
+
+    fun clearJarvisModelApiKey() = preferences.edit().remove("jarvis_model_api_key").apply()
+
     fun saveTiledMode(tiled: Boolean) {
         preferences.edit().putBoolean("tiled_mode", tiled).apply()
     }

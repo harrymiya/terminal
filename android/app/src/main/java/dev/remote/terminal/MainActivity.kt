@@ -3429,7 +3429,6 @@ private fun RemoteTerminalApp(store: LocalStore) {
                         hosts = hosts,
                         agents = agents,
                         syncUrl = syncUrl,
-                        syncToken = syncToken,
                         offlineMode = offlineMode,
                         autoSyncEnabled = autoSyncEnabled,
                         syncIntervalSeconds = syncIntervalSeconds,
@@ -3508,7 +3507,6 @@ private fun RemoteTerminalApp(store: LocalStore) {
                         hosts = hosts,
                         agents = agents,
                         syncUrl = syncUrl,
-                        syncToken = syncToken,
                         offlineMode = offlineMode,
                         autoSyncEnabled = autoSyncEnabled,
                         syncIntervalSeconds = syncIntervalSeconds,
@@ -6499,7 +6497,6 @@ private fun SettingsScreen(
     hosts: List<HostProfile> = emptyList(),
     agents: List<AgentPreset> = emptyList(),
     syncUrl: String,
-    syncToken: String,
     offlineMode: Boolean,
     autoSyncEnabled: Boolean,
     syncIntervalSeconds: Int,
@@ -6525,453 +6522,573 @@ private fun SettingsScreen(
     var publicKey by remember { mutableStateOf(store.sshPublicKey()) }
     var generating by remember { mutableStateOf(false) }
     var keyMessage by remember { mutableStateOf("") }
+    var voiceMessage by remember { mutableStateOf("") }
     var draftSyncUrl by rememberSaveable(syncUrl) { mutableStateOf(syncUrl) }
     var draftSyncInterval by remember(syncIntervalSeconds) { mutableStateOf(syncIntervalSeconds.toFloat()) }
     var draftDelay by remember(delaySeconds) { mutableStateOf(delaySeconds.toFloat()) }
     var draftQuotaInterval by remember(quotaIntervalSeconds) { mutableStateOf(quotaIntervalSeconds.toFloat()) }
+    var jarvisEnabled by remember { mutableStateOf(store.loadJarvisEnabled()) }
+    var jarvisWakeWord by remember { mutableStateOf(store.loadJarvisWakeWord()) }
+    var jarvisNotifyFinished by remember { mutableStateOf(store.loadJarvisNotifyFinished()) }
+    var jarvisBluetoothSco by remember { mutableStateOf(store.loadJarvisBluetoothSco()) }
+    var jarvisTargetHostId by remember { mutableStateOf(store.loadJarvisTargetHostId()) }
+    var jarvisTargetAgentCmd by remember { mutableStateOf(store.loadJarvisTargetAgentCommand()) }
+    var jarvisModel by remember { mutableStateOf(store.loadJarvisModel()) }
+    var jarvisEffort by remember { mutableStateOf(store.loadJarvisEffort()) }
+    var jarvisUsesApi by remember(store) { mutableStateOf(store.loadJarvisUsesModelApi()) }
+
+
+    var selectedSection by rememberSaveable { mutableStateOf<String?>(null) }
+    val section = selectedSection?.let(SettingsSection::valueOf)
+    fun saveSyncAddress() {
+        val url = draftSyncUrl.trim()
+        if (url != syncUrl) onSyncSettingsChange(url, "")
+    }
     fun finish() {
-        onSyncSettingsChange(draftSyncUrl.trim(), syncToken)
-        onBack()
+        if (section == SettingsSection.SYNC) saveSyncAddress()
+        if (section != null) selectedSection = null else onBack()
     }
     BackHandler { finish() }
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
-        Row(Modifier.fillMaxWidth().padding(top = 15.dp, bottom = 20.dp), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = { finish() }) { Icon(Icons.Default.ArrowBack, contentDescription = "返回", tint = White) }
-            Column(Modifier.weight(1f)) {
-                Text("设置", color = White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
-                Text("管理布局、密钥、同步与自动回车", color = Muted, fontSize = 12.sp)
-            }
-            TextButton(onClick = { finish() }) { Text("完成", color = Mint) }
-        }
-        Column(Modifier.fillMaxWidth().padding(bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text("界面与设备模式", color = White, fontWeight = FontWeight.SemiBold)
-            Text("根据设备类型选择布局。Pad 模式按 PC 端的双栏侧边栏、工作区直达和平铺/标签交互运行。", color = Muted, fontSize = 12.sp)
-            var draftDeviceLayoutMode by remember(deviceLayoutMode) { mutableStateOf(deviceLayoutMode) }
+
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
+        Column(Modifier.widthIn(max = 680.dp).fillMaxSize().imePadding().padding(horizontal = 20.dp)) {
             Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(24.dp))
-                    .background(Panel)
-                    .border(1.dp, Edge, RoundedCornerShape(24.dp))
-                    .padding(4.dp),
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                val options = listOf(
-                    "auto" to "自动检测",
-                    "pad" to "Pad 模式",
-                    "phone" to "手机模式"
-                )
-                options.forEach { (mode, label) ->
-                    val selected = draftDeviceLayoutMode == mode
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .clip(RoundedCornerShape(20.dp))
-                            .background(if (selected) Mint else Color.Transparent)
-                            .clickable {
-                                draftDeviceLayoutMode = mode
-                                onDeviceLayoutModeChange(mode)
-                            }
-                            .padding(vertical = 9.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = label,
-                            color = if (selected) Ink else White,
-                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-                            fontSize = 12.sp,
-                            maxLines = 1
-                        )
-                    }
+                IconButton(onClick = { finish() }) {
+                    Icon(Icons.Default.ArrowBack, contentDescription = "返回", tint = White)
                 }
-            }
-            Text(
-                text = when (draftDeviceLayoutMode) {
-                    "pad" -> "已强制开启 Pad 模式：启用 PC 端双栏侧边栏、工作区直接连接及平铺/标签交互。"
-                    "phone" -> "已强制开启手机模式：采用单栏紧凑视图与独立工作区导航。"
-                    else -> if (isTablet) "当前设备识别为 Pad / 平板设备（宽屏），自动使用 PC 布局与交互。" else "当前设备识别为手机，自动使用单栏模式。"
-                },
-                color = Mint,
-                fontSize = 11.sp
-            )
-            Divider()
-            Text("SSH 密钥", color = White, fontWeight = FontWeight.SemiBold)
-            Text("生成本机密钥后，将公钥添加到服务器用户的 ~/.ssh/authorized_keys。连接时会优先尝试密钥认证。", color = Muted, fontSize = 12.sp)
-            if (publicKey == null) {
-                FilledTonalButton(enabled = !generating, onClick = {
-                    generating = true
-                    scope.launch {
-                        val result = withContext(Dispatchers.IO) { runCatching { store.generateSshKey() } }
-                        result.onSuccess { publicKey = it; keyMessage = "密钥已生成" }
-                            .onFailure { keyMessage = "生成失败：${it.localizedMessage ?: "未知错误"}" }
-                        generating = false
-                    }
-                }) { Text(if (generating) "正在生成…" else "生成本机密钥") }
-            } else {
-                Text(publicKey.orEmpty(), color = Muted, fontSize = 11.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
-                FilledTonalButton(onClick = {
-                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                    clipboard.setPrimaryClip(ClipData.newPlainText("SSH 公钥", publicKey.orEmpty()))
-                    keyMessage = "公钥已复制"
-                }) { Text("复制公钥") }
-            }
-            if (keyMessage.isNotEmpty()) Text(keyMessage, color = Mint, fontSize = 12.sp)
-            Divider()
-            Text("系统同步", color = White, fontWeight = FontWeight.SemiBold)
-            OutlinedTextField(draftSyncUrl, { draftSyncUrl = it }, label = { Text("同步服务地址") }, placeholder = { Text("https://地址:端口") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-            Text(when {
-                offlineMode -> "离线模式（仅本机独立使用）"
-                syncUsername.isBlank() -> "未登录"
-                else -> "当前账号：$syncUsername"
-            }, color = Muted, fontSize = 12.sp)
-            FilledTonalButton(onClick = onLogin, modifier = Modifier.fillMaxWidth()) { Text("登录同步账号") }
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Column(Modifier.weight(1f)) {
-                    Text("离线模式", color = White, fontSize = 13.sp)
-                    Text("开启后仅本机独立使用，不进行任何服务器同步。", color = Muted, fontSize = 11.sp)
+                    if (section != null) Text("设置", color = Muted, fontSize = 11.sp)
+                    Text(section?.title ?: "设置", color = White, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
                 }
-                Switch(checked = offlineMode, onCheckedChange = onOfflineModeChange)
+                if (section != null) TextButton(onClick = { finish() }) { Text("完成", color = Mint) }
             }
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Column(Modifier.weight(1f)) {
-                    Text("跨设备自动同步", color = White, fontSize = 13.sp)
-                    Text("默认关闭，仅控制本机；主机配置手动保存仍会上传。", color = Muted, fontSize = 11.sp)
-                }
-                Switch(checked = autoSyncEnabled, onCheckedChange = onAutoSyncEnabledChange)
-            }
-            Text("自动同步周期：${((draftSyncInterval / 5f).roundToInt() * 5).coerceIn(5, 300)} 秒", color = White, fontSize = 13.sp)
-            Slider(
-                value = draftSyncInterval,
-                onValueChange = { draftSyncInterval = it },
-                onValueChangeFinished = { onSyncIntervalSecondsChange(((draftSyncInterval / 5f).roundToInt() * 5).coerceIn(5, 300)) },
-                valueRange = 5f..300f,
-                steps = 58,
-            )
-            Divider()
-            Text("开发者额度", color = White, fontWeight = FontWeight.SemiBold)
-            val quotaSeconds = ((draftQuotaInterval / 5f).roundToInt() * 5).coerceIn(15, 300)
-            Text("刷新周期 ${quotaSeconds} 秒", color = White, fontSize = 13.sp)
-            Slider(
-                value = draftQuotaInterval,
-                onValueChange = { draftQuotaInterval = it },
-                onValueChangeFinished = { onQuotaIntervalChange(((draftQuotaInterval / 5f).roundToInt() * 5).coerceIn(15, 300)) },
-                valueRange = 15f..300f,
-                steps = 56,
-            )
-            Divider()
-            Text("自动回车", color = White, fontWeight = FontWeight.SemiBold)
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Column(Modifier.weight(1f)) {
-                    Text("对默认“是”或选中允许的确认提示自动回车", color = White, fontSize = 13.sp)
-                    Text("断线时暂停倒计时，恢复连接后重新等待；[y/N] 等默认否的提示需要手动确认", color = Muted, fontSize = 11.sp)
-                }
-                Switch(checked = enabled, onCheckedChange = onEnabledChange)
-            }
-            Text("延迟 ${draftDelay.roundToInt()} 秒", color = White, fontSize = 13.sp)
-            Slider(
-                value = draftDelay,
-                onValueChange = { draftDelay = it },
-                onValueChangeFinished = { onDelaySecondsChange(draftDelay.roundToInt().coerceIn(1, 30)) },
-                valueRange = 1f..30f,
-                steps = 28,
-            )
-            Text("倒计时期间手动输入或操作会取消自动回车。", color = Muted, fontSize = 11.sp)
-            Divider()
-            Text("贾维斯 (JARVIS) 智能语音助手", color = White, fontWeight = FontWeight.SemiBold)
-            Text("全程黑屏通过蓝牙耳机语音交互，低功耗一直在线、零 Token 毫秒级推进任务。", color = Muted, fontSize = 12.sp)
-
-            var jarvisEnabled by remember { mutableStateOf(store.loadJarvisEnabled()) }
-            var jarvisWakeWord by remember { mutableStateOf(store.loadJarvisWakeWord()) }
-            var jarvisNotifyFinished by remember { mutableStateOf(store.loadJarvisNotifyFinished()) }
-            var jarvisBluetoothSco by remember { mutableStateOf(store.loadJarvisBluetoothSco()) }
-            var jarvisAsrMode by remember { mutableStateOf(store.loadJarvisAsrMode()) }
-            var jarvisTargetHostId by remember { mutableStateOf(store.loadJarvisTargetHostId()) }
-            var jarvisTargetAgentCmd by remember { mutableStateOf(store.loadJarvisTargetAgentCommand()) }
-            var jarvisModel by remember { mutableStateOf(store.loadJarvisModel()) }
-            var jarvisEffort by remember { mutableStateOf(store.loadJarvisEffort()) }
-
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Column(Modifier.weight(1f)) {
-                    Text("启用贾维斯语音控制", color = White, fontSize = 13.sp)
-                    Text("启用麦克风低功耗监听与唤醒词检测，支持放入口袋全盲操", color = Muted, fontSize = 11.sp)
-                }
-                val jarvisPermissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
-                    androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
-                ) { permissions ->
-                    val audioGranted = permissions[android.Manifest.permission.RECORD_AUDIO] == true ||
-                        androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED
-                    if (audioGranted) {
-                        jarvisEnabled = true
-                        store.saveJarvisEnabled(true)
-                        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.toggleEnabled(true)
-                    } else {
-                        jarvisEnabled = false
-                        store.saveJarvisEnabled(false)
-                        keyMessage = "需要麦克风权限才能响应「贾维斯」唤醒"
-                    }
-                }
-                Switch(checked = jarvisEnabled, onCheckedChange = { wantEnable ->
-                    if (!wantEnable) {
-                        jarvisEnabled = false
-                        store.saveJarvisEnabled(false)
-                        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.toggleEnabled(false)
-                    } else {
-                        val audioOk = androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED
-                        val btOk = android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.S ||
-                            androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.BLUETOOTH_CONNECT) == android.content.pm.PackageManager.PERMISSION_GRANTED
-                        if (audioOk && btOk) {
-                            jarvisEnabled = true
-                            store.saveJarvisEnabled(true)
-                            dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.toggleEnabled(true)
-                        } else {
-                            val reqs = mutableListOf(android.Manifest.permission.RECORD_AUDIO)
-                            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
-                                reqs.add(android.Manifest.permission.BLUETOOTH_CONNECT)
-                            }
-                            jarvisPermissionLauncher.launch(reqs.toTypedArray())
-                        }
-                    }
-                })
-            }
-
-            if (jarvisEnabled) {
-                val jarvisDiagStatus by dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.diagnosticStatus.collectAsState()
-                OutlinedTextField(
-                    value = jarvisWakeWord,
-                    onValueChange = {
-                        jarvisWakeWord = it
-                        store.saveJarvisWakeWord(it)
-                        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.wakeWord = it
-                    },
-                    label = { Text("唤醒词 (默认：贾维斯)") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Text(
-                    "监听状态：$jarvisDiagStatus",
-                    color = Mint,
-                    fontSize = 11.sp
-                )
-
-                Text("远端 CLI 模型", color = White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
-                val selectedHostLabel = hosts.firstOrNull { it.id == jarvisTargetHostId }?.name ?: "自动/当前主机"
-                val selectedAgentLabel = agents.firstOrNull { it.command == jarvisTargetAgentCmd }?.name ?: "自动/当前开发者"
-                Text(
-                    "选择特定主机下的开发者供贾维斯调用（当前：$selectedHostLabel · $selectedAgentLabel）",
-                    color = Muted,
-                    fontSize = 11.sp
-                )
-                Text("模型主机", color = Muted, fontSize = 11.sp)
-                Row(
-                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+            val overviewScroll = rememberScrollState()
+            androidx.compose.runtime.key(section) {
+                val scroll = if (section == null) overviewScroll else rememberScrollState()
+                Column(
+                    Modifier.fillMaxWidth().weight(1f).verticalScroll(scroll).padding(bottom = 24.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
-                    @Composable
-                    fun ChoicePill(selected: Boolean, onClick: () -> Unit, content: @Composable () -> Unit) {
-                        Surface(
-                            color = if (selected) Mint.copy(alpha = 0.2f) else Panel,
-                            shape = RoundedCornerShape(12.dp),
-                            border = BorderStroke(1.dp, if (selected) Mint else Edge),
-                            modifier = Modifier.clip(RoundedCornerShape(12.dp)).clickable(onClick = onClick)
-                        ) {
-                            Box(Modifier.padding(horizontal = 12.dp, vertical = 7.dp)) {
-                                content()
+                    when (section) {
+                        null -> {
+                            SettingsGroup("Jarvis") {
+                                SettingsLink(SettingsSection.MODEL,
+                                    when {
+                                        !jarvisUsesApi -> "远端 CLI · ${jarvisModel.ifBlank { "默认模型" }}"
+                                        !store.hasJarvisModelApiKey() -> "模型 API · 待配置"
+                                        else -> "模型 API · ${store.loadJarvisModelApiName()}"
+                                    },
+                                    Icons.Default.SmartToy) { selectedSection = SettingsSection.MODEL.name }
+                                SettingsLink(SettingsSection.VOICE,
+                                    if (jarvisEnabled) "已启用 · ${jarvisWakeWord.ifBlank { "贾维斯" }}" else "语音未启用",
+                                    Icons.Default.Mic) { selectedSection = SettingsSection.VOICE.name }
+                            }
+                            SettingsGroup("远程开发") {
+                                SettingsLink(SettingsSection.SYNC,
+                                    when {
+                                        offlineMode -> "离线模式"
+                                        syncUsername.isBlank() -> "未登录"
+                                        autoSyncEnabled -> "$syncUsername · 自动同步"
+                                        else -> syncUsername
+                                    },
+                                    Icons.Default.Refresh) { selectedSection = SettingsSection.SYNC.name }
+                                SettingsLink(SettingsSection.SSH, if (publicKey != null) "已生成公钥" else "尚未生成密钥",
+                                    Icons.Default.Dns) { selectedSection = SettingsSection.SSH.name }
+                                SettingsLink(SettingsSection.TERMINAL, "自动回车${if (enabled) "已开启" else "已关闭"} · 额度刷新",
+                                    Icons.Default.Terminal) { selectedSection = SettingsSection.TERMINAL.name }
+                            }
+                            SettingsGroup("设备") {
+                                SettingsLink(SettingsSection.LAYOUT,
+                                    when (deviceLayoutMode) { "pad" -> "Pad 模式"; "phone" -> "手机模式"; else -> "自动检测" },
+                                    Icons.Default.GridView) { selectedSection = SettingsSection.LAYOUT.name }
+                                SettingsLink(SettingsSection.BACKGROUND, "熄屏运行与电池优化",
+                                    Icons.Default.Settings) { selectedSection = SettingsSection.BACKGROUND.name }
+                            }
+                        }
+                        SettingsSection.MODEL -> {
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                androidx.compose.material3.FilterChip(
+                                    selected = !jarvisUsesApi,
+                                    onClick = { store.saveJarvisUsesModelApi(false); jarvisUsesApi = false },
+                                    label = { Text("远端 CLI") }
+                                )
+                                androidx.compose.material3.FilterChip(
+                                    selected = jarvisUsesApi,
+                                    onClick = { store.saveJarvisUsesModelApi(true); jarvisUsesApi = true },
+                                    label = { Text("模型 API") }
+                                )
+                            }
+                            if (jarvisUsesApi) dev.remote.terminal.jarvis.ui.JarvisModelApiSettings(store)
+                            if (!jarvisUsesApi) {
+                                val selectedHostLabel = hosts.firstOrNull { it.id == jarvisTargetHostId }?.name ?: "自动/当前主机"
+                                val selectedAgentLabel = agents.firstOrNull { it.command == jarvisTargetAgentCmd }?.name ?: "自动/当前开发者"
+                                Text(
+                                    "选择特定主机下的开发者供贾维斯调用（当前：$selectedHostLabel · $selectedAgentLabel）",
+                                    color = Muted,
+                                    fontSize = 11.sp
+                                )
+                                Text("模型主机", color = Muted, fontSize = 11.sp)
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    @Composable
+                                    fun ChoicePill(selected: Boolean, onClick: () -> Unit, content: @Composable () -> Unit) {
+                                        Surface(
+                                            color = if (selected) Mint.copy(alpha = 0.2f) else Panel,
+                                            shape = RoundedCornerShape(12.dp),
+                                            border = BorderStroke(1.dp, if (selected) Mint else Edge),
+                                            modifier = Modifier.clip(RoundedCornerShape(12.dp)).clickable(onClick = onClick)
+                                        ) {
+                                            Box(Modifier.padding(horizontal = 12.dp, vertical = 7.dp)) {
+                                                content()
+                                            }
+                                        }
+                                    }
+
+                                    val autoSelected = jarvisTargetHostId.isBlank()
+                                    ChoicePill(
+                                        selected = autoSelected,
+                                        onClick = {
+                                            jarvisTargetHostId = ""
+                                            store.saveJarvisTargetHostId("")
+                                            dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.targetHostId = ""
+                                        }
+                                    ) { Text("自动", color = if (autoSelected) Mint else White, fontSize = 12.sp) }
+                                    hosts.forEach { h ->
+                                        val isSel = jarvisTargetHostId == h.id
+                                        ChoicePill(
+                                            selected = isSel,
+                                            onClick = {
+                                                jarvisTargetHostId = h.id
+                                                store.saveJarvisTargetHostId(h.id)
+                                                dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.targetHostId = h.id
+                                            }
+                                        ) { Text("${h.icon} ${h.name}".trim(), color = if (isSel) Mint else White, fontSize = 12.sp) }
+                                    }
+                                }
+                                Text("CLI 入口", color = Muted, fontSize = 11.sp)
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    @Composable
+                                    fun AgentPill(selected: Boolean, onClick: () -> Unit, content: @Composable () -> Unit) {
+                                        Surface(
+                                            color = if (selected) Mint.copy(alpha = 0.2f) else Panel,
+                                            shape = RoundedCornerShape(12.dp),
+                                            border = BorderStroke(1.dp, if (selected) Mint else Edge),
+                                            modifier = Modifier.clip(RoundedCornerShape(12.dp)).clickable(onClick = onClick)
+                                        ) {
+                                            Box(Modifier.padding(horizontal = 12.dp, vertical = 7.dp)) {
+                                                content()
+                                            }
+                                        }
+                                    }
+
+                                    val autoAgentSel = jarvisTargetAgentCmd.isBlank()
+                                    AgentPill(
+                                        selected = autoAgentSel,
+                                        onClick = {
+                                            jarvisTargetAgentCmd = ""
+                                            store.saveJarvisTargetAgentCommand("")
+                                            dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.targetAgentCommand = ""
+                                        }
+                                    ) { Text("自动", color = if (autoAgentSel) Mint else White, fontSize = 12.sp) }
+                                    agents.filter { dev.remote.terminal.jarvis.model.RemoteCliModel.supports(it.command, "") }.forEach { a ->
+                                        val isSel = jarvisTargetAgentCmd == a.command
+                                        AgentPill(
+                                            selected = isSel,
+                                            onClick = {
+                                                jarvisTargetAgentCmd = a.command
+                                                store.saveJarvisTargetAgentCommand(a.command)
+                                                dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.targetAgentCommand = a.command
+                                            }
+                                        ) {
+                                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                                                AgentMark(a.icon, 14.dp)
+                                                Text(a.name, color = if (isSel) Mint else White, fontSize = 12.sp)
+                                            }
+                                        }
+                                    }
+                                }
+
+                                Text("模型选择", color = Muted, fontSize = 11.sp)
+                                val modelPresets = listOf(
+                                    "" to "默认",
+                                    "Gemini 3.8 Flash" to "Flash 3.8 (极速)",
+                                    "Gemini 4 Hydrogen" to "Hydrogen 4",
+                                    "Gemini 4 Neon" to "Neon 4",
+                                    "Claude Sonnet 5.5" to "Sonnet 5.5",
+                                    "gpt-6-luna" to "Codex 6 Luna",
+                                    "gpt-5.6-luna" to "Codex 5.6 Luna",
+                                    "gpt-5.6-terra" to "Codex 5.6 Terra"
+                                )
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    modelPresets.forEach { (value, label) ->
+                                        val isSel = jarvisModel == value
+                                        Surface(
+                                            color = if (isSel) Mint.copy(alpha = 0.2f) else Panel,
+                                            shape = RoundedCornerShape(12.dp),
+                                            border = BorderStroke(1.dp, if (isSel) Mint else Edge),
+                                            modifier = Modifier.clip(RoundedCornerShape(12.dp)).clickable {
+                                                jarvisModel = value
+                                                store.saveJarvisModel(value)
+                                                dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.targetModel = value
+                                            }
+                                        ) {
+                                            Box(Modifier.padding(horizontal = 12.dp, vertical = 7.dp)) {
+                                                Text(label, color = if (isSel) Mint else White, fontSize = 12.sp)
+                                            }
+                                        }
+                                    }
+                                }
+                                OutlinedTextField(
+                                    value = jarvisModel,
+                                    onValueChange = {
+                                        jarvisModel = it
+                                        store.saveJarvisModel(it)
+                                        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.targetModel = it
+                                    },
+                                    label = { Text("自定义模型名称（留空使用 CLI 默认模型）") },
+                                    singleLine = true,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+
+                                Text("推理思考等级 (Effort)", color = Muted, fontSize = 11.sp)
+                                val effortPresets = listOf("low" to "低 (极速)", "medium" to "中", "high" to "高", "xhigh" to "极高", "max" to "极限", "auto" to "默认")
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    effortPresets.forEach { (value, label) ->
+                                        val isSel = jarvisEffort == value
+                                        Surface(
+                                            color = if (isSel) Mint.copy(alpha = 0.2f) else Panel,
+                                            shape = RoundedCornerShape(12.dp),
+                                            border = BorderStroke(1.dp, if (isSel) Mint else Edge),
+                                            modifier = Modifier.clip(RoundedCornerShape(12.dp)).clickable {
+                                                jarvisEffort = value
+                                                store.saveJarvisEffort(value)
+                                                dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.targetEffort = value
+                                            }
+                                        ) {
+                                            Box(Modifier.padding(horizontal = 12.dp, vertical = 7.dp)) {
+                                                Text(label, color = if (isSel) Mint else White, fontSize = 12.sp)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        SettingsSection.VOICE -> {
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                Column(Modifier.weight(1f)) {
+                                    Text("启用贾维斯语音控制", color = White, fontSize = 13.sp)
+                                    Text("启用麦克风低功耗监听与唤醒词检测，支持放入口袋全盲操", color = Muted, fontSize = 11.sp)
+                                }
+                                val jarvisPermissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+                                    androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
+                                ) { permissions ->
+                                    val audioGranted = permissions[android.Manifest.permission.RECORD_AUDIO] == true ||
+                                        androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                                    if (audioGranted) {
+                                        jarvisEnabled = true
+                                        store.saveJarvisEnabled(true)
+                                        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.toggleEnabled(true)
+                                    } else {
+                                        jarvisEnabled = false
+                                        store.saveJarvisEnabled(false)
+                                        voiceMessage = "需要麦克风权限才能响应「贾维斯」唤醒"
+                                    }
+                                }
+                                Switch(checked = jarvisEnabled, onCheckedChange = { wantEnable ->
+                                    voiceMessage = ""
+                                    if (!wantEnable) {
+                                        jarvisEnabled = false
+                                        store.saveJarvisEnabled(false)
+                                        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.toggleEnabled(false)
+                                    } else {
+                                        val audioOk = androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                                        val btOk = android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.S ||
+                                            androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.BLUETOOTH_CONNECT) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                                        if (audioOk && btOk) {
+                                            jarvisEnabled = true
+                                            store.saveJarvisEnabled(true)
+                                            dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.toggleEnabled(true)
+                                        } else {
+                                            val reqs = mutableListOf(android.Manifest.permission.RECORD_AUDIO)
+                                            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+                                                reqs.add(android.Manifest.permission.BLUETOOTH_CONNECT)
+                                            }
+                                            jarvisPermissionLauncher.launch(reqs.toTypedArray())
+                                        }
+                                    }
+                                })
+                            }
+                            if (voiceMessage.isNotBlank()) Text(voiceMessage, color = Coral, fontSize = 12.sp)
+                            if (jarvisEnabled) {
+                                val jarvisDiagStatus by dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.diagnosticStatus.collectAsState()
+                                OutlinedTextField(
+                                    value = jarvisWakeWord,
+                                    onValueChange = {
+                                        jarvisWakeWord = it
+                                        store.saveJarvisWakeWord(it)
+                                        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.wakeWord = it
+                                    },
+                                    label = { Text("唤醒词 (默认：贾维斯)") },
+                                    singleLine = true,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                Text(
+                                    "监听状态：$jarvisDiagStatus",
+                                    color = Mint,
+                                    fontSize = 11.sp
+                                )
+
+                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                    Column(Modifier.weight(1f)) {
+                                        Text("蓝牙耳机 SCO 通话通道", color = White, fontSize = 13.sp)
+                                        Text("仅在拾音时短暂开启蓝牙通道，播报使用高清媒体通道稳定音量", color = Muted, fontSize = 11.sp)
+                                    }
+                                    Switch(checked = jarvisBluetoothSco, onCheckedChange = {
+                                        jarvisBluetoothSco = it
+                                        store.saveJarvisBluetoothSco(it)
+                                        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.bluetoothScoEnabled = it
+                                    })
+                                }
+
+                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                    Column(Modifier.weight(1f)) {
+                                        Text("任务完成主动耳语通报", color = White, fontSize = 13.sp)
+                                        Text("开发任务执行完毕退出时，耳机主动汇报完成状态", color = Muted, fontSize = 11.sp)
+                                    }
+                                    Switch(checked = jarvisNotifyFinished, onCheckedChange = {
+                                        jarvisNotifyFinished = it
+                                        store.saveJarvisNotifyFinished(it)
+                                        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.notifyOnTaskFinished = it
+                                    })
+                                }
+
+                                FilledTonalButton(
+                                    onClick = {
+                                        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.triggerManualWake(speakTestPhrase = true)
+                                    },
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text("测试唤醒与发音")
+                                }
+                            }
+                        }
+                        SettingsSection.SYNC -> {
+                            OutlinedTextField(draftSyncUrl, { draftSyncUrl = it }, label = { Text("同步服务地址") }, placeholder = { Text("https://地址:端口") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                            Text(when {
+                                offlineMode -> "离线模式（仅本机独立使用）"
+                                syncUsername.isBlank() -> "未登录"
+                                else -> "当前账号：$syncUsername"
+                            }, color = Muted, fontSize = 12.sp)
+                            FilledTonalButton(onClick = { saveSyncAddress(); onLogin() }, modifier = Modifier.fillMaxWidth()) { Text("登录同步账号") }
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                Column(Modifier.weight(1f)) {
+                                    Text("离线模式", color = White, fontSize = 13.sp)
+                                    Text("开启后仅本机独立使用，不进行任何服务器同步。", color = Muted, fontSize = 11.sp)
+                                }
+                                Switch(checked = offlineMode, onCheckedChange = onOfflineModeChange)
+                            }
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                Column(Modifier.weight(1f)) {
+                                    Text("跨设备自动同步", color = White, fontSize = 13.sp)
+                                    Text("默认关闭，仅控制本机；主机配置手动保存仍会上传。", color = Muted, fontSize = 11.sp)
+                                }
+                                Switch(checked = autoSyncEnabled, onCheckedChange = onAutoSyncEnabledChange)
+                            }
+                            Text("自动同步周期：${((draftSyncInterval / 5f).roundToInt() * 5).coerceIn(5, 300)} 秒", color = White, fontSize = 13.sp)
+                            Slider(
+                                value = draftSyncInterval,
+                                onValueChange = { draftSyncInterval = it },
+                                onValueChangeFinished = { onSyncIntervalSecondsChange(((draftSyncInterval / 5f).roundToInt() * 5).coerceIn(5, 300)) },
+                                valueRange = 5f..300f,
+                                steps = 58,
+                            )
+                        }
+                        SettingsSection.SSH -> {
+                            Text("生成本机密钥后，将公钥添加到服务器用户的 ~/.ssh/authorized_keys。连接时会优先尝试密钥认证。", color = Muted, fontSize = 12.sp)
+                            if (publicKey == null) {
+                                FilledTonalButton(enabled = !generating, onClick = {
+                                    generating = true
+                                    scope.launch {
+                                        val result = withContext(Dispatchers.IO) { runCatching { store.generateSshKey() } }
+                                        result.onSuccess { publicKey = it; keyMessage = "密钥已生成" }
+                                            .onFailure { keyMessage = "生成失败：${it.localizedMessage ?: "未知错误"}" }
+                                        generating = false
+                                    }
+                                }) { Text(if (generating) "正在生成…" else "生成本机密钥") }
+                            } else {
+                                Text(publicKey.orEmpty(), color = Muted, fontSize = 11.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                                FilledTonalButton(onClick = {
+                                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                    clipboard.setPrimaryClip(ClipData.newPlainText("SSH 公钥", publicKey.orEmpty()))
+                                    keyMessage = "公钥已复制"
+                                }) { Text("复制公钥") }
+                            }
+                            if (keyMessage.isNotEmpty()) Text(keyMessage, color = Mint, fontSize = 12.sp)
+                        }
+                        SettingsSection.TERMINAL -> {
+                            Text("开发者额度", color = White, fontWeight = FontWeight.SemiBold)
+                            val quotaSeconds = ((draftQuotaInterval / 5f).roundToInt() * 5).coerceIn(15, 300)
+                            Text("刷新周期 ${quotaSeconds} 秒", color = White, fontSize = 13.sp)
+                            Slider(
+                                value = draftQuotaInterval,
+                                onValueChange = { draftQuotaInterval = it },
+                                onValueChangeFinished = { onQuotaIntervalChange(((draftQuotaInterval / 5f).roundToInt() * 5).coerceIn(15, 300)) },
+                                valueRange = 15f..300f,
+                                steps = 56,
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Text("自动回车", color = White, fontWeight = FontWeight.SemiBold)
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                Column(Modifier.weight(1f)) {
+                                    Text("对默认“是”或选中允许的确认提示自动回车", color = White, fontSize = 13.sp)
+                                    Text("断线时暂停倒计时，恢复连接后重新等待；[y/N] 等默认否的提示需要手动确认", color = Muted, fontSize = 11.sp)
+                                }
+                                Switch(checked = enabled, onCheckedChange = onEnabledChange)
+                            }
+                            Text("延迟 ${draftDelay.roundToInt()} 秒", color = White, fontSize = 13.sp)
+                            Slider(
+                                value = draftDelay,
+                                onValueChange = { draftDelay = it },
+                                onValueChangeFinished = { onDelaySecondsChange(draftDelay.roundToInt().coerceIn(1, 30)) },
+                                valueRange = 1f..30f,
+                                steps = 28,
+                            )
+                            Text("倒计时期间手动输入或操作会取消自动回车。", color = Muted, fontSize = 11.sp)
+                        }
+                        SettingsSection.LAYOUT -> {
+                            var draftDeviceLayoutMode by remember(deviceLayoutMode) { mutableStateOf(deviceLayoutMode) }
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(24.dp))
+                                    .background(Panel)
+                                    .border(1.dp, Edge, RoundedCornerShape(24.dp))
+                                    .padding(4.dp),
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                val options = listOf(
+                                    "auto" to "自动检测",
+                                    "pad" to "Pad 模式",
+                                    "phone" to "手机模式"
+                                )
+                                options.forEach { (mode, label) ->
+                                    val selected = draftDeviceLayoutMode == mode
+                                    Box(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .clip(RoundedCornerShape(20.dp))
+                                            .background(if (selected) Mint else Color.Transparent)
+                                            .clickable {
+                                                draftDeviceLayoutMode = mode
+                                                onDeviceLayoutModeChange(mode)
+                                            }
+                                            .padding(vertical = 9.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = label,
+                                            color = if (selected) Ink else White,
+                                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                                            fontSize = 12.sp,
+                                            maxLines = 1
+                                        )
+                                    }
+                                }
+                            }
+                            Text(
+                                text = when (draftDeviceLayoutMode) {
+                                    "pad" -> "已强制开启 Pad 模式：启用 PC 端双栏侧边栏、工作区直接连接及平铺/标签交互。"
+                                    "phone" -> "已强制开启手机模式：采用单栏紧凑视图与独立工作区导航。"
+                                    else -> if (isTablet) "当前设备识别为 Pad / 平板设备（宽屏），自动使用 PC 布局与交互。" else "当前设备识别为手机，自动使用单栏模式。"
+                                },
+                                color = Mint,
+                                fontSize = 11.sp
+                            )
+                        }
+                        SettingsSection.BACKGROUND -> {
+                            val isIgnoringBattery = remember { mutableStateOf(TerminalKeepAliveService.isIgnoringBatteryOptimizations(context)) }
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                Column(Modifier.weight(1f)) {
+                                    Text("无限制后台运行 / 忽略电池优化", color = White, fontSize = 13.sp)
+                                    Text(
+                                        if (isIgnoringBattery.value) "系统已允许无限制后台运行，熄屏后终端与自动确认持续生效。"
+                                        else "系统可能会在手机熄屏后冻结网络或限制后台定时器，建议开启以保证熄屏自动确认。",
+                                        color = if (isIgnoringBattery.value) Mint else Coral, fontSize = 11.sp
+                                    )
+                                }
+                                if (!isIgnoringBattery.value) {
+                                    FilledTonalButton(onClick = {
+                                        TerminalKeepAliveService.requestIgnoreBatteryOptimizations(context)
+                                    }) {
+                                        Text("去设置")
+                                    }
+                                } else {
+                                    Text("已允许", color = Mint, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                }
                             }
                         }
                     }
-
-                    val autoSelected = jarvisTargetHostId.isBlank()
-                    ChoicePill(
-                        selected = autoSelected,
-                        onClick = {
-                            jarvisTargetHostId = ""
-                            store.saveJarvisTargetHostId("")
-                            dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.targetHostId = ""
-                        }
-                    ) { Text("自动", color = if (autoSelected) Mint else White, fontSize = 12.sp) }
-                    hosts.forEach { h ->
-                        val isSel = jarvisTargetHostId == h.id
-                        ChoicePill(
-                            selected = isSel,
-                            onClick = {
-                                jarvisTargetHostId = h.id
-                                store.saveJarvisTargetHostId(h.id)
-                                dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.targetHostId = h.id
-                            }
-                        ) { Text("${h.icon} ${h.name}".trim(), color = if (isSel) Mint else White, fontSize = 12.sp) }
-                    }
-                }
-                Text("CLI 入口", color = Muted, fontSize = 11.sp)
-                Row(
-                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    @Composable
-                    fun AgentPill(selected: Boolean, onClick: () -> Unit, content: @Composable () -> Unit) {
-                        Surface(
-                            color = if (selected) Mint.copy(alpha = 0.2f) else Panel,
-                            shape = RoundedCornerShape(12.dp),
-                            border = BorderStroke(1.dp, if (selected) Mint else Edge),
-                            modifier = Modifier.clip(RoundedCornerShape(12.dp)).clickable(onClick = onClick)
-                        ) {
-                            Box(Modifier.padding(horizontal = 12.dp, vertical = 7.dp)) {
-                                content()
-                            }
-                        }
-                    }
-
-                    val autoAgentSel = jarvisTargetAgentCmd.isBlank()
-                    AgentPill(
-                        selected = autoAgentSel,
-                        onClick = {
-                            jarvisTargetAgentCmd = ""
-                            store.saveJarvisTargetAgentCommand("")
-                            dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.targetAgentCommand = ""
-                        }
-                    ) { Text("自动", color = if (autoAgentSel) Mint else White, fontSize = 12.sp) }
-                    agents.filter { dev.remote.terminal.jarvis.model.RemoteCliModel.supports(it.command, "") }.forEach { a ->
-                        val isSel = jarvisTargetAgentCmd == a.command
-                        AgentPill(
-                            selected = isSel,
-                            onClick = {
-                                jarvisTargetAgentCmd = a.command
-                                store.saveJarvisTargetAgentCommand(a.command)
-                                dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.targetAgentCommand = a.command
-                            }
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                                AgentMark(a.icon, 14.dp)
-                                Text(a.name, color = if (isSel) Mint else White, fontSize = 12.sp)
-                            }
-                        }
-                    }
-                }
-
-                Text("模型选择", color = Muted, fontSize = 11.sp)
-                val modelPresets = listOf(
-                    "" to "默认",
-                    "Gemini 3.8 Flash" to "Flash 3.8 (极速)",
-                    "Gemini 4 Hydrogen" to "Hydrogen 4",
-                    "Gemini 4 Neon" to "Neon 4",
-                    "Claude Sonnet 5.5" to "Sonnet 5.5",
-                    "gpt-6-luna" to "Codex 6 Luna",
-                    "gpt-5.6-luna" to "Codex 5.6 Luna",
-                    "gpt-5.6-terra" to "Codex 5.6 Terra"
-                )
-                Row(
-                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    modelPresets.forEach { (value, label) ->
-                        val isSel = jarvisModel == value
-                        Surface(
-                            color = if (isSel) Mint.copy(alpha = 0.2f) else Panel,
-                            shape = RoundedCornerShape(12.dp),
-                            border = BorderStroke(1.dp, if (isSel) Mint else Edge),
-                            modifier = Modifier.clip(RoundedCornerShape(12.dp)).clickable {
-                                jarvisModel = value
-                                store.saveJarvisModel(value)
-                                dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.targetModel = value
-                            }
-                        ) {
-                            Box(Modifier.padding(horizontal = 12.dp, vertical = 7.dp)) {
-                                Text(label, color = if (isSel) Mint else White, fontSize = 12.sp)
-                            }
-                        }
-                    }
-                }
-                OutlinedTextField(
-                    value = jarvisModel,
-                    onValueChange = {
-                        jarvisModel = it
-                        store.saveJarvisModel(it)
-                        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.targetModel = it
-                    },
-                    label = { Text("自定义模型名称（留空使用 CLI 默认模型）") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-
-                Text("推理思考等级 (Effort)", color = Muted, fontSize = 11.sp)
-                val effortPresets = listOf("low" to "低 (极速)", "medium" to "中", "high" to "高", "xhigh" to "极高", "max" to "极限", "auto" to "默认")
-                Row(
-                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    effortPresets.forEach { (value, label) ->
-                        val isSel = jarvisEffort == value
-                        Surface(
-                            color = if (isSel) Mint.copy(alpha = 0.2f) else Panel,
-                            shape = RoundedCornerShape(12.dp),
-                            border = BorderStroke(1.dp, if (isSel) Mint else Edge),
-                            modifier = Modifier.clip(RoundedCornerShape(12.dp)).clickable {
-                                jarvisEffort = value
-                                store.saveJarvisEffort(value)
-                                dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.targetEffort = value
-                            }
-                        ) {
-                            Box(Modifier.padding(horizontal = 12.dp, vertical = 7.dp)) {
-                                Text(label, color = if (isSel) Mint else White, fontSize = 12.sp)
-                            }
-                        }
-                    }
-                }
-
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Column(Modifier.weight(1f)) {
-                        Text("蓝牙耳机 SCO 通话通道", color = White, fontSize = 13.sp)
-                        Text("仅在拾音时短暂开启蓝牙通道，播报使用高清媒体通道稳定音量", color = Muted, fontSize = 11.sp)
-                    }
-                    Switch(checked = jarvisBluetoothSco, onCheckedChange = {
-                        jarvisBluetoothSco = it
-                        store.saveJarvisBluetoothSco(it)
-                        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.bluetoothScoEnabled = it
-                    })
-                }
-
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Column(Modifier.weight(1f)) {
-                        Text("任务完成主动耳语通报", color = White, fontSize = 13.sp)
-                        Text("开发任务执行完毕退出时，耳机主动汇报完成状态", color = Muted, fontSize = 11.sp)
-                    }
-                    Switch(checked = jarvisNotifyFinished, onCheckedChange = {
-                        jarvisNotifyFinished = it
-                        store.saveJarvisNotifyFinished(it)
-                        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.notifyOnTaskFinished = it
-                    })
-                }
-
-                FilledTonalButton(
-                    onClick = {
-                        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.triggerManualWake(speakTestPhrase = true)
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text("测试唤醒与发音")
                 }
             }
-            Divider()
-            Text("后台保活与熄屏运行", color = White, fontWeight = FontWeight.SemiBold)
-            val isIgnoringBattery = remember { mutableStateOf(TerminalKeepAliveService.isIgnoringBatteryOptimizations(context)) }
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Column(Modifier.weight(1f)) {
-                    Text("无限制后台运行 / 忽略电池优化", color = White, fontSize = 13.sp)
-                    Text(
-                        if (isIgnoringBattery.value) "系统已允许无限制后台运行，熄屏后终端与自动确认持续生效。"
-                        else "系统可能会在手机熄屏后冻结网络或限制后台定时器，建议开启以保证熄屏自动确认。",
-                        color = if (isIgnoringBattery.value) Mint else Coral, fontSize = 11.sp
-                    )
-                }
-                if (!isIgnoringBattery.value) {
-                    FilledTonalButton(onClick = {
-                        TerminalKeepAliveService.requestIgnoreBatteryOptimizations(context)
-                    }) {
-                        Text("去设置")
-                    }
-                } else {
-                    Text("已允许", color = Mint, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                }
+        }
+    }
+}
+
+private enum class SettingsSection(val title: String) {
+    MODEL("模型接入"), VOICE("语音与播报"), SYNC("账号与同步"), SSH("SSH 密钥"),
+    TERMINAL("终端与额度"), LAYOUT("界面布局"), BACKGROUND("后台运行")
+}
+
+@Composable
+private fun SettingsGroup(title: String, content: @Composable ColumnScope.() -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(title, Modifier.padding(start = 4.dp), color = Muted, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp), content = content)
+    }
+}
+
+@Composable
+private fun SettingsLink(
+    section: SettingsSection,
+    summary: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    onClick: () -> Unit
+) {
+    Surface(
+        onClick = onClick,
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(14.dp),
+        color = Panel,
+        border = BorderStroke(1.dp, Edge)
+    ) {
+        Row(
+            Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Box(Modifier.size(36.dp).background(Mint.copy(alpha = .10f), RoundedCornerShape(10.dp)),
+                contentAlignment = Alignment.Center) {
+                Icon(icon, contentDescription = null, tint = Mint, modifier = Modifier.size(19.dp))
             }
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Text(section.title, color = White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                Text(summary, color = Muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            Icon(Icons.Default.ArrowForward, contentDescription = null, tint = Muted, modifier = Modifier.size(16.dp))
         }
     }
 }
