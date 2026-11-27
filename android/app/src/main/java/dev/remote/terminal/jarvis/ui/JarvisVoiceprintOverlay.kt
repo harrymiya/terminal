@@ -1,12 +1,15 @@
 package dev.remote.terminal.jarvis.ui
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -16,6 +19,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -24,6 +28,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -32,10 +37,14 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
@@ -44,21 +53,28 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.remote.terminal.jarvis.api.JarvisState
 import dev.remote.terminal.jarvis.coordinator.JarvisCoordinator
+import kotlinx.coroutines.launch
 import kotlin.math.PI
+import kotlin.math.abs
+import kotlin.math.roundToInt
 import kotlin.math.sin
 
 /**
  * 钢铁侠贾维斯式霓虹悬浮声纹 HUD (Jarvis Voiceprint HUD Overlay)。
  * 位于屏幕下方中部悬浮，展示多层霓虹色彩动态正弦波浪声纹曲线，
  * 说话时联动马达微震，并在波形下方实时展示管家字幕与状态输出。
+ * 支持横向左右滑动手势直接划走关闭提示与中止当前对话窗口。
  */
 @Composable
 fun JarvisVoiceprintOverlay(
@@ -68,13 +84,25 @@ fun JarvisVoiceprintOverlay(
     val subtitle by JarvisCoordinator.subtitle.collectAsState()
 
     val isWorking = state != JarvisState.DISABLED && (state != JarvisState.STANDBY || subtitle.isNotBlank())
+    val offsetX = remember { Animatable(0f) }
+    val scope = rememberCoroutineScope()
+    val density = LocalDensity.current
+    val dismissThresholdPx = with(density) { 100.dp.toPx() }
+    val flingTargetPx = with(density) { 420.dp.toPx() }
+
+    LaunchedEffect(isWorking) {
+        if (!isWorking) {
+            offsetX.snapTo(0f)
+        }
+    }
 
     AnimatedVisibility(
         visible = isWorking,
         enter = fadeIn(tween(250)) + slideInVertically(tween(300)) { it / 2 },
-        exit = fadeOut(tween(350)) + slideOutVertically(tween(350)) { it / 2 },
+        exit = fadeOut(tween(300)) + slideOutVertically(tween(300)) { it / 2 },
         modifier = modifier
     ) {
+        val dragAlpha = (1f - (abs(offsetX.value) / (dismissThresholdPx * 2.2f))).coerceIn(0.15f, 1f)
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -84,7 +112,39 @@ fun JarvisVoiceprintOverlay(
         ) {
             JarvisHudCard(
                 state = state,
-                subtitle = subtitle
+                subtitle = subtitle,
+                modifier = Modifier
+                    .offset { IntOffset(offsetX.value.roundToInt(), 0) }
+                    .alpha(dragAlpha)
+                    .pointerInput(isWorking) {
+                        var totalDragDelta = 0f
+                        detectHorizontalDragGestures(
+                            onDragStart = { totalDragDelta = 0f },
+                            onHorizontalDrag = { change, dragAmount ->
+                                change.consume()
+                                totalDragDelta += dragAmount
+                                scope.launch {
+                                    offsetX.snapTo(offsetX.value + dragAmount)
+                                }
+                            },
+                            onDragEnd = {
+                                scope.launch {
+                                    if (abs(offsetX.value) > dismissThresholdPx) {
+                                        val target = if (offsetX.value >= 0f) flingTargetPx else -flingTargetPx
+                                        offsetX.animateTo(target, tween(180))
+                                        JarvisCoordinator.dismissOverlay()
+                                    } else {
+                                        offsetX.animateTo(0f, spring(stiffness = Spring.StiffnessMedium))
+                                    }
+                                }
+                            },
+                            onDragCancel = {
+                                scope.launch {
+                                    offsetX.animateTo(0f, spring(stiffness = Spring.StiffnessMedium))
+                                }
+                            }
+                        )
+                    }
             )
         }
     }
@@ -93,7 +153,8 @@ fun JarvisVoiceprintOverlay(
 @Composable
 private fun JarvisHudCard(
     state: JarvisState,
-    subtitle: String
+    subtitle: String,
+    modifier: Modifier = Modifier
 ) {
     val neonBorderBrush = Brush.horizontalGradient(
         listOf(
@@ -112,7 +173,7 @@ private fun JarvisHudCard(
     )
 
     Column(
-        modifier = Modifier
+        modifier = modifier
             .widthIn(min = 240.dp, max = 360.dp)
             .shadow(elevation = 16.dp, shape = RoundedCornerShape(22.dp), spotColor = Color(0xFF00E5FF), ambientColor = Color(0xFFFF007F))
             .clip(RoundedCornerShape(22.dp))

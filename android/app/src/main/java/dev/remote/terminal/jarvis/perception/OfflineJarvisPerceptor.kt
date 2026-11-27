@@ -91,6 +91,7 @@ class OfflineJarvisPerceptor(
                                     startAsrListening()
                                 } else {
                                     resumeAudioRecordCapture()
+                                    callback?.onError("asr_error_$error")
                                 }
                             }
 
@@ -101,6 +102,8 @@ class OfflineJarvisPerceptor(
                                 resumeAudioRecordCapture()
                                 if (recognizedText.isNotBlank()) {
                                     callback?.onSpeechRecognized(recognizedText, isFinal = true)
+                                } else {
+                                    callback?.onError("empty_result")
                                 }
                             }
 
@@ -219,9 +222,27 @@ class OfflineJarvisPerceptor(
         startAsrListening()
     }
 
+    fun cancelListening() {
+        scope.launch(Dispatchers.Main) {
+            try {
+                speechRecognizer?.cancel()
+            } catch (e: Exception) {
+                Log.w(TAG, "Cancel SpeechRecognizer error: ${e.message}")
+            }
+            resumeAudioRecordCapture()
+        }
+    }
+
     private fun startAsrListening() {
         scope.launch(Dispatchers.Main) {
             try {
+                val recognizer = speechRecognizer
+                if (recognizer == null) {
+                    Log.w(TAG, "SpeechRecognizer unavailable on this device")
+                    resumeAudioRecordCapture()
+                    callback?.onError("recognizer_unavailable")
+                    return@launch
+                }
                 val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                     putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                     putExtra(RecognizerIntent.EXTRA_LANGUAGE, "zh-CN")
@@ -231,10 +252,11 @@ class OfflineJarvisPerceptor(
                     putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
                     putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
                 }
-                speechRecognizer?.startListening(intent)
+                recognizer.startListening(intent)
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to start speech recognizer: ${e.message}")
                 resumeAudioRecordCapture()
+                callback?.onError("start_failed")
             }
         }
     }

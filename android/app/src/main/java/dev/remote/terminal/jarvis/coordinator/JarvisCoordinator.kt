@@ -40,6 +40,7 @@ object JarvisCoordinator : VoicePerceptorCallback {
     private var speaker: JarvisSpeaker? = null
     private var intentRouter: JarvisIntentRouter? = null
     private var perceptor: VoicePerceptor? = null
+    private var listeningTimeoutJob: kotlinx.coroutines.Job? = null
 
     private val _state = MutableStateFlow(JarvisState.DISABLED)
     val state: StateFlow<JarvisState> = _state.asStateFlow()
@@ -377,14 +378,51 @@ object JarvisCoordinator : VoicePerceptorCallback {
     override fun onError(error: String) {
         scope.launch {
             Log.w(TAG, "Perception error: $error")
-            updateState(JarvisState.STANDBY)
+            listeningTimeoutJob?.cancel()
+            listeningTimeoutJob = null
+            if (_state.value == JarvisState.LISTENING || _subtitle.value == "正在倾听..." || _subtitle.value == "先生，我在。") {
+                _subtitle.value = ""
+                updateState(if (config.enabled) JarvisState.STANDBY else JarvisState.DISABLED)
+            }
+        }
+    }
+
+    /**
+     * 用户主动横向划走或关闭悬浮提示卡片，中止当前倾听/播报并复位至待命。
+     */
+    fun dismissOverlay() {
+        scope.launch {
+            listeningTimeoutJob?.cancel()
+            listeningTimeoutJob = null
+            (perceptor as? OfflineJarvisPerceptor)?.cancelListening()
+            speaker?.stop()
+            scoManager?.stopChannel()
+            _subtitle.value = ""
+            updateState(if (config.enabled) JarvisState.STANDBY else JarvisState.DISABLED)
+            Log.i(TAG, "Overlay dismissed by user")
         }
     }
 
     private fun updateState(newState: JarvisState) {
         _state.value = newState
+        if (newState != JarvisState.LISTENING) {
+            listeningTimeoutJob?.cancel()
+            listeningTimeoutJob = null
+        }
         when (newState) {
-            JarvisState.LISTENING -> if (_subtitle.value.isBlank() || _subtitle.value == "先生，我在。") _subtitle.value = "正在倾听..."
+            JarvisState.LISTENING -> {
+                if (_subtitle.value.isBlank() || _subtitle.value == "先生，我在。") _subtitle.value = "正在倾听..."
+                listeningTimeoutJob?.cancel()
+                listeningTimeoutJob = scope.launch {
+                    kotlinx.coroutines.delay(10_000L)
+                    if (_state.value == JarvisState.LISTENING) {
+                        Log.i(TAG, "Listening window timed out cleanly, returning to STANDBY")
+                        (perceptor as? OfflineJarvisPerceptor)?.cancelListening()
+                        _subtitle.value = ""
+                        updateState(if (config.enabled) JarvisState.STANDBY else JarvisState.DISABLED)
+                    }
+                }
+            }
             JarvisState.PROCESSING -> _subtitle.value = "正在理解指令..."
             JarvisState.EXECUTING -> if (_subtitle.value.isBlank()) _subtitle.value = "正在调度终端执行..."
             JarvisState.STANDBY -> { /* 保持当前字幕，由协程延迟清空 */ }
