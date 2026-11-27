@@ -21,7 +21,9 @@ data class JarvisConfig(
     var bluetoothScoEnabled: Boolean = true,   // 是否启用蓝牙耳机 SCO 宽频语音通道
     var headsetButtonHook: Boolean = true,     // 是否启用耳机按键唤醒保底
     var speechRate: Float = 1.08f,             // 语速 (管家风格干练)
-    var speechPitch: Float = 0.85f             // 音高 (管家风格沉稳磁性)
+    var speechPitch: Float = 0.85f,            // 音高 (管家风格沉稳磁性)
+    var targetHostId: String = "",             // 借力开发者所在目标主机ID (为空自动选择当前活动会话)
+    var targetAgentCommand: String = ""        // 借力开发者的命令标识 (为空自动选择)
 )
 
 data class JarvisContext(

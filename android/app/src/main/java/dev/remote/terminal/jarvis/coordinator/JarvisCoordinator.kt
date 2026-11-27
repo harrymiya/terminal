@@ -79,7 +79,6 @@ object JarvisCoordinator : VoicePerceptorCallback {
         if (perceptor?.isRunning == true) return
 
         config.enabled = true
-        scoManager?.startChannel()
         speaker?.rebuildSynthesizer()
 
         val p = JarvisPerceptorFactory.createPerceptor(ctx, config)
@@ -108,7 +107,7 @@ object JarvisCoordinator : VoicePerceptorCallback {
     /**
      * 外部手动唤醒触发点（如耳机按键长按、双击，或屏幕浮动按钮点击）
      */
-    fun triggerManualWake() {
+    fun triggerManualWake(speakTestPhrase: Boolean = false) {
         if (!config.enabled) {
             start()
         }
@@ -117,6 +116,12 @@ object JarvisCoordinator : VoicePerceptorCallback {
             p.triggerWakeWordDetected()
         } else {
             onWakeWordDetected(config.wakeWord)
+        }
+        if (speakTestPhrase) {
+            scope.launch {
+                kotlinx.coroutines.delay(260)
+                speakWithState("先生，我在，当前语音音量跟随系统媒体音量，随时为您效劳。")
+            }
         }
     }
 
@@ -260,6 +265,37 @@ object JarvisCoordinator : VoicePerceptorCallback {
                     break
                 }
             }
+        } else if (sessions != null && (config.targetHostId.isNotBlank() || config.targetAgentCommand.isNotBlank())) {
+            val wantHost = config.targetHostId
+            val wantCmd = config.targetAgentCommand
+            // First try exact match on both host and agent command
+            var matchedIndex = -1
+            for (i in 0 until sessions.length()) {
+                val s = sessions.getJSONObject(i)
+                val hostMatch = wantHost.isBlank() || s.optString("host_id") == wantHost
+                val cmdMatch = wantCmd.isBlank() || s.optString("agent_command") == wantCmd
+                if (hostMatch && cmdMatch) {
+                    matchedIndex = i
+                    targetSessionId = s.optString("id")
+                    targetAgentName = s.optString("agent_name", targetAgentName)
+                    break
+                }
+            }
+            // Fallback to agent command match across hosts if exact host+agent session isn't open
+            if (matchedIndex < 0 && wantCmd.isNotBlank()) {
+                for (i in 0 until sessions.length()) {
+                    val s = sessions.getJSONObject(i)
+                    if (s.optString("agent_command") == wantCmd) {
+                        matchedIndex = i
+                        targetSessionId = s.optString("id")
+                        targetAgentName = s.optString("agent_name", targetAgentName)
+                        break
+                    }
+                }
+            }
+            if (matchedIndex >= 0 && targetSessionId != null) {
+                dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.focusTerminalHandler?.invoke(targetSessionId, matchedIndex)
+            }
         }
 
         val ack = action.voiceReply ?: "好的先生，正在与 $targetAgentName 沟通。"
@@ -318,17 +354,11 @@ object JarvisCoordinator : VoicePerceptorCallback {
     }
 
     /**
-     * 智能体权限确认拦截主动耳语回调。
-     * 当 AutoConfirmEngine 捕获到等待用户确认时，调用此方法向蓝牙耳机主动耳语。
+     * 智能体权限确认拦截回调。
+     * AutoConfirmEngine 已支持终端全自动回车确认，JARVIS 保持静默，不主动打扰用户。
      */
     fun onApprovalRequired(promptDescription: String) {
-        if (!config.enabled || !config.autoWhisperConfirm) return
-        scope.launch {
-            Log.i(TAG, "Approval required for terminal prompt, whispering to headset")
-            earconManager.playAlertChime()
-            val text = "先生，智能体请求授权：$promptDescription，是否允许？"
-            speakWithState(text)
-        }
+        Log.d(TAG, "Approval prompt detected (handled automatically by AutoConfirmEngine): $promptDescription")
     }
 
     /**

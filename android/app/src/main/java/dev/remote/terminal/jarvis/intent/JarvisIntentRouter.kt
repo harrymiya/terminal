@@ -86,10 +86,21 @@ class JarvisIntentRouter(
     }
 
     override suspend fun resolveIntent(text: String, context: JarvisContext): JarvisAction = withContext(Dispatchers.Default) {
-        val cleanText = text.trim()
-        if (cleanText.isBlank()) return@withContext JarvisAction.None
+        val rawText = text.trim()
+        if (rawText.isBlank()) return@withContext JarvisAction.None
 
-        Log.d(TAG, "Resolving intent for input: \"$cleanText\"")
+        Log.d(TAG, "Resolving intent for input: \"$rawText\"")
+
+        // 纯唤醒词响应
+        val pureWakeRegex = Regex("""^(?:贾维斯|查维斯|加维斯|家维斯|贾维|jarvis)[，,、\s!！?？]*${'$'}""", RegexOption.IGNORE_CASE)
+        if (pureWakeRegex.matches(rawText)) {
+            Log.i(TAG, "Pure wake word matched")
+            return@withContext JarvisAction.DirectReply("先生，我在，请指示。")
+        }
+
+        // 去除指令句首的唤醒词前缀（如："贾维斯确认" -> "确认"，"贾维斯，切换到xxx" -> "切换到xxx"）
+        val wakeWordPrefix = Regex("""^(?:贾维斯|查维斯|加维斯|家维斯|贾维|jarvis)[，,、\s]*""", RegexOption.IGNORE_CASE)
+        val cleanText = rawText.replace(wakeWordPrefix, "").trim().ifBlank { rawText }
 
         // 1. Tier-1 本地 0-Token 拦截
         if (ConfirmRegex.matches(cleanText)) {

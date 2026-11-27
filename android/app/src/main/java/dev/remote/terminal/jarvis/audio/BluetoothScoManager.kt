@@ -62,9 +62,7 @@ class BluetoothScoManager(private val context: Context) : AudioChannelManager {
                     val state = intent.getIntExtra(BluetoothProfile.EXTRA_STATE, BluetoothProfile.STATE_DISCONNECTED)
                     isHeadsetConnected = (state == BluetoothProfile.STATE_CONNECTED)
                     Log.d(TAG, "Bluetooth headset connection changed: isConnected=$isHeadsetConnected")
-                    if (isHeadsetConnected) {
-                        startChannel()
-                    } else {
+                    if (!isHeadsetConnected) {
                         stopChannel()
                     }
                 }

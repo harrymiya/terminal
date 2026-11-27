@@ -119,7 +119,6 @@ object SyncClient {
     }
 
     fun syncSessions(host: HostProfile, pending: List<JSONObject>): SessionSyncBatch {
-        val remoteItems = list(host)
         val completed = mutableSetOf<String>()
         var failures = 0
         pending.forEach { mutation ->
@@ -139,29 +138,28 @@ object SyncClient {
                 failures += 1
             }
         }
+        val remoteItems = list(host)
         return SessionSyncBatch(remoteItems, completed, failures)
     }
 
     fun mergeSessionItems(remoteItems: List<JSONObject>, mutations: List<JSONObject>): List<JSONObject> {
         val merged = linkedMapOf<String, JSONObject>()
-        remoteItems.forEach { item -> item.optString("id").takeIf(String::isNotBlank)?.let { merged[it] = item } }
+        remoteItems.forEach { item ->
+            val id = item.optString("id").replace("-", "")
+            if (id.isNotBlank()) merged[id] = item
+        }
         mutations.forEach { mutation ->
-            val id = mutation.optString("session_id")
+            val id = mutation.optString("session_id").replace("-", "")
             if (id.isBlank()) return@forEach
             when (mutation.optString("method")) {
                 "DELETE" -> merged.remove(id)
-                "PUT" -> mutation.optJSONObject("item")?.let { merged[id] = it }
+                "PUT" -> mutation.optJSONObject("item")?.let {
+                    val itemId = it.optString("id").replace("-", "").ifBlank { id }
+                    merged[itemId] = it
+                }
             }
         }
-        val byWorkspace = linkedMapOf<Pair<String, String>, JSONObject>()
-        merged.values.forEach { item ->
-            val dir = item.optString("directory_path")
-            val cmd = item.optString("agent_command")
-            val key = if (dir.isNotBlank() && cmd.isNotBlank()) dir to cmd else "id" to item.optString("id")
-            byWorkspace.remove(key)
-            byWorkspace[key] = item
-        }
-        return byWorkspace.values.toList()
+        return merged.values.toList()
     }
 
     fun save(task: TerminalTask) {

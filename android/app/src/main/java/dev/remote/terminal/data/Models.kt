@@ -561,6 +561,12 @@ class LocalStore(context: Context) {
     fun loadJarvisAsrMode(): String = preferences.getString("jarvis_asr_mode", "offline") ?: "offline"
     fun saveJarvisAsrMode(mode: String) = preferences.edit().putString("jarvis_asr_mode", mode).apply()
 
+    fun loadJarvisTargetHostId(): String = preferences.getString("jarvis_target_host_id", "") ?: ""
+    fun saveJarvisTargetHostId(hostId: String) = preferences.edit().putString("jarvis_target_host_id", hostId).apply()
+
+    fun loadJarvisTargetAgentCommand(): String = preferences.getString("jarvis_target_agent_command", "") ?: ""
+    fun saveJarvisTargetAgentCommand(cmd: String) = preferences.edit().putString("jarvis_target_agent_command", cmd).apply()
+
     fun saveTiledMode(tiled: Boolean) {
         preferences.edit().putBoolean("tiled_mode", tiled).apply()
     }

@@ -54,6 +54,7 @@ class JarvisSpeaker(
             return
         }
         Log.i(TAG, "Jarvis speaking: \"$text\"")
+        scoManager.stopChannel()
         scoManager.requestAudioFocus()
         activeSynthesizer.speak(text, queueMode) {
             scoManager.abandonAudioFocus()

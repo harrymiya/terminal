@@ -38,7 +38,7 @@ class OfflineJarvisPerceptor(
         private const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
         private const val FRAME_SIZE_MS = 20
         private const val SAMPLES_PER_FRAME = (SAMPLE_RATE * FRAME_SIZE_MS) / 1000 // 320 samples
-        private const val ENERGY_THRESHOLD = 500.0 // 静音门限
+        private const val ENERGY_THRESHOLD = 200.0 // 灵敏度静音门限 (降低阈值提升拾音灵敏度)
     }
 
     private val scope = CoroutineScope(Dispatchers.IO)
@@ -49,6 +49,7 @@ class OfflineJarvisPerceptor(
         private set
 
     @Volatile private var isListeningCommand = false
+    @Volatile private var allowPreferOffline = true
     private var speechRecognizer: SpeechRecognizer? = null
     private var callback: VoicePerceptorCallback? = null
 
@@ -83,15 +84,21 @@ class OfflineJarvisPerceptor(
                             }
 
                             override fun onError(error: Int) {
-                                isListeningCommand = false
                                 Log.w(TAG, "ASR recognition error code=$error")
+                                if ((error == SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED || error == SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE || error == 12 || error == 13) && allowPreferOffline) {
+                                    allowPreferOffline = false
+                                    Log.i(TAG, "Offline speech pack unavailable (code=$error), falling back to system recognizer")
+                                    startAsrListening()
+                                } else {
+                                    resumeAudioRecordCapture()
+                                }
                             }
 
                             override fun onResults(results: Bundle?) {
-                                isListeningCommand = false
                                 val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                                 val recognizedText = matches?.firstOrNull() ?: ""
                                 Log.i(TAG, "ASR Final text: \"$recognizedText\"")
+                                resumeAudioRecordCapture()
                                 if (recognizedText.isNotBlank()) {
                                     callback?.onSpeechRecognized(recognizedText, isFinal = true)
                                 }
@@ -114,6 +121,20 @@ class OfflineJarvisPerceptor(
         }
     }
 
+    private fun resumeAudioRecordCapture() {
+        isListeningCommand = false
+        if (isRunning) {
+            try {
+                val record = audioRecord
+                if (record != null && record.state == AudioRecord.STATE_INITIALIZED && record.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+                    record.startRecording()
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Resume AudioRecord error: ${e.message}")
+            }
+        }
+    }
+
     private fun startAudioCaptureLoop() {
         recordJob = scope.launch {
             val minBufSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT)
@@ -121,7 +142,7 @@ class OfflineJarvisPerceptor(
 
             try {
                 audioRecord = AudioRecord(
-                    MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                    MediaRecorder.AudioSource.VOICE_RECOGNITION,
                     SAMPLE_RATE,
                     CHANNEL_CONFIG,
                     AUDIO_FORMAT,
@@ -139,16 +160,27 @@ class OfflineJarvisPerceptor(
                 var consecutiveSpeechFrames = 0
 
                 while (isActive && isRunning) {
-                    val readCount = audioRecord?.read(frameBuffer, 0, SAMPLES_PER_FRAME) ?: -1
+                    val isSpeaking = dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.state.value == dev.remote.terminal.jarvis.api.JarvisState.SPEAKING
+                    if (isListeningCommand || isSpeaking) {
+                        consecutiveSpeechFrames = 0
+                        kotlinx.coroutines.delay(120)
+                        continue
+                    }
+
+                    val record = audioRecord ?: break
+                    if (record.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+                        try { record.startRecording() } catch (_: Exception) {}
+                    }
+
+                    val readCount = record.read(frameBuffer, 0, SAMPLES_PER_FRAME)
                     if (readCount <= 0) continue
 
                     // 1. Tier-0: VAD 音频能量与活动检测
                     val rms = calculateRms(frameBuffer, readCount)
                     if (rms > ENERGY_THRESHOLD) {
                         consecutiveSpeechFrames++
-                        // 当处于休眠且检测到持续的人声活动时，触发唤醒词匹配窗口
-                        if (!isListeningCommand && consecutiveSpeechFrames >= 5) {
-                            // 触发唤醒词窗口或本地离线快速词根检测
+                        // 当处于休眠且检测到持续人声时（>=3帧，即60ms），立即触发唤醒识别窗口
+                        if (!isListeningCommand && consecutiveSpeechFrames >= 3) {
                             consecutiveSpeechFrames = 0
                             triggerWakeWordDetected()
                         }
@@ -176,20 +208,33 @@ class OfflineJarvisPerceptor(
         Log.i(TAG, "Wake word \"$wakeWord\" detected, activating command window")
         callback?.onWakeWordDetected(wakeWord)
 
+        // 暂停底层 VAD 录音出让麦克风句柄，防止与 SpeechRecognizer 产生硬件资源冲突
+        try {
+            audioRecord?.stop()
+        } catch (e: Exception) {
+            Log.w(TAG, "Pause AudioRecord error: ${e.message}")
+        }
+
         // 在主线程开启单次端侧语音转写
+        startAsrListening()
+    }
+
+    private fun startAsrListening() {
         scope.launch(Dispatchers.Main) {
             try {
                 val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                     putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                    putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.CHINESE.toString())
-                    putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true) // 强制优先完全离线转写
+                    putExtra(RecognizerIntent.EXTRA_LANGUAGE, "zh-CN")
+                    if (allowPreferOffline) {
+                        putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+                    }
                     putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
                     putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
                 }
                 speechRecognizer?.startListening(intent)
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to start speech recognizer: ${e.message}")
-                isListeningCommand = false
+                resumeAudioRecordCapture()
             }
         }
     }

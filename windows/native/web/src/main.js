@@ -1951,12 +1951,14 @@ function renderOperationLogs() {
       meta.appendChild(badge);
     }
     const title = document.createElement('div');
-    title.style.cssText = 'font-weight:600;margin:2px 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
-    title.textContent = entry.session_name || `${entry.agent_name || entry.agent_command} · ${entry.directory_name || entry.directory_path}`;
+    title.style.cssText = 'font-weight:600;margin:2px 0;word-break:break-word;white-space:normal;';
+    const activeSession = [...sessions.values()].find((s) => normalizeSessionId(s.id) === sid || normalizeSessionId(s.remoteId || '') === sid);
+    const liveTitle = activeSession?.title && !(activeSession.titleSource === 'agent' && entry.title_source === 'manual') && (entry.title_source !== 'manual' && (activeSession.titleSource === 'agent' || activeSession.titleSource === 'manual' || !entry.session_name)) ? activeSession.title : '';
+    title.textContent = liveTitle || entry.session_name || `${entry.agent_name || entry.agent_command} · ${entry.directory_name || entry.directory_path}`;
     const detail = document.createElement('div');
     detail.className = 'muted small';
     detail.style.cssText = 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
-    detail.textContent = `主机: ${entry.host_name || ''} · 目录: ${entry.directory_path || ''} · 会话: ${entry.session_name || (entry.session_id || '').slice(0, 12)}`;
+    detail.textContent = `主机: ${entry.host_name || ''} · ${entry.agent_name || entry.agent_command || ''} · 目录: ${entry.directory_path || ''}`;
     info.append(meta, title, detail);
     const btn = document.createElement('button');
     btn.type = 'button';

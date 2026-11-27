@@ -27,11 +27,13 @@ class NativeJarvisSynthesizer : VoiceSynthesizer {
     private var pitch: Float = 0.85f
     private var rate: Float = 1.08f
     private val callbacks = ConcurrentHashMap<String, () -> Unit>()
+    private var appContext: Context? = null
 
     override val isSpeaking: Boolean
         get() = speakingCount > 0 || tts?.isSpeaking == true
 
     override fun initialize(context: Context, onReady: (Boolean) -> Unit) {
+        appContext = context.applicationContext
         tts = TextToSpeech(context.applicationContext) { status ->
             if (status == TextToSpeech.SUCCESS) {
                 val currentTts = tts
@@ -107,6 +109,21 @@ class NativeJarvisSynthesizer : VoiceSynthesizer {
             Log.w(TAG, "TTS not ready, discarding speak request: $text")
             onDone?.invoke()
             return
+        }
+
+        // 严格跟随系统媒体音量 (STREAM_MUSIC)，避免强制改写导致音量突变
+        try {
+            val audioManager = appContext?.getSystemService(Context.AUDIO_SERVICE) as? android.media.AudioManager
+            if (audioManager != null) {
+                if (audioManager.mode != android.media.AudioManager.MODE_NORMAL) {
+                    audioManager.mode = android.media.AudioManager.MODE_NORMAL
+                }
+                val maxVol = audioManager.getStreamMaxVolume(android.media.AudioManager.STREAM_MUSIC)
+                val currentVol = audioManager.getStreamVolume(android.media.AudioManager.STREAM_MUSIC)
+                Log.d(TAG, "TTS speak using STREAM_MUSIC volume=$currentVol/$maxVol mode=${audioManager.mode}")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to inspect audio state: ${e.message}")
         }
 
         val utteranceId = UUID.randomUUID().toString()

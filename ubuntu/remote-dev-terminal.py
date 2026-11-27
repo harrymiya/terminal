@@ -5057,6 +5057,21 @@ class App(Gtk.Window):
                 list_box.pack_start(empty, True, True, 24)
             else:
                 open_ids = {str(s.get("id", "")).replace("-", "") for s in self.sessions}
+                live_titles_by_id = {}
+                for s in self.sessions:
+                    sid = str(s.get("id", "")).replace("-", "").casefold()
+                    s_item = s.get("item") if isinstance(s.get("item"), dict) else {}
+                    t = str(s_item.get("display_name") or s.get("display_name") or "").strip()
+                    if sid and t:
+                        live_titles_by_id[sid] = (t, s.get("title_source", s_item.get("title_source", "default")))
+                for shared_list in (getattr(self, "shared_by_host", {}) or {}).values():
+                    if isinstance(shared_list, list):
+                        for s_item in shared_list:
+                            if isinstance(s_item, dict):
+                                sid = str(s_item.get("id", "")).replace("-", "").casefold()
+                                t = str(s_item.get("display_name") or "").strip()
+                                if sid and t and sid not in live_titles_by_id:
+                                    live_titles_by_id[sid] = (t, s_item.get("title_source", "default"))
                 for idx, entry in enumerate(logs):
                     if idx > 0:
                         div = Gtk.Box()
@@ -5081,9 +5096,14 @@ class App(Gtk.Window):
                     top_lbl = Gtk.Label(label=f"[{ts}] [{client}] {action_label}{status_text}", xalign=0)
                     top_lbl.get_style_context().add_class("subtitle")
                     history_name = operation_log_session_name(entry)
+                    live_info = live_titles_by_id.get(sid_norm.casefold())
+                    if live_info and not (live_info[1] == "agent" and entry.get("title_source") == "manual"):
+                        if live_info[0] and (entry.get("title_source", "default") == "default" or live_info[1] in ("agent", "manual")):
+                            history_name = live_info[0]
                     main_lbl = Gtk.Label(label=history_name or f"{entry.get('agent_name') or entry.get('agent_command', '')} · {entry.get('directory_name') or entry.get('directory_path', '')}", xalign=0)
-                    main_lbl.set_ellipsize(Pango.EllipsizeMode.END)
-                    sub_lbl = Gtk.Label(label=f"主机: {entry.get('host_name', '')} · 目录: {entry.get('directory_path', '')} · 会话: {history_name or entry.get('session_id', '')[:12]}", xalign=0)
+                    main_lbl.set_line_wrap(True)
+                    main_lbl.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+                    sub_lbl = Gtk.Label(label=f"主机: {entry.get('host_name', '')} · {entry.get('agent_name') or entry.get('agent_command', '')} · 目录: {entry.get('directory_path', '')}", xalign=0)
                     sub_lbl.get_style_context().add_class("subtitle")
                     sub_lbl.set_ellipsize(Pango.EllipsizeMode.END)
                     info.pack_start(top_lbl, False, False, 0)

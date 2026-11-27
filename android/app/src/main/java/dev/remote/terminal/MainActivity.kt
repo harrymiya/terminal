@@ -449,6 +449,8 @@ private fun RemoteTerminalApp(store: LocalStore) {
         dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.notifyOnTaskFinished = store.loadJarvisNotifyFinished()
         dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.bluetoothScoEnabled = store.loadJarvisBluetoothSco()
         dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.asrEngineMode = store.loadJarvisAsrMode()
+        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.targetHostId = store.loadJarvisTargetHostId()
+        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.targetAgentCommand = store.loadJarvisTargetAgentCommand()
         dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.hapticFeedbackProvider = {
             val vibrator = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
                 appContext.getSystemService(android.os.VibratorManager::class.java)?.defaultVibrator
@@ -967,11 +969,16 @@ private fun RemoteTerminalApp(store: LocalStore) {
             return withContext(Dispatchers.Main) { hosts.toList() }
         }
 
+        var refreshShared: (HostProfile) -> Unit = {}
+
         fun closeSession(session: TerminalSessionState, syncDeletion: Boolean = true) {
             val index = sessions.indexOf(session)
             if (index < 0) return
             sessionStore.remove(session.task.id)
-            if (syncDeletion && !offlineMode) store.enqueueSessionSync(session.task, "DELETE")
+            if (syncDeletion && !offlineMode) {
+                store.enqueueSessionSync(session.task, "DELETE")
+                refreshShared(session.task.host)
+            }
             AutoConfirmEngine.unregisterSession(session.task.id)
             session.cancelAutoEnter()
             TerminalConnectionRegistry.unregister(session.task.id, session.controller)
@@ -1093,10 +1100,14 @@ private fun RemoteTerminalApp(store: LocalStore) {
             val agentLabel = if (same == 0) agent.name else "${agent.name} ${same + 1}"
             val displayName = if (directory.name.isNotBlank()) "${directory.name} · $agentLabel" else agentLabel
             val taskHost = if (host.password.isNotBlank()) host else host.copy(password = store.loadHostPassword(host.id))
-            val task = restoredTask ?: TerminalTask(UUID.randomUUID().toString(), taskHost, directory, agent, displayName)
+            val task = (restoredTask ?: TerminalTask(UUID.randomUUID().toString().replace("-", ""), taskHost, directory, agent, displayName))
+                .let { if (it.host.password.isBlank() && taskHost.password.isNotBlank()) it.copy(host = taskHost) else it }
             if (restoredTask == null || attachOrCreate) {
                 sessionStore.save(task)
-                if (!offlineMode) store.enqueueSessionSync(task, "PUT", SyncClient.sessionItem(task))
+                if (!offlineMode) {
+                    store.enqueueSessionSync(task, "PUT", SyncClient.sessionItem(task))
+                    refreshShared(taskHost)
+                }
                 if (restoredTask == null) recordOperationLog(task, "open")
             }
             val state = TerminalSessionState(task, mainHandler, appContext) { sessionTask ->
@@ -1200,13 +1211,11 @@ private fun RemoteTerminalApp(store: LocalStore) {
         }
 
         fun openSharedSession(host: HostProfile, item: org.json.JSONObject, activate: Boolean = true) {
-            val id = item.getString("id")
+            val id = item.getString("id").replace("-", "")
             val path = item.getString("directory_path")
             val command = item.getString("agent_command")
-            // Reuse an existing session matching either the session ID or the workspace (host, path, command).
             val existing = sessions.indexOfFirst {
-                it.task.id.replace("-", "") == id ||
-                    (it.task.host.id == host.id && it.task.directory.path == path && it.task.agent.command == command)
+                it.task.id.replace("-", "") == id
             }
             if (existing >= 0) {
                 val remoteName = item.optString("display_name")
@@ -1216,9 +1225,10 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 return
             }
             val currentHost = hosts.firstOrNull { it.id == host.id } ?: return
-            val directory = currentHost.directories.firstOrNull { it.path == path }
+            val effectiveHost = if (currentHost.password.isNotBlank()) currentHost else currentHost.copy(password = store.loadHostPassword(currentHost.id))
+            val directory = effectiveHost.directories.firstOrNull { it.path == path }
                 ?: ProjectDirectory(UUID.randomUUID().toString(), item.getString("directory_name"), path)
-            val updatedHost = if (directory in currentHost.directories) currentHost else currentHost.copy(directories = currentHost.directories + directory)
+            val updatedHost = if (directory in effectiveHost.directories) effectiveHost else effectiveHost.copy(directories = effectiveHost.directories + directory)
             if (updatedHost != currentHost) saveHosts(hosts.map { if (it.id == currentHost.id) updatedHost else it })
             val agent = agents.firstOrNull { it.command == command }
                 ?: AgentPreset(UUID.randomUUID().toString(), item.getString("agent_name"), command, "✳").also { agents.add(it); store.saveAgents(agents) }
@@ -1240,7 +1250,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
             val mergedPending = pendingBeforePull + pendingAfterPush
             val items = SyncClient.mergeSessionItems(batch.remoteItems, mergedPending)
             startupShared = startupShared.filterNot { it.first.id == host.id } + items.map { host to it }
-            val remoteIds = items.map { it.optString("id") }.toSet()
+            val remoteIds = items.map { it.optString("id").replace("-", "") }.toSet()
             val hadSessions = sessions.isNotEmpty()
             sessions.toList().filter { session ->
                 session.task.host.id == host.id && session.task.id.replace("-", "") !in remoteIds &&
@@ -1252,11 +1262,12 @@ private fun RemoteTerminalApp(store: LocalStore) {
             store.clearPendingSessionSync(batch.completedMutationIds)
         }
 
-        fun refreshShared(host: HostProfile) {
-            if (offlineMode || !autoSyncEnabled) return
-            scope.launch {
-                runCatching { syncSharedSessions(host) }
-                    .onFailure { snackbars.showSnackbar("${host.name} 同步失败：${it.message}") }
+        refreshShared = { host ->
+            if (!offlineMode && autoSyncEnabled) {
+                scope.launch {
+                    runCatching { syncSharedSessions(host) }
+                        .onFailure { snackbars.showSnackbar("${host.name} 同步失败：${it.message}") }
+                }
             }
         }
 
@@ -1301,6 +1312,8 @@ private fun RemoteTerminalApp(store: LocalStore) {
                             put(org.json.JSONObject().apply {
                                 put("index", idx)
                                 put("id", s.task.id)
+                                put("host_id", s.task.host.id)
+                                put("host_name", s.task.host.name)
                                 put("display_name", s.task.displayName)
                                 put("directory_name", s.task.directory.name)
                                 put("directory_path", s.task.directory.path)
@@ -1679,6 +1692,18 @@ private fun RemoteTerminalApp(store: LocalStore) {
                         logs = operationLogs,
                         agents = agents,
                         openSessionIds = sessions.map { it.task.id.replace("-", "") }.toSet(),
+                        liveSessionTitles = buildMap {
+                            startupShared.forEach { (_, item) ->
+                                val sid = item.optString("id").replace("-", "").lowercase()
+                                val title = item.optString("display_name").trim()
+                                if (sid.isNotBlank() && title.isNotBlank()) put(sid, title)
+                            }
+                            sessions.forEach { s ->
+                                val sid = s.task.id.replace("-", "").lowercase()
+                                val title = s.task.displayName.trim()
+                                if (sid.isNotBlank() && title.isNotBlank()) put(sid, title)
+                            }
+                        },
                         onBack = { route = AppRoute.HOME },
                         onRefresh = {
                             scope.launch {
@@ -1690,6 +1715,8 @@ private fun RemoteTerminalApp(store: LocalStore) {
                     )
                     AppRoute.SETTINGS -> SettingsScreen(
                         store = store,
+                        hosts = hosts,
+                        agents = agents,
                         syncUrl = syncUrl,
                         syncToken = syncToken,
                         offlineMode = offlineMode,
@@ -1767,6 +1794,8 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 when (route) {
                     AppRoute.SETTINGS -> SettingsScreen(
                         store = store,
+                        hosts = hosts,
+                        agents = agents,
                         syncUrl = syncUrl,
                         syncToken = syncToken,
                         offlineMode = offlineMode,
@@ -1836,6 +1865,18 @@ private fun RemoteTerminalApp(store: LocalStore) {
                         logs = operationLogs,
                         agents = agents,
                         openSessionIds = sessions.map { it.task.id.replace("-", "") }.toSet(),
+                        liveSessionTitles = buildMap {
+                            startupShared.forEach { (_, item) ->
+                                val sid = item.optString("id").replace("-", "").lowercase()
+                                val title = item.optString("display_name").trim()
+                                if (sid.isNotBlank() && title.isNotBlank()) put(sid, title)
+                            }
+                            sessions.forEach { s ->
+                                val sid = s.task.id.replace("-", "").lowercase()
+                                val title = s.task.displayName.trim()
+                                if (sid.isNotBlank() && title.isNotBlank()) put(sid, title)
+                            }
+                        },
                         onBack = { route = AppRoute.HOME },
                         onRefresh = {
                             scope.launch {
@@ -2629,6 +2670,7 @@ private fun OperationLogsScreen(
     logs: List<OperationLogEntry>,
     agents: List<AgentPreset>,
     openSessionIds: Set<String>,
+    liveSessionTitles: Map<String, String> = emptyMap(),
     onBack: () -> Unit,
     onRefresh: () -> Unit,
     onRestore: (OperationLogEntry) -> Unit,
@@ -2714,13 +2756,14 @@ private fun OperationLogsScreen(
                             Spacer(Modifier.height(6.dp))
                             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 AgentMark(iconValue, 20.dp)
+                                val normalizedSid = entry.sessionId.replace("-", "").lowercase()
+                                val fullTitle = liveSessionTitles[normalizedSid]?.takeIf { it.isNotBlank() && entry.titleSource != "manual" }
+                                    ?: entry.sessionName.ifBlank { "${entry.agentName.ifBlank { entry.agentCommand }} · ${entry.directoryName.ifBlank { entry.directoryPath }}" }
                                 Text(
-                                    entry.sessionName.ifBlank { "${entry.agentName.ifBlank { entry.agentCommand }} · ${entry.directoryName.ifBlank { entry.directoryPath }}" },
+                                    fullTitle,
                                     color = White,
                                     fontSize = 14.sp,
                                     fontWeight = FontWeight.SemiBold,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
                                     modifier = Modifier.weight(1f),
                                 )
                             }
@@ -2729,13 +2772,6 @@ private fun OperationLogsScreen(
                                 "主机: ${entry.hostName}  ·  ${entry.agentName.ifBlank { entry.agentCommand }}  ·  目录: ${entry.directoryPath}",
                                 color = Muted,
                                 fontSize = 12.sp,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                            Text(
-                                "会话: ${entry.sessionName.ifBlank { entry.sessionId }} (${entry.sessionId.take(12)})",
-                                color = Muted,
-                                fontSize = 11.sp,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                             )
@@ -4689,6 +4725,8 @@ private fun PadWorkspace(
 @Composable
 private fun SettingsScreen(
     store: LocalStore,
+    hosts: List<HostProfile> = emptyList(),
+    agents: List<AgentPreset> = emptyList(),
     syncUrl: String,
     syncToken: String,
     offlineMode: Boolean,
@@ -4873,10 +4911,11 @@ private fun SettingsScreen(
 
             var jarvisEnabled by remember { mutableStateOf(store.loadJarvisEnabled()) }
             var jarvisWakeWord by remember { mutableStateOf(store.loadJarvisWakeWord()) }
-            var jarvisAutoConfirm by remember { mutableStateOf(store.loadJarvisAutoConfirm()) }
             var jarvisNotifyFinished by remember { mutableStateOf(store.loadJarvisNotifyFinished()) }
             var jarvisBluetoothSco by remember { mutableStateOf(store.loadJarvisBluetoothSco()) }
             var jarvisAsrMode by remember { mutableStateOf(store.loadJarvisAsrMode()) }
+            var jarvisTargetHostId by remember { mutableStateOf(store.loadJarvisTargetHostId()) }
+            var jarvisTargetAgentCmd by remember { mutableStateOf(store.loadJarvisTargetAgentCommand()) }
 
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Column(Modifier.weight(1f)) {
@@ -4903,27 +4942,109 @@ private fun SettingsScreen(
                     modifier = Modifier.fillMaxWidth()
                 )
 
+                Text("借力开发者能力", color = White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                val selectedHostLabel = hosts.firstOrNull { it.id == jarvisTargetHostId }?.name ?: "自动/当前主机"
+                val selectedAgentLabel = agents.firstOrNull { it.command == jarvisTargetAgentCmd }?.name ?: "自动/当前开发者"
+                Text(
+                    "选择特定主机下的开发者供贾维斯调用（当前：$selectedHostLabel · $selectedAgentLabel）",
+                    color = Muted,
+                    fontSize = 11.sp
+                )
+                Text("目标主机", color = Muted, fontSize = 11.sp)
+                Row(
+                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    @Composable
+                    fun ChoicePill(selected: Boolean, onClick: () -> Unit, content: @Composable () -> Unit) {
+                        Surface(
+                            color = if (selected) Mint.copy(alpha = 0.2f) else Panel,
+                            shape = RoundedCornerShape(12.dp),
+                            border = BorderStroke(1.dp, if (selected) Mint else Edge),
+                            modifier = Modifier.clip(RoundedCornerShape(12.dp)).clickable(onClick = onClick)
+                        ) {
+                            Box(Modifier.padding(horizontal = 12.dp, vertical = 7.dp)) {
+                                content()
+                            }
+                        }
+                    }
+
+                    val autoSelected = jarvisTargetHostId.isBlank()
+                    ChoicePill(
+                        selected = autoSelected,
+                        onClick = {
+                            jarvisTargetHostId = ""
+                            store.saveJarvisTargetHostId("")
+                            dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.targetHostId = ""
+                        }
+                    ) { Text("自动", color = if (autoSelected) Mint else White, fontSize = 12.sp) }
+                    hosts.forEach { h ->
+                        val isSel = jarvisTargetHostId == h.id
+                        ChoicePill(
+                            selected = isSel,
+                            onClick = {
+                                jarvisTargetHostId = h.id
+                                store.saveJarvisTargetHostId(h.id)
+                                dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.targetHostId = h.id
+                            }
+                        ) { Text("${h.icon} ${h.name}".trim(), color = if (isSel) Mint else White, fontSize = 12.sp) }
+                    }
+                }
+                Text("目标开发者", color = Muted, fontSize = 11.sp)
+                Row(
+                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    @Composable
+                    fun AgentPill(selected: Boolean, onClick: () -> Unit, content: @Composable () -> Unit) {
+                        Surface(
+                            color = if (selected) Mint.copy(alpha = 0.2f) else Panel,
+                            shape = RoundedCornerShape(12.dp),
+                            border = BorderStroke(1.dp, if (selected) Mint else Edge),
+                            modifier = Modifier.clip(RoundedCornerShape(12.dp)).clickable(onClick = onClick)
+                        ) {
+                            Box(Modifier.padding(horizontal = 12.dp, vertical = 7.dp)) {
+                                content()
+                            }
+                        }
+                    }
+
+                    val autoAgentSel = jarvisTargetAgentCmd.isBlank()
+                    AgentPill(
+                        selected = autoAgentSel,
+                        onClick = {
+                            jarvisTargetAgentCmd = ""
+                            store.saveJarvisTargetAgentCommand("")
+                            dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.targetAgentCommand = ""
+                        }
+                    ) { Text("自动", color = if (autoAgentSel) Mint else White, fontSize = 12.sp) }
+                    agents.forEach { a ->
+                        val isSel = jarvisTargetAgentCmd == a.command
+                        AgentPill(
+                            selected = isSel,
+                            onClick = {
+                                jarvisTargetAgentCmd = a.command
+                                store.saveJarvisTargetAgentCommand(a.command)
+                                dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.targetAgentCommand = a.command
+                            }
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                                AgentMark(a.icon, 14.dp)
+                                Text(a.name, color = if (isSel) Mint else White, fontSize = 12.sp)
+                            }
+                        }
+                    }
+                }
+
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     Column(Modifier.weight(1f)) {
                         Text("蓝牙耳机 SCO 通话通道", color = White, fontSize = 13.sp)
-                        Text("将录音与发音强制路由至蓝牙耳机听筒，实现私密耳语", color = Muted, fontSize = 11.sp)
+                        Text("仅在拾音时短暂开启蓝牙通道，播报使用高清媒体通道稳定音量", color = Muted, fontSize = 11.sp)
                     }
                     Switch(checked = jarvisBluetoothSco, onCheckedChange = {
                         jarvisBluetoothSco = it
                         store.saveJarvisBluetoothSco(it)
                         dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.bluetoothScoEnabled = it
-                    })
-                }
-
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Column(Modifier.weight(1f)) {
-                        Text("敏感确认主动耳语询问", color = White, fontSize = 13.sp)
-                        Text("当智能体遇到操作授权时，主动向耳机耳语并等待口令确认", color = Muted, fontSize = 11.sp)
-                    }
-                    Switch(checked = jarvisAutoConfirm, onCheckedChange = {
-                        jarvisAutoConfirm = it
-                        store.saveJarvisAutoConfirm(it)
-                        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.autoWhisperConfirm = it
                     })
                 }
 
@@ -4941,7 +5062,7 @@ private fun SettingsScreen(
 
                 FilledTonalButton(
                     onClick = {
-                        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.triggerManualWake()
+                        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.triggerManualWake(speakTestPhrase = true)
                     },
                     modifier = Modifier.fillMaxWidth()
                 ) {

@@ -343,7 +343,6 @@ object AutoConfirmEngine {
 
                 postMain {
                     callback.onAutoEnterScheduled(deadline, detectedSig)
-                    dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.onApprovalRequired(detectedSig.take(30))
                 }
                 return@synchronized
             }
