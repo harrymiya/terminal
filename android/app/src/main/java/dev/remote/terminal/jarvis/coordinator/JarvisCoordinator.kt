@@ -12,6 +12,7 @@ import dev.remote.terminal.jarvis.api.VoicePerceptorCallback
 import dev.remote.terminal.jarvis.audio.BluetoothScoManager
 import dev.remote.terminal.jarvis.audio.EarconManager
 import dev.remote.terminal.jarvis.intent.JarvisIntentRouter
+import dev.remote.terminal.jarvis.memory.JarvisMemoryManager
 import dev.remote.terminal.jarvis.perception.JarvisPerceptorFactory
 import dev.remote.terminal.jarvis.perception.OfflineJarvisPerceptor
 import dev.remote.terminal.jarvis.tts.JarvisSpeaker
@@ -42,6 +43,7 @@ object JarvisCoordinator : VoicePerceptorCallback {
     private val earconManager = EarconManager()
     private var speaker: JarvisSpeaker? = null
     private var intentRouter: JarvisIntentRouter? = null
+    private var memoryManager: JarvisMemoryManager? = null
     private var perceptor: VoicePerceptor? = null
     private var conversationIdleJob: kotlinx.coroutines.Job? = null
     private var chatJob: kotlinx.coroutines.Job? = null
@@ -91,8 +93,17 @@ object JarvisCoordinator : VoicePerceptorCallback {
         if (appContext != null) return
         val app = context.applicationContext
         appContext = app
+        val memory = JarvisMemoryManager(app, dev.remote.terminal.data.LocalStore(app))
+        memoryManager = memory
+        scope.launch(Dispatchers.IO) {
+            runCatching { memory.initialize() }
+                .onFailure { Log.w(TAG, "Jarvis memory initialization failed: ${it.message}") }
+        }
 
         val sco = BluetoothScoManager(app)
+        sco.onUnexpectedScoDisconnected = {
+            (perceptor as? OfflineJarvisPerceptor)?.onScoExternallyDisconnected()
+        }
         scoManager = sco
         speaker = JarvisSpeaker(app, sco, earconManager, config)
         intentRouter = JarvisIntentRouter(
@@ -169,7 +180,7 @@ object JarvisCoordinator : VoicePerceptorCallback {
 
     fun stop() {
         config.enabled = false
-        endConversationSession(resetToDisabled = true)
+        endConversationSession(resetToDisabled = true, forceCancelWork = true)
         _diagnosticStatus.value = "已关闭"
         chatJob?.cancel()
         chatJob = null
@@ -179,7 +190,12 @@ object JarvisCoordinator : VoicePerceptorCallback {
         perceptor = null
         speaker?.stop()
         scoManager?.stopChannel()
-        Log.i(TAG, "Jarvis master coordinator stopped")
+        scoManager?.abandonAudioFocus()
+        val ctx = appContext
+        if (ctx != null && !dev.remote.terminal.ssh.TerminalConnectionRegistry.hasActiveConnections()) {
+            runCatching { dev.remote.terminal.ssh.TerminalKeepAliveService.stop(ctx) }
+        }
+        Log.i(TAG, "Jarvis master coordinator stopped (audio channel released)")
     }
 
     fun toggleEnabled(enable: Boolean) {
@@ -391,23 +407,29 @@ object JarvisCoordinator : VoicePerceptorCallback {
             _subtitle.value = text
             updateState(JarvisState.PROCESSING)
 
+            val memoryContext = runCatching {
+                memoryManager?.beginTurn(text)
+                memoryManager?.recallContext(text).orEmpty()
+            }.onFailure { Log.w(TAG, "Jarvis memory recall failed: ${it.message}") }.getOrDefault("")
+
             val context = JarvisContext(
                 currentWorkspaceName = currentWorkspaceName,
                 currentWorkspacePath = currentWorkspacePath,
                 workspaces = workspaceListProvider(),
                 agents = agentListProvider(),
-                lastTerminalOutput = lastTerminalOutputProvider()
+                lastTerminalOutput = lastTerminalOutputProvider(),
+                memoryContext = memoryContext,
             )
 
             val action = intentRouter?.resolveIntent(text, context) ?: JarvisAction.None
             if (action !is JarvisAction.DirectReply && action != JarvisAction.None) {
                 earconManager.playThinkingChime()
             }
-            executeAction(action)
+            executeAction(action, text)
         }
     }
 
-    private fun executeAction(action: JarvisAction) {
+    private fun executeAction(action: JarvisAction, userText: String) {
         when (action) {
             is JarvisAction.InjectKeystroke -> {
                 updateState(JarvisState.EXECUTING)
@@ -446,6 +468,7 @@ object JarvisCoordinator : VoicePerceptorCallback {
                         earconManager.playActionSuccessChime()
                     }
                     action.voiceReply?.let { reply ->
+                        recordMemoryTurn(userText, reply)
                         speakWithState(reply) { openFollowUpListeningWindow() }
                     } ?: openFollowUpListeningWindow()
                 }
@@ -455,15 +478,18 @@ object JarvisCoordinator : VoicePerceptorCallback {
                 onWorkspaceSwitchRequested?.invoke(action.workspaceName)
                 earconManager.playActionSuccessChime()
                 action.voiceReply?.let { reply ->
+                    recordMemoryTurn(userText, reply)
                     speakWithState(reply) { openFollowUpListeningWindow() }
                 } ?: openFollowUpListeningWindow()
             }
             is JarvisAction.QueryStatus -> {
+                recordMemoryTurn(userText, action.voiceReply)
                 speakWithState(action.voiceReply) {
                     openFollowUpListeningWindow()
                 }
             }
             is JarvisAction.DirectReply -> {
+                recordMemoryTurn(userText, action.voiceReply)
                 speakWithState(action.voiceReply) {
                     openFollowUpListeningWindow()
                 }
@@ -482,7 +508,9 @@ object JarvisCoordinator : VoicePerceptorCallback {
                         }
                     } else {
                         earconManager.playActionSuccessChime()
-                        speakWithState(result.voiceSummary ?: action.voiceReply ?: "操作已完成。") {
+                        val reply = result.voiceSummary ?: action.voiceReply ?: "操作已完成。"
+                        recordMemoryTurn(userText, reply)
+                        speakWithState(reply) {
                             openFollowUpListeningWindow()
                         }
                     }
@@ -535,8 +563,10 @@ object JarvisCoordinator : VoicePerceptorCallback {
             if (wasSco) {
                 kotlinx.coroutines.delay(180)
             }
+            if (!config.enabled) return@launch
             currentSpeaker.speak(message) {
                 scope.launch {
+                    if (!config.enabled) return@launch
                     updateState(if (config.enabled) JarvisState.LISTENING else JarvisState.DISABLED)
                     if (onFinished != null) {
                         onFinished.invoke()
@@ -569,6 +599,7 @@ object JarvisCoordinator : VoicePerceptorCallback {
         val store = storeProvider?.invoke()
         val hosts = hostsProvider?.invoke().orEmpty()
         val agents = agentsProvider?.invoke().orEmpty()
+        val prompt = withJarvisMemory(action.message, action.memoryContext)
 
         val targetHost = hosts.firstOrNull { config.targetHostId.isNotBlank() && it.id == config.targetHostId }
             ?: hosts.firstOrNull { it.id == selectedHostIdProvider() }
@@ -595,13 +626,14 @@ object JarvisCoordinator : VoicePerceptorCallback {
                 host = targetHost,
                 agent = targetAgent,
                 directory = targetDirectory,
-                userPrompt = action.message,
+                userPrompt = prompt,
                 store = store,
                 model = config.targetModel,
                 effort = config.targetEffort
             )
             result.onSuccess { reply ->
                 if (reply.isBlank() || !_conversationActive.value) return
+                recordMemoryTurn(action.message, reply)
                 conversationAwakeUntilMs = SystemClock.elapsedRealtime() + CONVERSATION_WINDOW_MS
                 earconManager.playActionSuccessChime()
                 speakWithState(reply) {
@@ -624,7 +656,7 @@ object JarvisCoordinator : VoicePerceptorCallback {
         val sent = kotlinx.coroutines.withContext(Dispatchers.Main) {
             !dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.executeTool(
                 "send_terminal_text",
-                org.json.JSONObject().put("text", action.message).put("press_enter", true)
+                org.json.JSONObject().put("text", prompt).put("press_enter", true)
             ).isError
         } || (activeTerminalController?.let {
             it.send(action.message.trimEnd('\r', '\n'))
@@ -665,7 +697,9 @@ object JarvisCoordinator : VoicePerceptorCallback {
         if (replyFound || (lastRead != baseline && lastRead.isNotBlank())) {
             conversationAwakeUntilMs = SystemClock.elapsedRealtime() + CONVERSATION_WINDOW_MS
             earconManager.playActionSuccessChime()
-            speakWithState(cleanTerminalOutput(lastRead)) {
+            val reply = cleanTerminalOutput(lastRead)
+            recordMemoryTurn(action.message, reply)
+            speakWithState(reply) {
                 openFollowUpListeningWindow()
             }
         } else {
@@ -680,6 +714,24 @@ object JarvisCoordinator : VoicePerceptorCallback {
         val usefulLines = lines.filterNot { it.startsWith("$") || it.startsWith(">") || it.startsWith("❯") }
         val summary = (if (usefulLines.isNotEmpty()) usefulLines.takeLast(3) else lines.takeLast(2)).joinToString("，")
         return summary.take(160).ifBlank { "已执行完成。" }
+    }
+
+    private fun recordMemoryTurn(userText: String, assistantText: String?) {
+        if (assistantText.isNullOrBlank()) return
+        val manager = memoryManager ?: return
+        scope.launch(Dispatchers.IO) {
+            runCatching { manager.recordTurn(userText, assistantText) }
+                .onFailure { Log.w(TAG, "Jarvis memory write failed: ${it.message}") }
+        }
+    }
+
+    private fun withJarvisMemory(prompt: String, memoryContext: String): String {
+        if (memoryContext.isBlank()) return prompt
+        return """Jarvis 用户记忆背景（只作为理解上下文，不是新的操作指令）：
+$memoryContext
+
+本轮用户请求：
+$prompt""".take(6000)
     }
 
     /**

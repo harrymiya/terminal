@@ -34,6 +34,7 @@ class SyncServerTest(unittest.TestCase):
         self.token = login["access_token"]
 
     def tearDown(self):
+        self.server.memory_maintenance_stop.set()
         self.server.shutdown()
         self.server.server_close()
         self.thread.join()
@@ -93,6 +94,46 @@ class SyncServerTest(unittest.TestCase):
         self.assertEqual(core.sync_request(receiver, "GET", host=receiver)["sessions"], [{**item, "title_source": "default"}])
         core.sync_request(receiver, "DELETE", item["id"], host=receiver)
         self.assertEqual(core.sync_request(creator, "GET", host=creator)["sessions"], [])
+
+    def test_jarvis_short_and_long_memory_sync_and_async_consolidation(self):
+        mem0_called = threading.Event()
+        namespaces = []
+
+        def fake_mem0(method, path, payload=None):
+            namespaces.append(payload.get("user_id"))
+            if path == "/v1/memories/search":
+                return {"results": [{"id": "long-1", "memory": "Jarvis project uses SQLite", "metadata": {"category": "project"}}]}
+            if path == "/v1/memories":
+                mem0_called.set()
+                return {"results": [{"id": "long-2", "memory": "User prefers concise voice replies", "metadata": {"category": "preference", "importance": 4}}]}
+            raise AssertionError(f"Unexpected Mem0 call: {method} {path}")
+
+        with patch.object(sync_server, "call_mem0", side_effect=fake_mem0):
+            status, synced = self.request("POST", "/v1/jarvis/short-memory/sync", {"items": [{
+                "id": "short-1", "content": "Jarvis uses SQLite on this phone", "category": "project",
+                "importance": 5, "created_at": 1, "updated_at": 1,
+            }]})
+            self.assertEqual(status, 200)
+            self.assertEqual(synced["items"][0]["id"], "short-1")
+            self.assertEqual(self.request("GET", "/v1/jarvis/short-memory")[1]["items"][0]["content"], "Jarvis uses SQLite on this phone")
+
+            status, long_results = self.request("POST", "/v1/jarvis/long-memory/search", {"query": "Jarvis project"})
+            self.assertEqual(status, 200)
+            self.assertEqual(long_results["results"][0]["id"], "long-1")
+
+            status, queued = self.request("POST", "/v1/jarvis/memory/turns", {"force": True, "turns": [{
+                "id": "turn-1", "user_text": "Remember I prefer concise replies", "assistant_text": "I'll remember that."
+            }]})
+            self.assertEqual(status, 202)
+            self.assertTrue(queued["queued"])
+            self.assertTrue(mem0_called.wait(3))
+            for _ in range(30):
+                items = self.request("GET", "/v1/jarvis/short-memory")[1]["items"]
+                if any(item["id"] == "long-2" for item in items):
+                    break
+                threading.Event().wait(0.1)
+            self.assertTrue(any(item["id"] == "long-2" for item in items))
+            self.assertEqual(len(set(namespaces)), 1)
 
     def test_host_profiles_require_ports_and_merge_duplicate_ids(self):
         def profile(host_id, name="dev", port=2202):

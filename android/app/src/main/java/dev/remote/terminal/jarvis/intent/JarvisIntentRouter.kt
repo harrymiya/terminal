@@ -233,7 +233,8 @@ class JarvisIntentRouter(
                 return@withContext JarvisAction.ChatWithDeveloper(
                     agentName = rawAgent,
                     message = prompt,
-                    voiceReply = "好的先生，正在与${rawAgent}沟通。"
+                    voiceReply = "好的先生，正在与${rawAgent}沟通。",
+                    memoryContext = context.memoryContext,
                 )
             }
         }
@@ -270,7 +271,9 @@ class JarvisIntentRouter(
         if (serverUrl.isBlank()) {
             // 没有配置中枢同步服务器时，默认直接借力当前终端正在运行的 AI 开发者
             Log.w(TAG, "No sync server configured for LLM parsing, routing as ChatWithDeveloper")
-            return@withContext JarvisAction.ChatWithDeveloper(null, userPrompt, "好的先生，已将任务交由当前开发者处理。")
+            return@withContext JarvisAction.ChatWithDeveloper(
+                null, userPrompt, "好的先生，已将任务交由当前开发者处理。", context.memoryContext
+            )
         }
 
         try {
@@ -292,6 +295,7 @@ class JarvisIntentRouter(
                     put("current_workspace", context.currentWorkspaceName ?: "")
                     put("workspaces", org.json.JSONArray(context.workspaces))
                     put("agents", org.json.JSONArray(context.agents))
+                    if (context.memoryContext.isNotBlank()) put("memory_context", context.memoryContext)
                     if (appState != null) {
                         put("app_state", appState)
                     }

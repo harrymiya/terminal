@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Small authenticated, persistent registry of remote terminal sessions."""
 import argparse
+from datetime import datetime, timezone
 import hmac
 import hashlib
 import json
@@ -8,16 +9,135 @@ import os
 import re
 import secrets
 import sqlite3
+import threading
 import time
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qsl, urlsplit
+from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qsl, urlencode, urlsplit
+from urllib.request import ProxyHandler, Request, build_opener
 
 MAX_BODY = 65536
+MAX_MEMORY_BODY = 2 * 1024 * 1024
 FIELDS = ("id", "directory_path", "directory_name", "agent_name", "agent_command", "display_name")
 OPTIONAL_SESSION_FIELDS = ("title_source",)
 WORKSPACE_FIELDS = ("id", "name", "path", "icon")
 AGENT_FIELDS = ("id", "name", "command", "icon")
+MEMORY_CATEGORIES = {"profile", "preference", "project", "decision", "goal", "environment", "general"}
+MEM0_DEFAULT_URL = "http://192.168.20.45:8888"
+
+
+def call_mem0(method, path, payload=None):
+    """Call the machine-local Mem0 service without exposing its key to clients or logs."""
+    base_url = os.environ.get("RDT_MEM0_URL", MEM0_DEFAULT_URL).rstrip("/")
+    api_key = os.environ.get("MEM0_API_KEY", "").strip()
+    if not api_key:
+        key_file = os.environ.get("MEM0_API_KEY_FILE", "/home/agent/.config/mem0/api-key")
+        try:
+            api_key = Path(key_file).read_text(encoding="utf-8").strip()
+        except OSError:
+            api_key = ""
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else None
+    headers = {"Accept": "application/json", "Connection": "close"}
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+    if api_key:
+        headers["X-API-Key"] = api_key
+    request = Request(base_url + path, data=body, headers=headers, method=method)
+    try:
+        opener = build_opener(ProxyHandler({}))
+        with opener.open(request, timeout=45) as response:
+            raw = response.read(1_048_577)
+    except HTTPError as error:
+        raise RuntimeError(f"Mem0 service returned HTTP {error.code}") from None
+    except (URLError, TimeoutError, OSError):
+        raise RuntimeError("Mem0 service is unavailable") from None
+    if len(raw) > 1_048_576:
+        raise RuntimeError("Mem0 response is too large")
+    try:
+        result = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise RuntimeError("Mem0 returned an invalid response") from None
+    if not isinstance(result, dict):
+        raise RuntimeError("Mem0 returned an invalid response")
+    return result
+
+
+def memory_category(text):
+    value = str(text).lower()
+    if any(word in value for word in ("喜欢", "偏好", "习惯", "prefer", "favorite")):
+        return "preference"
+    if any(word in value for word in ("项目", "工作区", "代码库", "仓库", "project", "repository")):
+        return "project"
+    if any(word in value for word in ("决定", "约定", "规则", "decision", "agreed")):
+        return "decision"
+    if any(word in value for word in ("目标", "计划", "想要", "goal", "plan")):
+        return "goal"
+    if any(word in value for word in ("环境", "设备", "主机", "系统", "environment", "device")):
+        return "environment"
+    if any(word in value for word in ("我叫", "我是", "我的", "家人", "生日", "name is", "my family")):
+        return "profile"
+    return "general"
+
+
+def memory_timestamp(value, fallback):
+    if isinstance(value, (int, float)):
+        return int(value)
+    text = str(value or "").strip()
+    try:
+        return int(text)
+    except ValueError:
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return int(parsed.timestamp() * 1000)
+        except ValueError:
+            return fallback
+
+
+def normalize_memory_result(result, now_ms=None):
+    if not isinstance(result, dict):
+        return None
+    content = str(result.get("memory") or result.get("text") or "").strip()[:2000]
+    if not content:
+        return None
+    metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+    category = str(metadata.get("category") or memory_category(content))
+    if category not in MEMORY_CATEGORIES:
+        category = memory_category(content)
+    try:
+        importance = max(1, min(5, int(metadata.get("importance", 3))))
+    except (TypeError, ValueError):
+        importance = 3
+    now = int(now_ms or time.time() * 1000)
+    memory_id = str(result.get("id") or hashlib.sha256(content.casefold().encode()).hexdigest())[:128]
+    return {
+        "id": memory_id,
+        "content": content,
+        "category": category,
+        "importance": importance,
+        "created_at": memory_timestamp(result.get("created_at"), now),
+        "updated_at": memory_timestamp(result.get("updated_at"), now),
+        "last_recalled_at": 0,
+        "recall_count": 0,
+        "source": "mem0",
+    }
+
+
+def upsert_short_memory(db, user_id, item):
+    db.execute(
+        "INSERT INTO jarvis_short_memories(user_id,id,content,category,importance,created_at,updated_at,last_recalled_at,recall_count,source) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id,id) DO UPDATE SET "
+        "content=CASE WHEN excluded.updated_at >= jarvis_short_memories.updated_at THEN excluded.content ELSE jarvis_short_memories.content END, "
+        "category=CASE WHEN excluded.updated_at >= jarvis_short_memories.updated_at THEN excluded.category ELSE jarvis_short_memories.category END, "
+        "importance=MAX(jarvis_short_memories.importance,excluded.importance), "
+        "created_at=MIN(jarvis_short_memories.created_at,excluded.created_at), updated_at=MAX(jarvis_short_memories.updated_at,excluded.updated_at), "
+        "last_recalled_at=MAX(jarvis_short_memories.last_recalled_at,excluded.last_recalled_at), "
+        "recall_count=MAX(jarvis_short_memories.recall_count,excluded.recall_count), source=excluded.source",
+        (user_id, item["id"], item["content"], item["category"], item["importance"], item["created_at"], item["updated_at"], item["last_recalled_at"], item["recall_count"], item["source"]),
+    )
 
 
 def host_endpoint_keys(host):
@@ -159,6 +279,9 @@ merge_agents = merge_workspaces
 
 def create_server(address, database, token=None):
     database = str(database)
+    memory_consolidation_lock = threading.Lock()
+    memory_consolidation_users = set()
+    memory_consolidation_force_users = set()
     with sqlite3.connect(database) as db:
         db.execute("CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
         db.execute("CREATE TABLE IF NOT EXISTS host_sessions (host_id TEXT NOT NULL, username TEXT NOT NULL, id TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(host_id, username, id))")
@@ -187,6 +310,12 @@ def create_server(address, database, token=None):
         db.execute("CREATE TABLE IF NOT EXISTS account_host_state (user_id INTEGER NOT NULL, host_id TEXT NOT NULL, revision INTEGER NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(user_id, host_id))")
         db.execute("CREATE TABLE IF NOT EXISTS account_hosts (user_id INTEGER NOT NULL, host_id TEXT NOT NULL, payload TEXT NOT NULL, deleted INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(user_id, host_id))")
         db.execute("CREATE TABLE IF NOT EXISTS account_operation_logs (user_id INTEGER NOT NULL, id TEXT NOT NULL, created_at INTEGER NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(user_id, id))")
+        db.execute("CREATE TABLE IF NOT EXISTS jarvis_short_memories (user_id INTEGER NOT NULL, id TEXT NOT NULL, content TEXT NOT NULL, category TEXT NOT NULL, importance INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, last_recalled_at INTEGER NOT NULL DEFAULT 0, recall_count INTEGER NOT NULL DEFAULT 0, source TEXT NOT NULL DEFAULT 'jarvis', PRIMARY KEY(user_id, id))")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_jarvis_short_memories_user_rank ON jarvis_short_memories(user_id, importance DESC, updated_at DESC)")
+        db.execute("CREATE TABLE IF NOT EXISTS jarvis_memory_turns (user_id INTEGER NOT NULL, id TEXT NOT NULL, created_at INTEGER NOT NULL, user_text TEXT NOT NULL, assistant_text TEXT NOT NULL, PRIMARY KEY(user_id, id))")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_jarvis_memory_turns_user_time ON jarvis_memory_turns(user_id, created_at ASC)")
+        db.execute("CREATE TABLE IF NOT EXISTS jarvis_memory_recalls (user_id INTEGER NOT NULL, memory_id TEXT NOT NULL, recall_count INTEGER NOT NULL DEFAULT 0, last_recalled_at INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(user_id, memory_id))")
+        db.execute("CREATE TABLE IF NOT EXISTS jarvis_memory_namespaces (user_id INTEGER PRIMARY KEY, namespace TEXT NOT NULL UNIQUE)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_operation_logs_user_time ON account_operation_logs(user_id, created_at DESC)")
         db.execute("UPDATE users SET must_change = 0 WHERE must_change != 0")
         if db.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
@@ -199,6 +328,95 @@ def create_server(address, database, token=None):
             salt = secrets.token_bytes(16)
             password_hash = hashlib.scrypt(password.encode(), salt=salt, n=2**14, r=8, p=1, dklen=32)
             db.execute("INSERT INTO users(username, salt, password_hash, must_change, is_admin) VALUES (?, ?, ?, 0, 1)", (username, salt, password_hash))
+
+    def memory_items_for(user_id, limit=512):
+        with sqlite3.connect(database) as db:
+            rows = db.execute(
+                "SELECT id, content, category, importance, created_at, updated_at, last_recalled_at, recall_count, source "
+                "FROM jarvis_short_memories WHERE user_id=? ORDER BY importance DESC, updated_at DESC LIMIT ?",
+                (user_id, max(1, min(512, int(limit)))),
+            ).fetchall()
+        keys = ("id", "content", "category", "importance", "created_at", "updated_at", "last_recalled_at", "recall_count", "source")
+        return [dict(zip(keys, row)) for row in rows]
+
+    def memory_namespace(user_id):
+        with sqlite3.connect(database) as db:
+            namespace = "rdt-" + uuid.uuid4().hex
+            db.execute("INSERT OR IGNORE INTO jarvis_memory_namespaces(user_id,namespace) VALUES(?,?)", (user_id, namespace))
+            return db.execute("SELECT namespace FROM jarvis_memory_namespaces WHERE user_id=?", (user_id,)).fetchone()[0]
+
+    def consolidate_memory_turns(user_id, force=False):
+        now = int(time.time() * 1000)
+        with sqlite3.connect(database) as db:
+            rows = db.execute(
+                "SELECT id, created_at, user_text, assistant_text FROM jarvis_memory_turns WHERE user_id=? ORDER BY created_at ASC LIMIT 20",
+                (user_id,),
+            ).fetchall()
+        if not rows:
+            return {"consolidated": False, "memories": []}
+        should_run = force or len(rows) >= 5 or (len(rows) >= 2 and now - int(rows[0][1]) >= 24 * 60 * 60 * 1000)
+        if not should_run:
+            return {"consolidated": False, "memories": []}
+        messages = []
+        for _, _, user_text, assistant_text in rows:
+            messages.append({"role": "user", "content": user_text})
+            if assistant_text:
+                messages.append({"role": "assistant", "content": assistant_text})
+        response = call_mem0("POST", "/v1/memories", {
+            "messages": messages,
+            "infer": True,
+            "user_id": memory_namespace(user_id),
+            "agent_id": "jarvis",
+            "metadata": {"source": "jarvis_voice", "tier": "long", "category": "general"},
+        })
+        raw_results = response.get("results", [])
+        memories = []
+        with sqlite3.connect(database) as db:
+            for result in raw_results if isinstance(raw_results, list) else []:
+                if not isinstance(result, dict):
+                    continue
+                memory_id = str(result.get("id") or "")[:128]
+                event = str(result.get("event") or "").upper()
+                if memory_id and event == "DELETE":
+                    db.execute("DELETE FROM jarvis_short_memories WHERE user_id=? AND id=?", (user_id, memory_id))
+                    continue
+                item = normalize_memory_result(result)
+                if item is not None:
+                    upsert_short_memory(db, user_id, item)
+                    memories.append(item)
+            db.executemany("DELETE FROM jarvis_memory_turns WHERE user_id=? AND id=?", [(user_id, row[0]) for row in rows])
+            db.execute(
+                "DELETE FROM jarvis_short_memories WHERE user_id=? AND id NOT IN "
+                "(SELECT id FROM jarvis_short_memories WHERE user_id=? ORDER BY importance DESC, updated_at DESC LIMIT 512)",
+                (user_id, user_id),
+            )
+        return {"consolidated": True, "memories": memories}
+
+    def schedule_memory_consolidation(user_id, force=False):
+        with memory_consolidation_lock:
+            if user_id in memory_consolidation_users:
+                if force:
+                    memory_consolidation_force_users.add(user_id)
+                return
+            memory_consolidation_users.add(user_id)
+
+        def worker():
+            should_force = force
+            while True:
+                try:
+                    consolidate_memory_turns(user_id, force=should_force)
+                except Exception:
+                    # Keep candidates for retry on a later turn; never log conversation content or service keys.
+                    pass
+                with memory_consolidation_lock:
+                    should_force = user_id in memory_consolidation_force_users
+                    memory_consolidation_force_users.discard(user_id)
+                    if should_force:
+                        continue
+                    memory_consolidation_users.discard(user_id)
+                    return
+
+        threading.Thread(target=worker, name="jarvis-memory-consolidation", daemon=True).start()
 
     class Handler(BaseHTTPRequestHandler):
         def issue_token(self, user_id):
@@ -317,6 +535,34 @@ def create_server(address, database, token=None):
                 return
             path = urlsplit(self.path).path
             parts = path.strip("/").split("/")
+            if path == "/v1/jarvis/short-memory":
+                return self.reply(200, {"items": memory_items_for(self.user_id)})
+            if path == "/v1/jarvis/long-memory":
+                try:
+                    raw_limit = dict(parse_qsl(urlsplit(self.path).query)).get("limit", "100")
+                    limit = max(1, min(500, int(raw_limit)))
+                    namespace = memory_namespace(self.user_id)
+                    result = call_mem0("GET", "/v1/memories?" + urlencode({"user_id": namespace, "agent_id": "jarvis", "limit": limit}))
+                    memories = result.get("results", []) if isinstance(result.get("results"), list) else []
+                    ids = [str(item.get("id", ""))[:128] for item in memories if isinstance(item, dict) and item.get("id")]
+                    recall_map = {}
+                    if ids:
+                        with sqlite3.connect(database) as db:
+                            marks = ",".join("?" for _ in ids)
+                            recall_map = {row[0]: {"recall_count": row[1], "last_recalled_at": row[2]} for row in db.execute(
+                                f"SELECT memory_id, recall_count, last_recalled_at FROM jarvis_memory_recalls WHERE user_id=? AND memory_id IN ({marks})",
+                                (self.user_id, *ids),
+                            )}
+                    for item in memories:
+                        if not isinstance(item, dict):
+                            continue
+                        item.update(recall_map.get(str(item.get("id", "")), {"recall_count": 0, "last_recalled_at": 0}))
+                        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+                        metadata.setdefault("category", memory_category(item.get("memory") or item.get("text") or ""))
+                        item["metadata"] = metadata
+                    return self.reply(200, {"results": memories})
+                except (ValueError, RuntimeError):
+                    return self.reply(502, {"error": "Mem0 长期记忆服务暂不可用"})
             if len(parts) == 4 and parts[:2] == ["v1", "hosts"] and parts[3] == "state":
                 host_id = parts[2]
                 if not host_id or len(host_id) > 256:
@@ -433,6 +679,126 @@ def create_server(address, database, token=None):
                     with sqlite3.connect(database) as db:
                         db.execute("DELETE FROM auth_tokens WHERE token_hash = ?", (hashlib.sha256(bearer.encode()).digest(),))
                 return self.reply(200, {"logged_out": True})
+            if path.startswith("/v1/jarvis/"):
+                if not self.authorized(): return
+                try:
+                    length = int(self.headers.get("Content-Length", "-1"))
+                    if length < 0 or length > MAX_MEMORY_BODY:
+                        raise ValueError()
+                    request_data = json.loads(self.rfile.read(length))
+                    if not isinstance(request_data, dict):
+                        raise ValueError()
+                except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
+                    return self.reply(400, {"error": "invalid Jarvis memory request"})
+
+                if path == "/v1/jarvis/short-memory/sync":
+                    items = request_data.get("items", [])
+                    if not isinstance(items, list) or len(items) > 512:
+                        return self.reply(400, {"error": "invalid short memory batch"})
+                    normalized = []
+                    now = int(time.time() * 1000)
+                    for raw in items:
+                        if not isinstance(raw, dict):
+                            return self.reply(400, {"error": "invalid short memory item"})
+                        memory_id = str(raw.get("id", "")).strip()[:128]
+                        content = str(raw.get("content", "")).strip()[:2000]
+                        category = str(raw.get("category", "general"))
+                        try:
+                            importance = max(1, min(5, int(raw.get("importance", 3))))
+                            created_at = max(1, int(raw.get("created_at", now)))
+                            updated_at = max(created_at, int(raw.get("updated_at", now)))
+                            last_recalled_at = max(0, int(raw.get("last_recalled_at", 0)))
+                            recall_count = max(0, min(1_000_000, int(raw.get("recall_count", 0))))
+                        except (TypeError, ValueError):
+                            return self.reply(400, {"error": "invalid short memory metadata"})
+                        if not memory_id or not content or category not in MEMORY_CATEGORIES:
+                            return self.reply(400, {"error": "invalid short memory item"})
+                        normalized.append({
+                            "id": memory_id, "content": content, "category": category,
+                            "importance": importance, "created_at": created_at, "updated_at": updated_at,
+                            "last_recalled_at": last_recalled_at, "recall_count": recall_count,
+                            "source": str(raw.get("source", "jarvis"))[:64] or "jarvis",
+                        })
+                    with sqlite3.connect(database) as db:
+                        for item in normalized:
+                            upsert_short_memory(db, self.user_id, item)
+                        db.execute(
+                            "DELETE FROM jarvis_short_memories WHERE user_id=? AND id NOT IN "
+                            "(SELECT id FROM jarvis_short_memories WHERE user_id=? ORDER BY importance DESC, updated_at DESC LIMIT 512)",
+                            (self.user_id, self.user_id),
+                        )
+                    return self.reply(200, {"items": memory_items_for(self.user_id, 512)})
+
+                if path == "/v1/jarvis/memory/turns":
+                    turns = request_data.get("turns", [])
+                    if not isinstance(turns, list) or len(turns) > 20:
+                        return self.reply(400, {"error": "invalid conversation batch"})
+                    now = int(time.time() * 1000)
+                    normalized_turns = []
+                    for turn in turns:
+                        if not isinstance(turn, dict):
+                            return self.reply(400, {"error": "invalid conversation item"})
+                        turn_id = str(turn.get("id", "")).strip()[:64]
+                        user_text = str(turn.get("user_text", "")).strip()[:2000]
+                        assistant_text = str(turn.get("assistant_text", "")).strip()[:2000]
+                        try:
+                            created_at = max(1, int(turn.get("created_at", now)))
+                        except (TypeError, ValueError):
+                            return self.reply(400, {"error": "invalid conversation timestamp"})
+                        if not turn_id or not user_text:
+                            return self.reply(400, {"error": "invalid conversation item"})
+                        normalized_turns.append((self.user_id, turn_id, created_at, user_text, assistant_text))
+                    with sqlite3.connect(database) as db:
+                        db.executemany(
+                            "INSERT OR IGNORE INTO jarvis_memory_turns(user_id,id,created_at,user_text,assistant_text) VALUES(?,?,?,?,?)",
+                            normalized_turns,
+                        )
+                        db.execute(
+                            "DELETE FROM jarvis_memory_turns WHERE user_id=? AND created_at < ?",
+                            (self.user_id, now - 30 * 24 * 60 * 60 * 1000),
+                        )
+                    schedule_memory_consolidation(self.user_id, force=bool(request_data.get("force", False)))
+                    return self.reply(202, {"queued": True})
+
+                if path == "/v1/jarvis/long-memory/search":
+                    query = str(request_data.get("query", "")).strip()[:1000]
+                    try:
+                        limit = max(1, min(10, int(request_data.get("limit", 5))))
+                    except (TypeError, ValueError):
+                        return self.reply(400, {"error": "invalid memory search limit"})
+                    if not query:
+                        return self.reply(400, {"error": "query is required"})
+                    try:
+                        namespace = memory_namespace(self.user_id)
+                        result = call_mem0("POST", "/v1/memories/search", {
+                            "query": query, "user_id": namespace, "agent_id": "jarvis", "limit": limit,
+                        })
+                    except RuntimeError:
+                        return self.reply(502, {"error": "Mem0 长期记忆服务暂不可用"})
+                    memories = result.get("results", []) if isinstance(result.get("results"), list) else []
+                    now = int(time.time() * 1000)
+                    response_items = []
+                    with sqlite3.connect(database) as db:
+                        for item in memories:
+                            if not isinstance(item, dict):
+                                continue
+                            memory_id = str(item.get("id", ""))[:128]
+                            if memory_id:
+                                db.execute(
+                                    "INSERT INTO jarvis_memory_recalls(user_id,memory_id,recall_count,last_recalled_at) VALUES(?,?,1,?) "
+                                    "ON CONFLICT(user_id,memory_id) DO UPDATE SET recall_count=recall_count+1,last_recalled_at=excluded.last_recalled_at",
+                                    (self.user_id, memory_id, now),
+                                )
+                                recall = db.execute("SELECT recall_count FROM jarvis_memory_recalls WHERE user_id=? AND memory_id=?", (self.user_id, memory_id)).fetchone()
+                                item["recall_count"] = recall[0] if recall else 1
+                                item["last_recalled_at"] = now
+                            metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+                            metadata.setdefault("category", memory_category(item.get("memory") or item.get("text") or ""))
+                            item["metadata"] = metadata
+                            response_items.append(item)
+                    return self.reply(200, {"results": response_items})
+
+                return self.reply(404, {"error": "unknown Jarvis memory endpoint"})
             if path == "/v1/operation-logs":
                 if not self.authorized(): return
                 try:
@@ -855,7 +1221,7 @@ def create_server(address, database, token=None):
                     if not row: return self.reply(404, {"error": "user not found"})
                     if row[0] and db.execute("SELECT COUNT(*) FROM users WHERE is_admin = 1").fetchone()[0] <= 1:
                         return self.reply(400, {"error": "at least one administrator is required"})
-                    for table in ("auth_tokens", "account_sessions", "account_workspaces", "workspace_history", "account_agents", "agent_history", "account_host_state", "account_hosts", "account_operation_logs"):
+                    for table in ("auth_tokens", "account_sessions", "account_workspaces", "workspace_history", "account_agents", "agent_history", "account_host_state", "account_hosts", "account_operation_logs", "jarvis_short_memories", "jarvis_memory_turns", "jarvis_memory_recalls", "jarvis_memory_namespaces"):
                         db.execute(f"DELETE FROM {table} WHERE user_id = ?", (user_id,))
                     db.execute("DELETE FROM users WHERE id = ?", (user_id,))
                 return self.reply(200, {"deleted": user_id})
@@ -895,7 +1261,26 @@ def create_server(address, database, token=None):
                 db.execute("DELETE FROM account_sessions WHERE user_id = ? AND host_id = 'legacy' AND username = 'legacy' AND id = ?", (self.user_id, session_id))
             self.reply(200, {"deleted": session_id})
 
-    return ThreadingHTTPServer(address, Handler)
+    server = ThreadingHTTPServer(address, Handler)
+    server.memory_maintenance_stop = threading.Event()
+
+    def memory_maintenance():
+        try:
+            interval = max(60, min(24 * 60 * 60, int(os.environ.get("RDT_MEMORY_MAINTENANCE_SECONDS", "3600"))))
+        except ValueError:
+            interval = 3600
+        while not server.memory_maintenance_stop.is_set():
+            try:
+                with sqlite3.connect(database) as db:
+                    user_ids = [row[0] for row in db.execute("SELECT DISTINCT user_id FROM jarvis_memory_turns")]
+                for user_id in user_ids:
+                    schedule_memory_consolidation(user_id)
+            except Exception:
+                pass
+            server.memory_maintenance_stop.wait(interval)
+
+    threading.Thread(target=memory_maintenance, name="jarvis-memory-maintenance", daemon=True).start()
+    return server
 
 
 def main():
@@ -911,6 +1296,7 @@ def main():
     try:
         server.serve_forever()
     finally:
+        server.memory_maintenance_stop.set()
         server.server_close()
 
 

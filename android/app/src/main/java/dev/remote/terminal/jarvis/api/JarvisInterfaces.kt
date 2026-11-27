@@ -35,7 +35,8 @@ data class JarvisContext(
     val workspaces: List<String> = emptyList(),
     val agents: List<String> = emptyList(),
     val activeSessionId: String? = null,
-    val lastTerminalOutput: String? = null
+    val lastTerminalOutput: String? = null,
+    val memoryContext: String = ""
 )
 
 sealed class JarvisAction {
@@ -44,7 +45,12 @@ sealed class JarvisAction {
     data class QueryStatus(val voiceReply: String) : JarvisAction()
     data class DirectReply(val voiceReply: String) : JarvisAction()
     data class ExecuteTool(val toolName: String, val arguments: org.json.JSONObject = org.json.JSONObject(), val voiceReply: String? = null) : JarvisAction()
-    data class ChatWithDeveloper(val agentName: String? = null, val message: String, val voiceReply: String? = null) : JarvisAction()
+    data class ChatWithDeveloper(
+        val agentName: String? = null,
+        val message: String,
+        val voiceReply: String? = null,
+        val memoryContext: String = "",
+    ) : JarvisAction()
     data class DismissAwake(val voiceReply: String? = null) : JarvisAction()
     data class ErrorAction(val message: String) : JarvisAction()
     object None : JarvisAction()
