@@ -543,6 +543,24 @@ class LocalStore(context: Context) {
 
     fun loadTiledMode(): Boolean = preferences.getBoolean("tiled_mode", true)
 
+    fun loadJarvisEnabled(): Boolean = preferences.getBoolean("jarvis_enabled", false)
+    fun saveJarvisEnabled(enabled: Boolean) = preferences.edit().putBoolean("jarvis_enabled", enabled).apply()
+
+    fun loadJarvisWakeWord(): String = preferences.getString("jarvis_wake_word", "贾维斯") ?: "贾维斯"
+    fun saveJarvisWakeWord(word: String) = preferences.edit().putString("jarvis_wake_word", word).apply()
+
+    fun loadJarvisAutoConfirm(): Boolean = preferences.getBoolean("jarvis_auto_confirm", true)
+    fun saveJarvisAutoConfirm(enabled: Boolean) = preferences.edit().putBoolean("jarvis_auto_confirm", enabled).apply()
+
+    fun loadJarvisNotifyFinished(): Boolean = preferences.getBoolean("jarvis_notify_finished", true)
+    fun saveJarvisNotifyFinished(enabled: Boolean) = preferences.edit().putBoolean("jarvis_notify_finished", enabled).apply()
+
+    fun loadJarvisBluetoothSco(): Boolean = preferences.getBoolean("jarvis_sco_enabled", true)
+    fun saveJarvisBluetoothSco(enabled: Boolean) = preferences.edit().putBoolean("jarvis_sco_enabled", enabled).apply()
+
+    fun loadJarvisAsrMode(): String = preferences.getString("jarvis_asr_mode", "offline") ?: "offline"
+    fun saveJarvisAsrMode(mode: String) = preferences.edit().putString("jarvis_asr_mode", mode).apply()
+
     fun saveTiledMode(tiled: Boolean) {
         preferences.edit().putBoolean("tiled_mode", tiled).apply()
     }

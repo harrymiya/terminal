@@ -102,6 +102,8 @@ import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.MoreHoriz
@@ -439,6 +441,68 @@ private fun RemoteTerminalApp(store: LocalStore) {
         AutoConfirmEngine.init(appContext)
         AutoConfirmEngine.globalEnabled = autoEnterEnabled
         AutoConfirmEngine.globalDelaySeconds = autoEnterDelaySeconds
+
+        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.init(appContext)
+        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.enabled = store.loadJarvisEnabled()
+        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.wakeWord = store.loadJarvisWakeWord()
+        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.autoWhisperConfirm = store.loadJarvisAutoConfirm()
+        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.notifyOnTaskFinished = store.loadJarvisNotifyFinished()
+        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.bluetoothScoEnabled = store.loadJarvisBluetoothSco()
+        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.asrEngineMode = store.loadJarvisAsrMode()
+        if (store.loadJarvisEnabled()) {
+            dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.start()
+        }
+
+        val permissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+            androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
+        ) { permissions ->
+            val audioGranted = permissions[android.Manifest.permission.RECORD_AUDIO] == true
+            if (audioGranted && store.loadJarvisEnabled()) {
+                dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.start()
+            }
+        }
+        LaunchedEffect(Unit) {
+            if (store.loadJarvisEnabled()) {
+                val permissionsToRequest = mutableListOf(android.Manifest.permission.RECORD_AUDIO)
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+                    permissionsToRequest.add(android.Manifest.permission.BLUETOOTH_CONNECT)
+                }
+                permissionLauncher.launch(permissionsToRequest.toTypedArray())
+            }
+        }
+
+        LaunchedEffect(selectedHostId, sessions.size, activePage) {
+            val selectedHost = hosts.firstOrNull { it.id == selectedHostId }
+            val activeSession = sessions.getOrNull(activePage)
+            dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.activeTerminalController = activeSession?.task?.let { dev.remote.terminal.ssh.TerminalConnectionRegistry.get(it.id) }
+            dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.currentWorkspaceName = activeSession?.task?.directory?.name ?: selectedHost?.directories?.firstOrNull()?.name
+            dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.currentWorkspacePath = activeSession?.task?.directory?.path ?: selectedHost?.directories?.firstOrNull()?.path
+            dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.workspaceListProvider = {
+                selectedHost?.directories?.map { it.name } ?: emptyList()
+            }
+            dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.agentListProvider = {
+                agents.map { it.name }
+            }
+            dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.lastTerminalOutputProvider = {
+                activeSession?.buffer?.toString()
+            }
+        }
+
+        LaunchedEffect(Unit) {
+            dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.onWorkspaceSwitchRequested = { targetWs ->
+                val selectedHost = hosts.firstOrNull { it.id == selectedHostId }
+                val targetDir = selectedHost?.directories?.firstOrNull {
+                    it.name.equals(targetWs, ignoreCase = true) || it.name.contains(targetWs, ignoreCase = true)
+                }
+                if (targetDir != null) {
+                    val existingIndex = sessions.indexOfFirst { it.task.directory.path == targetDir.path }
+                    if (existingIndex >= 0) {
+                        activePage = existingIndex
+                        route = AppRoute.TERMINAL
+                    }
+                }
+            }
+        }
         val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
         androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
             val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
@@ -3622,6 +3686,28 @@ private fun PadSidebar(
                     Icon(Icons.Default.Refresh, contentDescription = "刷新", tint = White, modifier = Modifier.size(18.dp))
                 }
             }
+            val jarvisState by dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.state.collectAsState()
+            IconButton(
+                onClick = {
+                    dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.triggerManualWake()
+                },
+                modifier = Modifier.size(32.dp)
+            ) {
+                val iconColor = when (jarvisState) {
+                    dev.remote.terminal.jarvis.api.JarvisState.LISTENING -> Coral
+                    dev.remote.terminal.jarvis.api.JarvisState.PROCESSING -> Blue
+                    dev.remote.terminal.jarvis.api.JarvisState.EXECUTING -> Mint
+                    dev.remote.terminal.jarvis.api.JarvisState.SPEAKING -> Mint
+                    dev.remote.terminal.jarvis.api.JarvisState.STANDBY -> Mint
+                    dev.remote.terminal.jarvis.api.JarvisState.DISABLED -> Muted
+                }
+                Icon(
+                    imageVector = if (jarvisState == dev.remote.terminal.jarvis.api.JarvisState.DISABLED) Icons.Default.MicOff else Icons.Default.Mic,
+                    contentDescription = "贾维斯语音中枢",
+                    tint = iconColor,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
             IconButton(onClick = onOpenSettings, modifier = Modifier.size(32.dp)) {
                 Icon(Icons.Default.Settings, contentDescription = "设置", tint = White, modifier = Modifier.size(18.dp))
             }
@@ -4542,6 +4628,87 @@ private fun SettingsScreen(
                 steps = 28,
             )
             Text("倒计时期间手动输入或操作会取消自动回车。", color = Muted, fontSize = 11.sp)
+            Divider()
+            Text("贾维斯 (JARVIS) 智能语音助手", color = White, fontWeight = FontWeight.SemiBold)
+            Text("全程黑屏通过蓝牙耳机语音交互，低功耗一直在线、零 Token 毫秒级推进任务。", color = Muted, fontSize = 12.sp)
+
+            var jarvisEnabled by remember { mutableStateOf(store.loadJarvisEnabled()) }
+            var jarvisWakeWord by remember { mutableStateOf(store.loadJarvisWakeWord()) }
+            var jarvisAutoConfirm by remember { mutableStateOf(store.loadJarvisAutoConfirm()) }
+            var jarvisNotifyFinished by remember { mutableStateOf(store.loadJarvisNotifyFinished()) }
+            var jarvisBluetoothSco by remember { mutableStateOf(store.loadJarvisBluetoothSco()) }
+            var jarvisAsrMode by remember { mutableStateOf(store.loadJarvisAsrMode()) }
+
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Column(Modifier.weight(1f)) {
+                    Text("启用贾维斯语音控制", color = White, fontSize = 13.sp)
+                    Text("启用麦克风低功耗监听与唤醒词检测，支持放入口袋全盲操", color = Muted, fontSize = 11.sp)
+                }
+                Switch(checked = jarvisEnabled, onCheckedChange = {
+                    jarvisEnabled = it
+                    store.saveJarvisEnabled(it)
+                    dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.toggleEnabled(it)
+                })
+            }
+
+            if (jarvisEnabled) {
+                OutlinedTextField(
+                    value = jarvisWakeWord,
+                    onValueChange = {
+                        jarvisWakeWord = it
+                        store.saveJarvisWakeWord(it)
+                        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.wakeWord = it
+                    },
+                    label = { Text("唤醒词 (默认：贾维斯)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Column(Modifier.weight(1f)) {
+                        Text("蓝牙耳机 SCO 通话通道", color = White, fontSize = 13.sp)
+                        Text("将录音与发音强制路由至蓝牙耳机听筒，实现私密耳语", color = Muted, fontSize = 11.sp)
+                    }
+                    Switch(checked = jarvisBluetoothSco, onCheckedChange = {
+                        jarvisBluetoothSco = it
+                        store.saveJarvisBluetoothSco(it)
+                        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.bluetoothScoEnabled = it
+                    })
+                }
+
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Column(Modifier.weight(1f)) {
+                        Text("敏感确认主动耳语询问", color = White, fontSize = 13.sp)
+                        Text("当智能体遇到操作授权时，主动向耳机耳语并等待口令确认", color = Muted, fontSize = 11.sp)
+                    }
+                    Switch(checked = jarvisAutoConfirm, onCheckedChange = {
+                        jarvisAutoConfirm = it
+                        store.saveJarvisAutoConfirm(it)
+                        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.autoWhisperConfirm = it
+                    })
+                }
+
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Column(Modifier.weight(1f)) {
+                        Text("任务完成主动耳语通报", color = White, fontSize = 13.sp)
+                        Text("开发任务执行完毕退出时，耳机主动汇报完成状态", color = Muted, fontSize = 11.sp)
+                    }
+                    Switch(checked = jarvisNotifyFinished, onCheckedChange = {
+                        jarvisNotifyFinished = it
+                        store.saveJarvisNotifyFinished(it)
+                        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.notifyOnTaskFinished = it
+                    })
+                }
+
+                FilledTonalButton(
+                    onClick = {
+                        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.triggerManualWake()
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("测试唤醒与发音")
+                }
+            }
             Divider()
             Text("后台保活与熄屏运行", color = White, fontWeight = FontWeight.SemiBold)
             val isIgnoringBattery = remember { mutableStateOf(TerminalKeepAliveService.isIgnoringBatteryOptimizations(context)) }

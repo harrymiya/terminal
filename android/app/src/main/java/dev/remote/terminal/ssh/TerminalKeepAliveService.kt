@@ -30,6 +30,7 @@ object TerminalConnectionRegistry {
         controllers.put(id, controller)?.close()
     }
     fun unregister(id: String, controller: SshTerminalController) { controllers.remove(id, controller) }
+    fun get(id: String): SshTerminalController? = controllers[id]
     fun onDefaultNetworkAvailable(recoveryStartedAt: Long) {
         controllers.values.forEach { it.onNetworkAvailable(recoveryStartedAt) }
     }
@@ -53,6 +54,7 @@ class TerminalKeepAliveService : Service() {
     override fun onCreate() {
         super.onCreate()
         AutoConfirmEngine.init(this)
+        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.init(this)
         createNotificationChannel()
         monitorDefaultNetwork()
     }
