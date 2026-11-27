@@ -449,6 +449,15 @@ private fun RemoteTerminalApp(store: LocalStore) {
         dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.notifyOnTaskFinished = store.loadJarvisNotifyFinished()
         dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.bluetoothScoEnabled = store.loadJarvisBluetoothSco()
         dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.asrEngineMode = store.loadJarvisAsrMode()
+        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.hapticFeedbackProvider = {
+            val vibrator = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+                appContext.getSystemService(android.os.VibratorManager::class.java)?.defaultVibrator
+            } else {
+                @Suppress("DEPRECATION")
+                appContext.getSystemService(Context.VIBRATOR_SERVICE) as? android.os.Vibrator
+            }
+            vibrator?.vibrate(android.os.VibrationEffect.createOneShot(80, android.os.VibrationEffect.DEFAULT_AMPLITUDE))
+        }
         if (store.loadJarvisEnabled()) {
             dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.start()
         }
@@ -1903,6 +1912,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
                     )
                 }
             }
+            dev.remote.terminal.jarvis.ui.JarvisVoiceprintOverlay(modifier = Modifier.align(Alignment.BottomCenter))
             SnackbarHost(snackbars, modifier = Modifier.align(Alignment.BottomCenter).padding(horizontal = 14.dp, vertical = 8.dp))
         }
 

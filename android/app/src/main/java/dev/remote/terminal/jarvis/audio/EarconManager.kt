@@ -31,8 +31,8 @@ class EarconManager {
     fun playWakeChime() {
         scope.launch {
             playTones(
-                Tone(frequency = 880.0, durationMs = 60, volume = 0.5f),
-                Tone(frequency = 1320.0, durationMs = 80, volume = 0.6f)
+                Tone(frequency = 880.0, durationMs = 60, volume = 0.85f),
+                Tone(frequency = 1320.0, durationMs = 80, volume = 0.95f)
             )
         }
     }
@@ -42,7 +42,7 @@ class EarconManager {
      */
     fun playThinkingChime() {
         scope.launch {
-            playTones(Tone(frequency = 600.0, durationMs = 70, volume = 0.35f))
+            playTones(Tone(frequency = 600.0, durationMs = 70, volume = 0.80f))
         }
     }
 
@@ -52,9 +52,9 @@ class EarconManager {
     fun playActionSuccessChime() {
         scope.launch {
             playTones(
-                Tone(frequency = 784.0, durationMs = 50, volume = 0.45f),
-                Tone(frequency = 988.0, durationMs = 50, volume = 0.5f),
-                Tone(frequency = 1318.0, durationMs = 70, volume = 0.55f)
+                Tone(frequency = 784.0, durationMs = 50, volume = 0.85f),
+                Tone(frequency = 988.0, durationMs = 50, volume = 0.90f),
+                Tone(frequency = 1318.0, durationMs = 70, volume = 0.95f)
             )
         }
     }
@@ -65,8 +65,8 @@ class EarconManager {
     fun playAlertChime() {
         scope.launch {
             playTones(
-                Tone(frequency = 988.0, durationMs = 90, volume = 0.6f),
-                Tone(frequency = 659.0, durationMs = 110, volume = 0.5f)
+                Tone(frequency = 988.0, durationMs = 90, volume = 0.90f),
+                Tone(frequency = 659.0, durationMs = 110, volume = 0.85f)
             )
         }
     }
@@ -95,8 +95,9 @@ class EarconManager {
             }
 
             val audioAttributes = AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
+                .setUsage(AudioAttributes.USAGE_MEDIA)
                 .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                .setLegacyStreamType(AudioManager.STREAM_MUSIC)
                 .build()
 
             val audioFormat = AudioFormat.Builder()

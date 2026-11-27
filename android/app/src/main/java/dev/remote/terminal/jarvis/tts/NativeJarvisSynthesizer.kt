@@ -41,6 +41,14 @@ class NativeJarvisSynthesizer : VoiceSynthesizer {
                         Log.w(TAG, "Chinese not supported by default engine, falling back to English")
                         currentTts.setLanguage(Locale.ENGLISH)
                     }
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
+                        val audioAttributes = android.media.AudioAttributes.Builder()
+                            .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
+                            .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
+                            .setLegacyStreamType(android.media.AudioManager.STREAM_MUSIC)
+                            .build()
+                        currentTts.setAudioAttributes(audioAttributes)
+                    }
                     applyParams()
                     currentTts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                         override fun onStart(utteranceId: String?) {
@@ -108,6 +116,8 @@ class NativeJarvisSynthesizer : VoiceSynthesizer {
 
         val params = Bundle().apply {
             putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, utteranceId)
+            putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, 1.0f)
+            putInt(TextToSpeech.Engine.KEY_PARAM_STREAM, android.media.AudioManager.STREAM_MUSIC)
         }
 
         val mode = if (queueMode == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD

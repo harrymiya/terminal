@@ -44,6 +44,11 @@ object JarvisCoordinator : VoicePerceptorCallback {
     private val _state = MutableStateFlow(JarvisState.DISABLED)
     val state: StateFlow<JarvisState> = _state.asStateFlow()
 
+    private val _subtitle = MutableStateFlow("")
+    val subtitle: StateFlow<String> = _subtitle.asStateFlow()
+
+    var hapticFeedbackProvider: (() -> Unit)? = null
+
     @Volatile var activeTerminalController: SshTerminalController? = null
     @Volatile var currentWorkspaceName: String? = null
     @Volatile var currentWorkspacePath: String? = null
@@ -118,6 +123,8 @@ object JarvisCoordinator : VoicePerceptorCallback {
     override fun onWakeWordDetected(keyword: String) {
         scope.launch {
             Log.i(TAG, "Wake word detected: $keyword")
+            _subtitle.value = "先生，我在。"
+            hapticFeedbackProvider?.invoke()
             updateState(JarvisState.LISTENING)
             earconManager.playWakeChime()
         }
@@ -133,10 +140,12 @@ object JarvisCoordinator : VoicePerceptorCallback {
         scope.launch {
             if (!isFinal) {
                 Log.d(TAG, "Partial speech: \"$text\"")
+                _subtitle.value = text
                 return@launch
             }
 
             Log.i(TAG, "Final speech recognized: \"$text\"")
+            _subtitle.value = text
             updateState(JarvisState.PROCESSING)
             earconManager.playThinkingChime()
 
@@ -213,10 +222,16 @@ object JarvisCoordinator : VoicePerceptorCallback {
     }
 
     fun speakWithState(message: String) {
+        _subtitle.value = message
+        hapticFeedbackProvider?.invoke()
         updateState(JarvisState.SPEAKING)
         speaker?.speak(message) {
             scope.launch {
                 updateState(JarvisState.STANDBY)
+                kotlinx.coroutines.delay(2500)
+                if (_state.value == JarvisState.STANDBY) {
+                    _subtitle.value = ""
+                }
             }
         }
     }
@@ -338,6 +353,14 @@ object JarvisCoordinator : VoicePerceptorCallback {
 
     private fun updateState(newState: JarvisState) {
         _state.value = newState
+        when (newState) {
+            JarvisState.LISTENING -> if (_subtitle.value.isBlank() || _subtitle.value == "先生，我在。") _subtitle.value = "正在倾听..."
+            JarvisState.PROCESSING -> _subtitle.value = "正在理解指令..."
+            JarvisState.EXECUTING -> if (_subtitle.value.isBlank()) _subtitle.value = "正在调度终端执行..."
+            JarvisState.STANDBY -> { /* 保持当前字幕，由协程延迟清空 */ }
+            JarvisState.DISABLED -> _subtitle.value = ""
+            JarvisState.SPEAKING -> { /* 由 speakWithState 负责设置 */ }
+        }
         stateListeners.forEach { it.invoke(newState) }
     }
 
