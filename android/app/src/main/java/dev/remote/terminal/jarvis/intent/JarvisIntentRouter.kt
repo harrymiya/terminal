@@ -53,6 +53,10 @@ class JarvisIntentRouter(
             """(?i)(?:关闭终端|关掉终端|关掉会话|关闭会话)"""
         )
 
+        private val DismissAwakeRegex = Regex(
+            """(?i)^\s*(?:关闭唤醒|退出唤醒|关闭弹窗|关掉弹窗|关闭浮窗|结束对话|退出对话|退下|下去吧|行了没事了|没事了|不用了|先这样|就这些|休眠|回到待命|闭嘴|再见|拜拜|关闭|退出|goodbye|bye|sleep|dismiss)\s*[:?？!！.。]*$"""
+        )
+
         private val TiledViewRegex = Regex(
             """(?i)(?:切换平铺|平铺模式|变成平铺)"""
         )
@@ -178,6 +182,11 @@ class JarvisIntentRouter(
         if (CloseTerminalRegex.containsMatchIn(cleanText)) {
             Log.i(TAG, "Tier-1 matched: MCP close_terminal (0 Token)")
             return@withContext JarvisAction.ExecuteTool("close_terminal")
+        }
+
+        if (DismissAwakeRegex.matches(cleanText)) {
+            Log.i(TAG, "Tier-1 matched: Dismiss awake popup (0 Token)")
+            return@withContext JarvisAction.DismissAwake("好的，随时叫我。")
         }
 
         if (TiledViewRegex.containsMatchIn(cleanText)) {

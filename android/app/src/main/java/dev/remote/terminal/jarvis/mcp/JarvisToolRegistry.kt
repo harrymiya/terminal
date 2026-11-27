@@ -128,6 +128,7 @@ object JarvisToolRegistry {
     var vibrateHandler: ((durationMs: Long?) -> Unit)? = null
     var deviceStateProvider: (() -> JSONObject)? = null
     var navigateScreenHandler: ((screen: String) -> Boolean)? = null
+    var closeAwakeHandler: ((farewell: String?) -> Unit)? = null
 
     init {
         registerBuiltinMcpTools()
@@ -825,6 +826,28 @@ object JarvisToolRegistry {
                 }
             }
         })
+
+        // 28. close_awake
+        register(object : JarvisMcpTool {
+            override val definition = McpToolDefinition(
+                name = "close_awake",
+                description = "关闭 JARVIS 唤醒态与悬浮弹窗，切回后台监听唤醒词状态。",
+                inputSchema = JSONObject().apply {
+                    put("type", "object")
+                    put("properties", JSONObject().apply {
+                        put("farewell", JSONObject().put("type", "string").put("description", "可选：关闭前简短告别语，省略则立即静默退回监听唤醒态"))
+                    })
+                }
+            )
+            override suspend fun execute(arguments: JSONObject): McpToolResult {
+                val farewell = arguments.optString("farewell", "").trim().takeIf { it.isNotBlank() }
+                closeAwakeHandler?.invoke(farewell)
+                return McpToolResult(
+                    content = "Awake state closed, returned to standby wake listening",
+                    voiceSummary = farewell ?: "已关闭唤醒，进入监听待命状态。"
+                )
+            }
+        })
     }
 
     fun register(tool: JarvisMcpTool) {
@@ -855,16 +878,14 @@ object JarvisToolRegistry {
      */
     fun buildMcpProtocolManual(compact: Boolean = false): String {
         val defs = getAllDefinitions()
-        val lines = StringBuilder()
-        if (!compact) {
-            lines.appendLine("【Remote Dev 安卓端 MCP 协议与同步执行接口手册（共 ${defs.size} 项）】")
-            lines.appendLine("调用语法：在回复正文或末尾附加一行或多行 [[RDT_MCP:{\"tool\":\"工具名\",\"arguments\":{...}}]]，系统会按顺序在安卓端真实执行并返回结果。")
-            lines.appendLine("同步等待约定：执行需要查看输出或退出码的 Shell 命令请优先调用 run_terminal_command（或在 run_in_workspace / send_terminal_text 传 sync=true, timeout_ms=30000），接口会等待结束并回传包含 exit_code、stdout、stderr、duration_ms、timed_out 的完整 JSON 供你汇总汇报。")
-            lines.appendLine("目标工作区定位：先查看状态中的 open_sessions，优先传入 workspace_name、session_index 或 session_id。")
-            lines.appendLine("可用接口与参数列表（* 为必填参数）：")
-        } else {
-            lines.appendLine("【Android MCP 操作协议与全量接口（附 [[RDT_MCP:{\"tool\":\"...\",\"arguments\":{...}}]]；同步命令优先用 run_terminal_command 或 sync=true）】")
+        if (compact) {
+            // 二轮及以上对话已预热工具说明，仅保留紧凑工具索引节省 prefill Token 与延迟
+            return "可用Android MCP([[RDT_MCP:{\"tool\":\"...\",\"arguments\":{...}}]]): " +
+                defs.joinToString(", ") { it.name }
         }
+        val lines = StringBuilder()
+        lines.appendLine("【Android MCP(${defs.size}) 语法 [[RDT_MCP:{\"tool\":\"名\",\"arguments\":{...}}]]】")
+        lines.appendLine("同步等待命令用 run_terminal_command（或 run_in_workspace/send_terminal_text 传 sync=true, timeout_ms=30000）获取 exit_code 与 stdout；定位工作区传 workspace_name/session_index；退出唤醒传 close_awake。")
         for (def in defs) {
             val props = def.inputSchema.optJSONObject("properties")
             val requiredSet = buildSet {
@@ -874,15 +895,13 @@ object JarvisToolRegistry {
                 }
             }
             val paramText = if (props != null && props.length() > 0) {
-                val names = props.keys().asSequence().toList()
-                names.joinToString(", ") { k ->
-                    val type = props.optJSONObject(k)?.optString("type")?.ifBlank { "any" } ?: "any"
+                props.keys().asSequence().joinToString(",") { k ->
+                    val type = props.optJSONObject(k)?.optString("type")?.firstOrNull()?.toString() ?: "s"
                     val star = if (k in requiredSet) "*" else ""
                     "$k:$type$star"
                 }
             } else ""
-            val desc = if (compact) def.description.take(48) else def.description
-            lines.appendLine("- ${def.name}($paramText): $desc")
+            lines.appendLine("- ${def.name}($paramText): ${def.description.take(36)}")
         }
         return lines.toString().trimEnd()
     }

@@ -18,6 +18,8 @@ import dev.remote.terminal.data.endpoints
 import dev.remote.terminal.jarvis.mcp.JarvisToolRegistry
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -127,9 +129,15 @@ object BackgroundDeveloperBridge {
     ): Result<String> = withContext(Dispatchers.IO) {
         try {
             val effectiveCmd = resolveEffectiveCommand(agent.command, model)
-            val cached = getOrOpenSession(host, store)
             val convKey = buildWorkerKey(host.id, effectiveCmd, directory, model, effort)
-            val appStateJson = buildCompactAppStateSnapshot()
+            val isPrimed = streamWorkers[convKey]?.let { it.isAlive() && it.mcpPrimed } == true ||
+                conversationIds.containsKey(convKey)
+
+            val (cached, appStateJson) = coroutineScope {
+                val stateDeferred = async { buildCompactAppStateSnapshot(compact = isPrimed) }
+                val sessionDeferred = async { getOrOpenSession(host, store) }
+                sessionDeferred.await() to stateDeferred.await()
+            }
 
             val firstReply = invokeDeveloperTurn(
                 session = cached.session,
@@ -485,16 +493,18 @@ object BackgroundDeveloperBridge {
         return sb.toString()
     }
 
-    private suspend fun buildCompactAppStateSnapshot(): String {
+    private suspend fun buildCompactAppStateSnapshot(compact: Boolean = false): String {
         val state = withContext(Dispatchers.Main) {
             runCatching { JarvisToolRegistry.appStateProvider?.invoke() }.getOrNull()
         } ?: return ""
 
-        val compact = JSONObject()
-        compact.put("screen", state.optString("current_screen", ""))
-        compact.put("tiled_mode", state.optBoolean("tiled_mode", false))
-        compact.put("active_page", state.optInt("active_page", 0))
-        compact.put("auto_confirm", state.optBoolean("auto_confirm_enabled", true))
+        val out = JSONObject()
+        out.put("screen", state.optString("current_screen", ""))
+        out.put("tiled_mode", state.optBoolean("tiled_mode", false))
+        out.put("active_page", state.optInt("active_page", 0))
+        if (!compact) {
+            out.put("auto_confirm", state.optBoolean("auto_confirm_enabled", true))
+        }
 
         // 优先完整保留所有已打开的工作区终端实例（避免截断导致看不到 open_sessions）
         val openSessions = state.optJSONArray("sessions") ?: JSONArray()
@@ -503,45 +513,46 @@ object BackgroundDeveloperBridge {
             val s = openSessions.optJSONObject(i) ?: continue
             slimSessions.put(JSONObject().apply {
                 put("index", s.optInt("index", i))
-                put("id", s.optString("id"))
+                put("id", s.optString("id").take(12))
                 put("workspace", s.optString("workspace").ifBlank { s.optString("directory_name") })
                 put("host", s.optString("host").ifBlank { s.optString("host_name") })
                 put("agent", s.optString("agent").ifBlank { s.optString("agent_name") })
                 put("connected", s.optBoolean("connected"))
                 put("focused", s.optBoolean("focused"))
-                put("needs_action", s.optBoolean("needs_action"))
+                if (s.optBoolean("needs_action")) put("needs_action", true)
                 val lastLine = s.optString("last_line")
-                if (lastLine.isNotBlank()) put("last_line", lastLine.take(60))
+                if (lastLine.isNotBlank()) put("last_line", lastLine.take(48))
             })
         }
-        compact.put("open_sessions", slimSessions)
+        out.put("open_sessions", slimSessions)
 
-        val hosts = state.optJSONArray("hosts") ?: JSONArray()
-        val slimHosts = JSONArray()
-        for (i in 0 until hosts.length()) {
-            val h = hosts.optJSONObject(i) ?: continue
-            val wsArr = h.optJSONArray("workspaces") ?: JSONArray()
-            val slimWs = JSONArray()
-            for (j in 0 until minOf(wsArr.length(), 10)) {
-                slimWs.put(wsArr.opt(j))
+        if (!compact) {
+            val hosts = state.optJSONArray("hosts") ?: JSONArray()
+            val slimHosts = JSONArray()
+            for (i in 0 until hosts.length()) {
+                val h = hosts.optJSONObject(i) ?: continue
+                val wsArr = h.optJSONArray("workspaces") ?: JSONArray()
+                val slimWs = JSONArray()
+                for (j in 0 until minOf(wsArr.length(), 8)) {
+                    slimWs.put(wsArr.opt(j))
+                }
+                slimHosts.put(JSONObject().apply {
+                    put("name", h.optString("name"))
+                    put("workspaces", slimWs)
+                })
             }
-            slimHosts.put(JSONObject().apply {
-                put("name", h.optString("name"))
-                put("workspaces", slimWs)
-            })
+            out.put("hosts", slimHosts)
+            out.put("agents", state.optJSONArray("agents") ?: JSONArray())
         }
-        compact.put("hosts", slimHosts)
-
-        val agents = state.optJSONArray("agents") ?: JSONArray()
-        compact.put("agents", agents)
-        return compact.toString().take(3200)
+        return out.toString().take(if (compact) 1200 else 2800)
     }
 
     private data class McpBatchOutcome(
         val toolLogs: List<String>,
         val reports: List<String>,
         val hasError: Boolean,
-        val needsFollowUp: Boolean
+        val needsFollowUp: Boolean,
+        val closedAwake: Boolean = false
     )
 
     private suspend fun executeMcpCalls(
@@ -552,13 +563,17 @@ object BackgroundDeveloperBridge {
         val reports = mutableListOf<String>()
         var hasError = false
         var needsFollowUp = false
+        var closedAwake = false
 
         for (call in calls) {
             Log.i(TAG, "Developer requested Remote Dev MCP tool: ${call.toolName} args=${call.arguments}")
             val result = JarvisToolRegistry.executeTool(call.toolName, call.arguments)
             toolLogs.add("[${call.toolName}] isError=${result.isError} content=${result.content.take(3500)}")
+            if (call.toolName == "close_awake" && !result.isError) {
+                closedAwake = true
+            }
 
-            val triggerFollowUp = allowReadFollowUp && (result.expectsFollowUp || call.toolName in READ_TOOLS)
+            val triggerFollowUp = !closedAwake && allowReadFollowUp && (result.expectsFollowUp || call.toolName in READ_TOOLS)
             if (triggerFollowUp) {
                 needsFollowUp = true
             }
@@ -573,7 +588,7 @@ object BackgroundDeveloperBridge {
                     ?: "已完成 ${call.toolName} 操作。"
                 // 若结果已触发模型二次整合（如 read_terminal_screen 或 run_terminal_command 返回了真实 stdout/exit_code），
                 // 则由模型结合真实输出直接汇报，避免额外拼接重复摘要。
-                if (!triggerFollowUp && call.toolName !in READ_TOOLS && call.toolName != "speak_to_user") {
+                if (!triggerFollowUp && call.toolName !in READ_TOOLS && call.toolName != "speak_to_user" && call.toolName != "close_awake") {
                     reports.add(okSummary)
                 }
             }
@@ -583,7 +598,8 @@ object BackgroundDeveloperBridge {
             toolLogs = toolLogs,
             reports = reports,
             hasError = hasError,
-            needsFollowUp = needsFollowUp
+            needsFollowUp = needsFollowUp,
+            closedAwake = closedAwake
         )
     }
 
@@ -602,6 +618,7 @@ object BackgroundDeveloperBridge {
         }
 
         val firstBatch = executeMcpCalls(calls, allowReadFollowUp = true)
+        if (firstBatch.closedAwake) return ""
         val visibleWithoutTags = sanitizeForSpeech(stripMcpTags(rawReply, calls))
 
         if (firstBatch.needsFollowUp && firstBatch.toolLogs.isNotEmpty()) {
@@ -857,7 +874,8 @@ ${stateLine}规则：直接用1到3句精简中文口语回答，并清楚汇报
     private fun buildRemoteShellCommand(directory: String?, command: String): String {
         val cd = if (directory.isNullOrBlank()) "" else "cd -- ${shellQuote(directory)} && "
         val pathExport = "export PATH=\"\$HOME/.local/bin:\$HOME/.local/nodejs/bin:\$HOME/.npm-global/bin:\$HOME/bin:/usr/local/bin:\$PATH\"; "
-        return cd + "\"${'$'}{SHELL:-/bin/bash}\" -l -i -c ${shellQuote(pathExport + command)}"
+        // 使用非交互非登录 /bin/sh -c 跳过冗长的 bashrc/profile 初始化，降低 CLI 启动延迟
+        return cd + "/bin/sh -c ${shellQuote(pathExport + command)}"
     }
 
     private fun shellQuote(value: String): String = "'" + value.replace("'", "'\\''") + "'"
@@ -922,6 +940,8 @@ ${stateLine}规则：直接用1到3句精简中文口语回答，并清楚汇报
             session.setPassword(effectivePassword)
             session.setConfig("StrictHostKeyChecking", "yes")
             session.setConfig("PreferredAuthentications", "publickey,keyboard-interactive,password")
+            session.setConfig("compression.s2c", "none")
+            session.setConfig("compression.c2s", "none")
             session.setServerAliveInterval(10_000)
             session.setServerAliveCountMax(3)
             try {

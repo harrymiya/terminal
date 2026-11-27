@@ -101,7 +101,7 @@ class OfflineJarvisPerceptor(
                 sileroVadModelConfig = SileroVadModelConfig(
                     model = "sherpa-onnx-zh/silero_vad.int8.onnx",
                     threshold = 0.42f,
-                    minSilenceDuration = 1.45f,
+                    minSilenceDuration = 1.15f,
                     minSpeechDuration = 0.22f,
                     windowSize = VAD_WINDOW_SAMPLES,
                     maxSpeechDuration = 24.0f
@@ -419,6 +419,11 @@ class OfflineJarvisPerceptor(
         resetRequested = true
     }
 
+    fun returnToWakeListening() {
+        resetRequested = true
+        updateIdleDiagnostic(preferBluetoothMicProvider() && scoManager?.findBluetoothInputDevice() != null)
+    }
+
     private fun createConfiguredAudioRecord(btInput: AudioDeviceInfo?, bufferSize: Int): AudioRecord? {
         if (btInput != null) {
             scoManager?.startChannel()
@@ -447,7 +452,7 @@ class OfflineJarvisPerceptor(
     private fun updateIdleDiagnostic(usingBluetoothMic: Boolean) {
         val currentWake = wakeWordProvider().ifBlank { "贾维斯" }
         val micLabel = if (usingBluetoothMic) "蓝牙耳机麦 · Paraformer" else "手机麦克风 · Paraformer"
-        onDiagnosticChanged?.invoke("监听待命中 ($micLabel · 唤醒词: $currentWake)")
+        onDiagnosticChanged?.invoke("监听唤醒中 ($micLabel · 唤醒词: $currentWake)")
     }
 
     private fun runSelfTestSample(recognizer: OfflineRecognizer) {

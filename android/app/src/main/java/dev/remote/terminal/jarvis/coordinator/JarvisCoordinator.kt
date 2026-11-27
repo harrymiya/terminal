@@ -98,6 +98,9 @@ object JarvisCoordinator : VoicePerceptorCallback {
         intentRouter = JarvisIntentRouter(
             wakeWordProvider = { config.wakeWord }
         )
+        dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.closeAwakeHandler = { farewell ->
+            closeAwakeState(farewell)
+        }
 
         if (config.enabled) {
             start()
@@ -247,16 +250,27 @@ object JarvisCoordinator : VoicePerceptorCallback {
         }
     }
 
-    private fun endConversationSession(resetToDisabled: Boolean) {
+    private fun endConversationSession(resetToDisabled: Boolean, forceCancelWork: Boolean = false) {
         conversationIdleJob?.cancel()
         conversationIdleJob = null
+        if (forceCancelWork) {
+            chatJob?.cancel()
+            chatJob = null
+        }
         _conversationActive.value = false
         _idleRemainingSeconds.value = 0
         conversationAwakeUntilMs = 0L
         wakeConfirmedThisTurn = false
         userCurrentlySpeaking = false
         _subtitle.value = ""
-        updateState(if (!resetToDisabled && config.enabled) JarvisState.STANDBY else JarvisState.DISABLED)
+        speaker?.stop()
+        if (!resetToDisabled && config.enabled) {
+            (perceptor as? OfflineJarvisPerceptor)?.returnToWakeListening()
+            updateState(JarvisState.STANDBY)
+            Log.i(TAG, "Popup/awake session closed -> returned to wake-word listening (STANDBY, wakeWord=\"${config.wakeWord}\")")
+        } else {
+            updateState(JarvisState.DISABLED)
+        }
     }
 
     override fun onListeningWindowOpened() {
@@ -265,12 +279,35 @@ object JarvisCoordinator : VoicePerceptorCallback {
                 Log.d(TAG, "Ignoring onListeningWindowOpened while busy (${_state.value})")
                 return@launch
             }
-            if (!_conversationActive.value) {
-                wakeConfirmedThisTurn = false
-            } else {
+            if (_conversationActive.value) {
                 resetConversationIdleTimer()
+                updateState(JarvisState.LISTENING)
+            } else {
+                // 未唤醒前保持在监听唤醒状态（STANDBY），不切换弹窗状态
+                wakeConfirmedThisTurn = false
+                if (_state.value != JarvisState.STANDBY && config.enabled) {
+                    updateState(JarvisState.STANDBY)
+                }
             }
-            updateState(JarvisState.LISTENING)
+        }
+    }
+
+    fun isAwake(): Boolean = _conversationActive.value
+
+    /**
+     * 退出唤醒态并关闭悬浮弹窗，重新进入监听唤醒词状态 (STANDBY)。
+     * 若传入简短 farewell 告别语，播报完后立即退出，不再开启下一轮倾听窗口。
+     */
+    fun closeAwakeState(farewell: String? = null) {
+        scope.launch {
+            if (!farewell.isNullOrBlank()) {
+                speakWithState(farewell) {
+                    endConversationSession(resetToDisabled = false, forceCancelWork = true)
+                }
+            } else {
+                earconManager.playActionSuccessChime()
+                endConversationSession(resetToDisabled = false, forceCancelWork = true)
+            }
         }
     }
 
@@ -291,18 +328,23 @@ object JarvisCoordinator : VoicePerceptorCallback {
             updateState(JarvisState.LISTENING)
             resetConversationIdleTimer()
             earconManager.playWakeChime()
+            // 唤醒瞬间即在后台预热常驻 Worker（0 Token），用户在说完指令前 SSH 与模型管道已完成就绪
+            warmupDeveloperWorker()
         }
     }
 
     override fun onSpeechStart() {
         scope.launch {
             if (isBusyTurn()) return@launch
-            userCurrentlySpeaking = true
             if (_conversationActive.value) {
+                userCurrentlySpeaking = true
                 conversationAwakeUntilMs = SystemClock.elapsedRealtime() + CONVERSATION_WINDOW_MS
                 _idleRemainingSeconds.value = 0
+                updateState(JarvisState.LISTENING)
+            } else if (_state.value != JarvisState.STANDBY && config.enabled) {
+                // 未处于唤醒态时继续停留在监听唤醒状态（STANDBY）
+                updateState(JarvisState.STANDBY)
             }
-            updateState(JarvisState.LISTENING)
         }
     }
 
@@ -403,6 +445,9 @@ object JarvisCoordinator : VoicePerceptorCallback {
                 updateState(JarvisState.EXECUTING)
                 scope.launch {
                     val result = dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.executeTool(action.toolName, action.arguments)
+                    if (action.toolName == "close_awake" || !_conversationActive.value) {
+                        return@launch
+                    }
                     if (result.isError) {
                         earconManager.playAlertChime()
                         speakWithState(result.voiceSummary ?: "执行工具失败。") {
@@ -415,6 +460,9 @@ object JarvisCoordinator : VoicePerceptorCallback {
                         }
                     }
                 }
+            }
+            is JarvisAction.DismissAwake -> {
+                closeAwakeState(action.voiceReply)
             }
             is JarvisAction.ChatWithDeveloper -> {
                 if (chatJob?.isActive == true) {
@@ -526,10 +574,11 @@ object JarvisCoordinator : VoicePerceptorCallback {
                 effort = config.targetEffort
             )
             result.onSuccess { reply ->
+                if (reply.isBlank() || !_conversationActive.value) return
                 conversationAwakeUntilMs = SystemClock.elapsedRealtime() + CONVERSATION_WINDOW_MS
                 earconManager.playActionSuccessChime()
                 speakWithState(reply) {
-                    openFollowUpListeningWindow()
+                    if (_conversationActive.value) openFollowUpListeningWindow()
                 }
             }.onFailure { err ->
                 earconManager.playAlertChime()
@@ -660,19 +709,17 @@ object JarvisCoordinator : VoicePerceptorCallback {
     }
 
     /**
-     * 用户主动横向划走或关闭悬浮提示卡片，中止当前倾听/播报并复位至待命。
+     * 用户主动关闭悬浮弹窗（点击关闭按钮或划走卡片）：
+     * 立即退出唤醒态，重置会话状态并切回监听唤醒词状态 (STANDBY)。
      */
-    fun dismissOverlay() {
+    fun dismissOverlay(force: Boolean = false) {
         scope.launch {
-            if (_state.value == JarvisState.PROCESSING || _state.value == JarvisState.EXECUTING || chatJob?.isActive == true) {
+            if (!force && (_state.value == JarvisState.PROCESSING || _state.value == JarvisState.EXECUTING || chatJob?.isActive == true)) {
                 Log.d(TAG, "Developer thinking in progress, keeping turn uninterrupted")
                 return@launch
             }
-            (perceptor as? OfflineJarvisPerceptor)?.cancelListening()
-            speaker?.stop()
-            scoManager?.stopChannel()
-            endConversationSession(resetToDisabled = false)
-            Log.i(TAG, "Overlay dismissed by user")
+            endConversationSession(resetToDisabled = false, forceCancelWork = force)
+            Log.i(TAG, "Overlay closed (force=$force) -> returned to wake-word listening STANDBY")
         }
     }
 

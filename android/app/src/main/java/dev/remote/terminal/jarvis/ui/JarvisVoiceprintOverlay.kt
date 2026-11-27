@@ -17,6 +17,7 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -33,6 +34,9 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -86,25 +90,27 @@ fun JarvisVoiceprintOverlay(
     val conversationActive by JarvisCoordinator.conversationActive.collectAsState()
     val idleRemainingSeconds by JarvisCoordinator.idleRemainingSeconds.collectAsState()
 
-    val isWorking = when (state) {
-        JarvisState.DISABLED -> false
-        JarvisState.STANDBY, JarvisState.LISTENING -> conversationActive || subtitle.isNotBlank()
-        JarvisState.PROCESSING, JarvisState.EXECUTING, JarvisState.SPEAKING -> true
-    }
+    val isPopupVisible = state != JarvisState.DISABLED && (
+        conversationActive ||
+            state == JarvisState.PROCESSING ||
+            state == JarvisState.EXECUTING ||
+            state == JarvisState.SPEAKING
+        )
+    val canSwipeDismiss = state != JarvisState.PROCESSING && state != JarvisState.EXECUTING
     val offsetX = remember { Animatable(0f) }
     val scope = rememberCoroutineScope()
     val density = LocalDensity.current
     val dismissThresholdPx = with(density) { 100.dp.toPx() }
     val flingTargetPx = with(density) { 420.dp.toPx() }
 
-    LaunchedEffect(isWorking) {
-        if (!isWorking) {
+    LaunchedEffect(isPopupVisible) {
+        if (!isPopupVisible) {
             offsetX.snapTo(0f)
         }
     }
 
     AnimatedVisibility(
-        visible = isWorking,
+        visible = isPopupVisible,
         enter = fadeIn(tween(250)) + slideInVertically(tween(300)) { it / 2 },
         exit = fadeOut(tween(300)) + slideOutVertically(tween(300)) { it / 2 },
         modifier = modifier
@@ -122,26 +128,26 @@ fun JarvisVoiceprintOverlay(
                 subtitle = subtitle,
                 conversationActive = conversationActive,
                 idleRemainingSeconds = idleRemainingSeconds,
+                onCloseClick = {
+                    JarvisCoordinator.dismissOverlay(force = true)
+                },
                 modifier = Modifier
                     .offset { IntOffset(offsetX.value.roundToInt(), 0) }
                     .alpha(dragAlpha)
-                    .pointerInput(isWorking) {
-                        var totalDragDelta = 0f
+                    .pointerInput(isPopupVisible, canSwipeDismiss) {
                         detectHorizontalDragGestures(
-                            onDragStart = { totalDragDelta = 0f },
                             onHorizontalDrag = { change, dragAmount ->
                                 change.consume()
-                                totalDragDelta += dragAmount
                                 scope.launch {
                                     offsetX.snapTo(offsetX.value + dragAmount)
                                 }
                             },
                             onDragEnd = {
                                 scope.launch {
-                                    if (abs(offsetX.value) > dismissThresholdPx) {
+                                    if (canSwipeDismiss && abs(offsetX.value) > dismissThresholdPx) {
                                         val target = if (offsetX.value >= 0f) flingTargetPx else -flingTargetPx
                                         offsetX.animateTo(target, tween(180))
-                                        JarvisCoordinator.dismissOverlay()
+                                        JarvisCoordinator.dismissOverlay(force = true)
                                     } else {
                                         offsetX.animateTo(0f, spring(stiffness = Spring.StiffnessMedium))
                                     }
@@ -165,6 +171,7 @@ private fun JarvisHudCard(
     subtitle: String,
     conversationActive: Boolean,
     idleRemainingSeconds: Int,
+    onCloseClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val cardBackground = Brush.verticalGradient(
@@ -219,8 +226,27 @@ private fun JarvisHudCard(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            // 1. 顶部状态指示徽章 (Status Badge)
-            HudStatusBadge(state, conversationActive, idleRemainingSeconds)
+            // 1. 顶部状态指示徽章与关闭按钮 (点击或左/右划可关闭弹窗并切回监听唤醒状态)
+            Box(
+                modifier = Modifier.fillMaxWidth(),
+                contentAlignment = Alignment.Center
+            ) {
+                HudStatusBadge(state, conversationActive, idleRemainingSeconds)
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.CenterEnd)
+                        .clip(CircleShape)
+                        .clickable(onClick = onCloseClick)
+                        .padding(4.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "关闭唤醒弹窗",
+                        tint = Color(0x99F1F5F9),
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+            }
 
             // 2. 霓虹声纹动态曲线 (两端渐变透明，中部大振幅)
             NeonWaveformCanvas(
