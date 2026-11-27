@@ -514,6 +514,8 @@ object BackgroundDeveloperBridge {
             slimSessions.put(JSONObject().apply {
                 put("index", s.optInt("index", i))
                 put("id", s.optString("id").take(12))
+                val title = s.optString("title").ifBlank { s.optString("display_name") }
+                if (title.isNotBlank()) put("title", title)
                 put("workspace", s.optString("workspace").ifBlank { s.optString("directory_name") })
                 put("host", s.optString("host").ifBlank { s.optString("host_name") })
                 put("agent", s.optString("agent").ifBlank { s.optString("agent_name") })

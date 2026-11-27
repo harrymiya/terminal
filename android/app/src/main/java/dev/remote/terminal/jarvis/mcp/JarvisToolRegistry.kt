@@ -50,7 +50,7 @@ data class SessionSelector(
             workspacePath = optNonBlank(arguments, "workspace_path", "directory_path", "path"),
             hostName = optNonBlank(arguments, "host_name", "host", "host_id"),
             agentName = optNonBlank(arguments, "agent_name", "agent", "agent_command"),
-            query = optNonBlank(arguments, "target", "name", "display_name", "query")
+            query = optNonBlank(arguments, "target", "title", "task_name", "name", "display_name", "query")
         )
     }
 }
@@ -85,7 +85,8 @@ object JarvisToolRegistry {
         agentCommand: String?,
         agentName: String?,
         reuseExisting: Boolean,
-        initialCommand: String?
+        initialCommand: String?,
+        focus: Boolean
     ) -> ToolOpResult)? = null
     var runCommandHandler: (suspend (
         selector: SessionSelector,
@@ -101,7 +102,8 @@ object JarvisToolRegistry {
         agentName: String?,
         sync: Boolean,
         timeoutMs: Long,
-        mode: String?
+        mode: String?,
+        focus: Boolean
     ) -> ToolOpResult)? = null
     var focusTerminalHandler: ((selector: SessionSelector) -> ToolOpResult)? = null
     var closeTerminalHandler: ((selector: SessionSelector) -> ToolOpResult)? = null
@@ -136,9 +138,10 @@ object JarvisToolRegistry {
 
     private fun sessionSelectorProperties(): JSONObject = JSONObject().apply {
         put("session_id", JSONObject().put("type", "string").put("description", "会话 ID（也支持短前缀）"))
-        put("session_index", JSONObject().put("type", "integer").put("description", "已打开终端列表索引（从 0 开始）"))
+        put("session_index", JSONObject().put("type", "integer").put("description", "进行中任务列表索引（从 0 开始）"))
         put("workspace_name", JSONObject().put("type", "string").put("description", "工作区目录名称（如 remote-dev-terminal）"))
         put("workspace_path", JSONObject().put("type", "string").put("description", "工作区绝对路径"))
+        put("title", JSONObject().put("type", "string").put("description", "首页卡片展示的任务标题或别名"))
         put("host_name", JSONObject().put("type", "string").put("description", "所属主机名或 ID"))
         put("agent_name", JSONObject().put("type", "string").put("description", "所属开发者名（如 Claude / Codex / agy2）"))
     }
@@ -308,8 +311,9 @@ object JarvisToolRegistry {
                         put("workspace_name", JSONObject().put("type", "string"))
                         put("agent_command", JSONObject().put("type", "string"))
                         put("agent_name", JSONObject().put("type", "string"))
-                        put("reuse_existing", JSONObject().put("type", "boolean").put("description", "默认 true：若工作区已打开则直接聚焦复用"))
-                        put("initial_command", JSONObject().put("type", "string").put("description", "可选：打开或聚焦后立即发送执行的命令"))
+                        put("reuse_existing", JSONObject().put("type", "boolean").put("description", "默认 true：若工作区已打开则直接复用"))
+                        put("initial_command", JSONObject().put("type", "string").put("description", "可选：打开后立即发送执行的命令"))
+                        put("focus", JSONObject().put("type", "boolean").put("description", "是否跳转到终端详情页，默认 true；设为 false 可后台静默打开不离开当前首页"))
                     })
                 }
             )
@@ -324,7 +328,8 @@ object JarvisToolRegistry {
                 val agentName = arguments.optString("agent_name").ifBlank { arguments.optString("agent") }.takeIf { it.isNotBlank() }
                 val reuseExisting = arguments.optBoolean("reuse_existing", true)
                 val initialCommand = arguments.optString("initial_command", "").takeIf { it.isNotBlank() }
-                val res = openTerminalHandler?.invoke(hostId, hostName, wsPath, wsName, cmd, agentName, reuseExisting, initialCommand)
+                val focus = arguments.optBoolean("focus", true)
+                val res = openTerminalHandler?.invoke(hostId, hostName, wsPath, wsName, cmd, agentName, reuseExisting, initialCommand, focus)
                     ?: ToolOpResult(false, "openTerminalHandler unavailable", "打开终端不可用。")
                 return McpToolResult(isError = !res.ok, content = res.detail, voiceSummary = res.voiceSummary, expectsFollowUp = res.expectsFollowUp)
             }
@@ -334,7 +339,7 @@ object JarvisToolRegistry {
         register(object : JarvisMcpTool {
             override val definition = McpToolDefinition(
                 name = "run_in_workspace",
-                description = "在指定工作区执行命令或发送文本；支持 sync=true（默认）同步等待执行结束并返回标准化 JSON（含 exit_code、stdout、duration_ms、timed_out），也支持 timeout_ms 与 mode(ssh_exec/pty)。",
+                description = "直接在后台向进行中的工作区任务发送命令并可同步等待返回值，无需跳进终端页（focus 默认 false 保持在首页）；支持 sync=true、timeout_ms 与 mode(ssh_exec/pty)。",
                 inputSchema = JSONObject().apply {
                     put("type", "object")
                     put("properties", sessionSelectorProperties().apply {
@@ -343,6 +348,7 @@ object JarvisToolRegistry {
                         put("sync", JSONObject().put("type", "boolean").put("description", "是否同步等待命令完成并返回输出与退出码，默认 true"))
                         put("timeout_ms", JSONObject().put("type", "integer").put("description", "同步等待超时毫秒数，默认 30000"))
                         put("mode", JSONObject().put("type", "string").put("description", "可选：ssh_exec 或 pty"))
+                        put("focus", JSONObject().put("type", "boolean").put("description", "是否切入该终端界面，默认 false（在首页静默执行不跳转）"))
                     })
                     put("required", JSONArray().put("text"))
                 }
@@ -354,10 +360,11 @@ object JarvisToolRegistry {
                 val sync = extractSyncFlag(arguments, defaultValue = true)
                 val timeoutMs = extractTimeoutMs(arguments)
                 val mode = arguments.optString("mode", "").trim().lowercase().takeIf { it.isNotBlank() }
+                val focus = arguments.optBoolean("focus", false)
                 if (text.isBlank()) {
                     return McpToolResult(isError = true, content = "Missing text/command", voiceSummary = "未指定要执行的命令内容。")
                 }
-                val res = runInWorkspaceHandler?.invoke(selector, text, enter, selector.agentName, sync, timeoutMs, mode)
+                val res = runInWorkspaceHandler?.invoke(selector, text, enter, selector.agentName, sync, timeoutMs, mode, focus)
                     ?: ToolOpResult(false, "runInWorkspaceHandler unavailable", "执行工作区命令不可用。")
                 return McpToolResult(
                     isError = !res.ok,
@@ -885,7 +892,7 @@ object JarvisToolRegistry {
         }
         val lines = StringBuilder()
         lines.appendLine("【Android MCP(${defs.size}) 语法 [[RDT_MCP:{\"tool\":\"名\",\"arguments\":{...}}]]】")
-        lines.appendLine("同步等待命令用 run_terminal_command（或 run_in_workspace/send_terminal_text 传 sync=true, timeout_ms=30000）获取 exit_code 与 stdout；定位工作区传 workspace_name/session_index；退出唤醒传 close_awake。")
+        lines.appendLine("同步等待命令用 run_terminal_command（或 run_in_workspace/send_terminal_text 传 sync=true, timeout_ms=30000）获取 exit_code 与 stdout；在首页可直接对 open_sessions 中进行中任务发命令（传 workspace_name/title/session_index），无需先切换或打开终端界面；退出唤醒传 close_awake。")
         for (def in defs) {
             val props = def.inputSchema.optJSONObject("properties")
             val requiredSet = buildSet {
