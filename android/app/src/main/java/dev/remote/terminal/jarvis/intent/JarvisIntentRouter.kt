@@ -54,7 +54,7 @@ class JarvisIntentRouter(
         )
 
         private val DismissAwakeRegex = Regex(
-            """(?i)^\s*(?:关闭唤醒|退出唤醒|关闭弹窗|关掉弹窗|关闭浮窗|结束对话|退出对话|退下|下去吧|行了没事了|没事了|不用了|先这样|就这些|休眠|回到待命|闭嘴|再见|拜拜|关闭|退出|goodbye|bye|sleep|dismiss)\s*[:?？!！.。]*$"""
+            """(?i)^\s*(?:(?:关闭唤醒|退出唤醒)(?:态|状态)?|关闭弹窗|关掉弹窗|关闭浮窗|结束对话|退出对话|退下|下去吧|行了没事了|没事了|不用了|先这样|就这些|休眠|回到待命|闭嘴|再见|拜拜|关闭|退出|goodbye|bye|sleep|dismiss)\s*[:?？!！.。]*$"""
         )
 
         private val TiledViewRegex = Regex(
