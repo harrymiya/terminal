@@ -86,13 +86,19 @@ def session_display_name(item, agent=None):
     default_names = (f"{agent_name} · {workspace_name}", f"{workspace_name} · {agent_name}")
     if not current or current in default_names:
         return f"{agent_name} · {workspace_name}"
-    # Sync payloads may already contain the fully formatted header title. Keep
-    # formatting idempotent so a poll cannot persist another workspace/agent
-    # suffix onto an Agent generated title.
-    suffix = f" · {workspace_name} · {agent_name}"
-    if current.endswith(suffix):
-        return current
-    return f"{current} · {workspace_name} · {agent_name}"
+    # Agent titles can already include one or more parts of the card context.
+    # Strip repeated full or partial suffixes before adding the context once.
+    title_source = item.get("title_source", "default")
+    suffixes = [f" · {workspace_name} · {agent_name}", f" · {agent_name} · {workspace_name}"]
+    if title_source != "manual":
+        suffixes.extend((f" · {workspace_name}", f" · {agent_name}"))
+    base_name = current
+    while True:
+        suffix = next((value for value in suffixes if base_name.endswith(value)), None)
+        if not suffix:
+            break
+        base_name = base_name[:-len(suffix)].rstrip()
+    return f"{base_name} · {workspace_name} · {agent_name}" if base_name else f"{agent_name} · {workspace_name}"
 
 
 def session_workspace_label(item, agent=None):
@@ -105,10 +111,17 @@ def session_workspace_label(item, agent=None):
         return current or workspace_name
     if current in (None, "", f"{agent_name} · {workspace_name}", f"{workspace_name} · {agent_name}"):
         return workspace_name
-    suffix = f" · {workspace_name} · {agent_name}"
-    if current.endswith(suffix):
-        return current[:-len(suffix)] + f" · {workspace_name}"
-    return f"{current} · {workspace_name}"
+    title_source = item.get("title_source", "default")
+    suffixes = [f" · {workspace_name} · {agent_name}", f" · {agent_name} · {workspace_name}"]
+    if title_source != "manual":
+        suffixes.extend((f" · {workspace_name}", f" · {agent_name}"))
+    base_name = current
+    while True:
+        suffix = next((value for value in suffixes if base_name.endswith(value)), None)
+        if not suffix:
+            break
+        base_name = base_name[:-len(suffix)].rstrip()
+    return f"{base_name} · {workspace_name}" if base_name else workspace_name
 
 
 def operation_log_session_name(entry):
