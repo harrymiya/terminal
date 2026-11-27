@@ -1055,7 +1055,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
 
         var refreshShared: (HostProfile) -> Unit = {}
 
-        fun closeSession(session: TerminalSessionState, syncDeletion: Boolean = true) {
+        fun closeSession(session: TerminalSessionState, syncDeletion: Boolean = true, terminateRemote: Boolean = true) {
             val index = sessions.indexOf(session)
             if (index < 0) return
             sessionStore.remove(session.task.id)
@@ -1066,7 +1066,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
             AutoConfirmEngine.unregisterSession(session.task.id)
             session.onConnectionUnavailable()
             TerminalConnectionRegistry.unregister(session.task.id, session.controller)
-            session.controller.close(terminateRemote = true)
+            session.controller.close(terminateRemote = terminateRemote)
             sessions.removeAt(index)
             if (sessions.isEmpty()) {
                 route = AppRoute.HOME
@@ -2174,52 +2174,78 @@ private fun RemoteTerminalApp(store: LocalStore) {
             }
 
             dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.closeTerminalHandler = close@{ selector ->
-                var target = resolveSessionMatch(selector)
+                var target = if (!selector.hasAnyFilter()) resolveSessionMatch(selector) else null
                 var attachedForClose = false
-                if (target == null) {
+                if (selector.hasAnyFilter()) {
                     val requestedId = selector.sessionId?.replace("-", "")?.lowercase()
                     val query = selector.workspaceName ?: selector.query
-                    val candidates = startupShared.mapNotNull { (host, item) ->
-                        val id = item.optString("id").replace("-", "").lowercase()
-                        val title = item.optString("display_name")
-                        val workspace = item.optString("directory_name")
-                        val path = item.optString("directory_path")
-                        val agent = item.optString("agent_name")
-                        val command = item.optString("agent_command")
+                    data class CloseCandidate(
+                        val score: Int,
+                        val name: String,
+                        val host: HostProfile,
+                        val session: TerminalSessionState? = null,
+                        val shared: org.json.JSONObject? = null
+                    )
+                    fun score(host: HostProfile, sessionId: String, titles: List<String>, workspace: String,
+                              path: String, agent: String, command: String): Int? {
                         if (!selector.hostName.isNullOrBlank() &&
                             !host.id.equals(selector.hostName, true) && !host.name.contains(selector.hostName, true)
-                        ) return@mapNotNull null
-                        if (!selector.workspacePath.isNullOrBlank() && !path.equals(selector.workspacePath, true)) return@mapNotNull null
+                        ) return null
+                        if (!selector.workspacePath.isNullOrBlank() && !path.equals(selector.workspacePath, true)) return null
                         if (!selector.agentName.isNullOrBlank() &&
                             !agent.contains(selector.agentName, true) && !command.contains(selector.agentName, true)
-                        ) return@mapNotNull null
-                        val score = when {
-                            requestedId != null && (id == requestedId || id.startsWith(requestedId)) -> 120
-                            requestedId != null -> return@mapNotNull null
-                            query.isNullOrBlank() -> return@mapNotNull null
-                            title.equals(query, true) -> 100
+                        ) return null
+                        val id = sessionId.replace("-", "").lowercase()
+                        return when {
+                            requestedId?.isBlank() == true -> null
+                            requestedId != null && id == requestedId -> 130
+                            requestedId != null && id.startsWith(requestedId) -> 120
+                            requestedId != null -> null
+                            query.isNullOrBlank() -> 50
+                            titles.any { it.equals(query, true) } -> 100
                             workspace.equals(query, true) -> 90
-                            title.contains(query, true) || workspace.contains(query, true) || path.contains(query, true) -> 60
-                            else -> return@mapNotNull null
+                            titles.any { it.contains(query, true) } || workspace.contains(query, true) ||
+                                path.contains(query, true) -> 60
+                            else -> null
                         }
-                        Triple(score, host, item)
                     }
-                    val bestScore = candidates.maxOfOrNull { it.first }
-                    val best = candidates.filter { it.first == bestScore }
+                    val local = sessions.mapIndexedNotNull { index, session ->
+                        if (selector.sessionIndex != null && selector.sessionIndex != index) return@mapIndexedNotNull null
+                        val task = session.task
+                        val title = sessionDisplayLabel(task)
+                        val rank = score(task.host, task.id, listOf(title, task.displayName), task.directory.name,
+                            task.directory.path, task.agent.name, task.agent.command) ?: return@mapIndexedNotNull null
+                        CloseCandidate(rank, title, task.host, session = session)
+                    }
+                    val localIds = sessions.map { it.task.id.replace("-", "").lowercase() }.toSet()
+                    val shared = if (selector.sessionIndex != null) emptyList() else startupShared.mapNotNull { (host, item) ->
+                        val id = item.optString("id")
+                        if (id.isBlank() || id.replace("-", "").lowercase() in localIds) return@mapNotNull null
+                        val workspace = item.optString("directory_name")
+                        val title = item.optString("display_name").ifBlank { workspace }
+                        val rank = score(host, id, listOf(title), workspace, item.optString("directory_path"),
+                            item.optString("agent_name"), item.optString("agent_command")) ?: return@mapNotNull null
+                        CloseCandidate(rank, title, host, shared = item)
+                    }
+                    val candidates = local + shared
+                    val bestScore = candidates.maxOfOrNull { it.score }
+                    val best = candidates.filter { it.score == bestScore }
                     if (best.size > 1) {
-                        val names = best.joinToString("、") { (_, host, item) ->
-                            "${item.optString("display_name").ifBlank { item.optString("directory_name") }}（${host.name}）"
+                        val names = best.joinToString("、") {
+                            "${it.name}（${it.host.name}）"
                         }
                         return@close dev.remote.terminal.jarvis.mcp.ToolOpResult(
                             false,
-                            "Ambiguous shared instance: $names",
+                            "Ambiguous instance: $names",
                             "找到多个匹配实例：$names，请指定主机或实例 ID。"
                         )
                     }
-                    val shared = best.singleOrNull()
-                    if (shared != null) {
-                        openSharedSession(shared.second, shared.third, activate = false)
-                        val id = shared.third.optString("id").replace("-", "")
+                    val match = best.singleOrNull()
+                    target = match?.session
+                    val sharedItem = match?.shared
+                    if (sharedItem != null) {
+                        openSharedSession(match.host, sharedItem, activate = false)
+                        val id = sharedItem.optString("id").replace("-", "")
                         target = sessions.firstOrNull { it.task.id.replace("-", "").equals(id, true) }
                         attachedForClose = target != null
                     }
@@ -2245,7 +2271,9 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 } ?: false
                 if (!connected) {
                     val pendingHostKey = target!!.hostFingerprint != null
-                    if (attachedForClose && !pendingHostKey) closeSession(target!!, syncDeletion = false)
+                    if (attachedForClose && !pendingHostKey) {
+                        closeSession(target!!, syncDeletion = false, terminateRemote = false)
+                    }
                     val message = if (pendingHostKey) {
                         "实例需要先确认 SSH 主机指纹，尚未关闭。"
                     } else {
@@ -2254,10 +2282,10 @@ private fun RemoteTerminalApp(store: LocalStore) {
                     return@close dev.remote.terminal.jarvis.mcp.ToolOpResult(false, message, message)
                 }
 
-                val label = "${target!!.task.directory.name}（${target!!.task.agent.name}）"
+                val label = sessionDisplayLabel(target!!.task)
                 val id = target!!.task.id
                 closeSession(target!!)
-                dev.remote.terminal.jarvis.mcp.ToolOpResult(true, "Closed session $id", "已为您关闭工作区实例 $label。")
+                dev.remote.terminal.jarvis.mcp.ToolOpResult(true, "Close requested for session $id", "已发起关闭实例 $label。")
             }
 
             dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.reconnectTerminalHandler = { selector ->

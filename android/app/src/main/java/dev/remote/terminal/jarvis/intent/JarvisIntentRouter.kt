@@ -54,12 +54,20 @@ class JarvisIntentRouter(
             """(?i)(?:重连|重新连接|断线重连)"""
         )
 
-        private val CloseTerminalRegex = Regex(
-            """(?i)(?:关闭终端|关掉终端|关掉会话|关闭会话)"""
+        private val CloseInstancePrefixRegex = Regex(
+            """^\s*(?:(?:请|麻烦|帮我|给我)\s*){0,3}(?:(?:核对|确认|检查|查看)(?:一下)?\s*(?:后再|然后|并且|并|再)\s*)?(?:关闭|关掉|关了|结束|停止)\s*(?:一下\s*)?"""
         )
 
-        private val CloseNamedInstanceRegex = Regex(
-            """(?i)^\s*(?:请)?(?:关闭|关掉|结束|停止)\s*[“\"「『]?(.+?)[”\"」』]?\s*(?:远端|远程)?(?:工作区)?(?:终端|会话|任务(?:实例)?|实例)\s*[。！!]*$"""
+        private val CloseInstanceObjectRegex = Regex(
+            """^\s*(?:(?:请|麻烦|帮我|给我)\s*){0,3}(?:把|将)\s*(.+?)\s*(?:关闭|关掉|关了|结束|停止)(?:掉|一下|吧)?$"""
+        )
+
+        private val CloseInstanceSuffixRegex = Regex(
+            """\s*(?:(?:的|这个|那个|这条|那条|当前)\s*)?(?:(?:远端|远程|共享|本地)\s*)*(?:工作区\s*)?(?:任务实例|终端|会话|实例|任务)$"""
+        )
+
+        private val CloseInstanceTypePrefixRegex = Regex(
+            """^(?:(?:这个|那个|当前)\s*)?(?:(?:远端|远程|共享|本地)\s*)*(?:工作区\s*)?(?:任务实例|终端|会话|实例|任务)(?=\s|[“"「『：:]|名叫|名为|叫|$)"""
         )
 
         private val DismissAwakeRegex = Regex(
@@ -138,6 +146,30 @@ class JarvisIntentRouter(
     private fun buildWakePattern(): String =
         wakeVariants().joinToString("|") { Regex.escape(it) }
 
+    private fun resolveCloseInstance(text: String): JarvisAction? {
+        val command = text.trimEnd(' ', '。', '！', '!', '，', ',').removeSuffix("吧").trimEnd()
+        val objectFirst = CloseInstanceObjectRegex.matchEntire(command)
+        val verbFirst = CloseInstancePrefixRegex.find(command)
+        val target = objectFirst?.groupValues?.get(1)
+            ?: verbFirst?.let { command.substring(it.range.last + 1) }
+            ?: return null
+        val suffix = CloseInstanceSuffixRegex.find(target)
+        val prefix = CloseInstanceTypePrefixRegex.find(target)
+        if (suffix == null && prefix == null) return null
+        val title = when {
+            suffix != null -> target.substring(0, suffix.range.first)
+            else -> target.substring(prefix!!.range.last + 1)
+        }.trim().removePrefix("名叫").removePrefix("名为").removePrefix("叫")
+            .trim(' ', '：', ':', '“', '”', '"', '「', '」', '『', '』')
+        if (title.isBlank() || title in setOf("这", "那", "一个", "所有", "全部")) {
+            if (target in setOf("终端", "当前终端", "会话", "当前会话")) {
+                return JarvisAction.ExecuteTool("close_terminal")
+            }
+            return JarvisAction.DirectReply("请告诉我要关闭的实例名称。")
+        }
+        return JarvisAction.ExecuteTool("close_terminal", JSONObject().put("title", title))
+    }
+
     private fun extractInstanceQuery(text: String): String {
         var query = text.replaceFirst(OpenInstancePrefixRegex, "").trim()
         query = query.replace(Regex("""(?i)^(?:(?:一下|下|当前|这个|那个)\s*)*(?:(?:远端|远程|共享)\s*)*(?:工作区\s*)?(?:实例|任务|会话)\s*"""), "")
@@ -182,6 +214,8 @@ class JarvisIntentRouter(
             return@withContext JarvisAction.InjectKeystroke("\u0003", "已为您中止当前进程。")
         }
 
+        resolveCloseInstance(cleanText)?.let { return@withContext it }
+
         val switchMatch = SwitchWorkspaceRegex.find(cleanText)
         if (switchMatch != null) {
             val targetRaw = switchMatch.groupValues[1].trim()
@@ -202,21 +236,6 @@ class JarvisIntentRouter(
         if (ReconnectRegex.containsMatchIn(cleanText)) {
             Log.i(TAG, "Tier-1 matched: MCP reconnect_terminal (0 Token)")
             return@withContext JarvisAction.ExecuteTool("reconnect_terminal")
-        }
-
-        val namedInstanceToClose = CloseNamedInstanceRegex.find(cleanText)?.groupValues?.getOrNull(1)
-            ?.trim()?.trim('“', '”', '"', '「', '」', '『', '』')
-        if (!namedInstanceToClose.isNullOrBlank()) {
-            Log.i(TAG, "Tier-1 matched: close named Remote Dev instance [$namedInstanceToClose]")
-            return@withContext JarvisAction.ExecuteTool(
-                "close_terminal",
-                JSONObject().put("query", namedInstanceToClose)
-            )
-        }
-
-        if (CloseTerminalRegex.containsMatchIn(cleanText)) {
-            Log.i(TAG, "Tier-1 matched: MCP close_terminal (0 Token)")
-            return@withContext JarvisAction.ExecuteTool("close_terminal")
         }
 
         if (DismissAwakeRegex.matches(cleanText)) {
