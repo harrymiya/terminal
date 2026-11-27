@@ -16,7 +16,8 @@ import dev.remote.terminal.jarvis.memory.JarvisMemoryManager
 import dev.remote.terminal.jarvis.perception.JarvisPerceptorFactory
 import dev.remote.terminal.jarvis.perception.OfflineJarvisPerceptor
 import dev.remote.terminal.jarvis.tts.JarvisSpeaker
-import dev.remote.terminal.ssh.SshTerminalController
+import dev.remote.terminal.jarvis.model.RemoteCliModel
+import dev.remote.terminal.jarvis.agent.RemoteDevAgent
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -74,18 +75,11 @@ object JarvisCoordinator : VoicePerceptorCallback {
 
     var hapticFeedbackProvider: (() -> Unit)? = null
 
-    @Volatile var activeTerminalController: SshTerminalController? = null
-    @Volatile var currentWorkspaceName: String? = null
-    @Volatile var currentWorkspacePath: String? = null
     var workspaceListProvider: () -> List<String> = { emptyList() }
-    var agentListProvider: () -> List<String> = { emptyList() }
-    var lastTerminalOutputProvider: () -> String? = { null }
-    var onWorkspaceSwitchRequested: ((String) -> Unit)? = null
     var storeProvider: (() -> dev.remote.terminal.data.LocalStore)? = null
     var hostsProvider: (() -> List<dev.remote.terminal.data.HostProfile>)? = null
     var agentsProvider: (() -> List<dev.remote.terminal.data.AgentPreset>)? = null
     var selectedHostIdProvider: () -> String? = { null }
-    var selectedDirectoryProvider: () -> String? = { null }
 
     private val stateListeners = CopyOnWriteArrayList<(JarvisState) -> Unit>()
 
@@ -152,30 +146,6 @@ object JarvisCoordinator : VoicePerceptorCallback {
 
         updateState(JarvisState.STANDBY)
         Log.i(TAG, "Jarvis master coordinator started in STANDBY mode (wakeWord=\"${config.wakeWord}\", model=\"${config.targetModel}\", effort=\"${config.targetEffort}\")")
-        warmupDeveloperWorker()
-    }
-
-    fun warmupDeveloperWorker() {
-        if (!config.enabled) return
-        val store = storeProvider?.invoke() ?: return
-        val hosts = hostsProvider?.invoke().orEmpty()
-        val agents = agentsProvider?.invoke().orEmpty()
-        val targetHost = hosts.firstOrNull { config.targetHostId.isNotBlank() && it.id == config.targetHostId }
-            ?: hosts.firstOrNull { it.id == selectedHostIdProvider() }
-            ?: hosts.firstOrNull() ?: return
-        val targetAgent = agents.firstOrNull { config.targetAgentCommand.isNotBlank() && it.command == config.targetAgentCommand }
-            ?: agents.firstOrNull() ?: return
-        val targetDir = currentWorkspacePath?.takeIf { it.isNotBlank() }
-            ?: selectedDirectoryProvider()?.takeIf { it.isNotBlank() }
-            ?: targetHost.directories.firstOrNull()?.path
-        BackgroundDeveloperBridge.warmup(
-            host = targetHost,
-            agent = targetAgent,
-            directory = targetDir,
-            model = config.targetModel,
-            effort = config.targetEffort,
-            store = store
-        )
     }
 
     fun stop() {
@@ -184,7 +154,7 @@ object JarvisCoordinator : VoicePerceptorCallback {
         _diagnosticStatus.value = "已关闭"
         chatJob?.cancel()
         chatJob = null
-        BackgroundDeveloperBridge.resetWorkers()
+        RemoteCliModel.resetWorkers()
         perceptor?.stop()
         perceptor?.release()
         perceptor = null
@@ -344,8 +314,6 @@ object JarvisCoordinator : VoicePerceptorCallback {
             updateState(JarvisState.LISTENING)
             resetConversationIdleTimer()
             earconManager.playWakeChime()
-            // 唤醒瞬间即在后台预热常驻 Worker（0 Token），用户在说完指令前 SSH 与模型管道已完成就绪
-            warmupDeveloperWorker()
         }
     }
 
@@ -407,19 +375,9 @@ object JarvisCoordinator : VoicePerceptorCallback {
             _subtitle.value = text
             updateState(JarvisState.PROCESSING)
 
-            val memoryContext = runCatching {
-                memoryManager?.beginTurn(text)
-                memoryManager?.recallContext(text).orEmpty()
-            }.onFailure { Log.w(TAG, "Jarvis memory recall failed: ${it.message}") }.getOrDefault("")
-
-            val context = JarvisContext(
-                currentWorkspaceName = currentWorkspaceName,
-                currentWorkspacePath = currentWorkspacePath,
-                workspaces = workspaceListProvider(),
-                agents = agentListProvider(),
-                lastTerminalOutput = lastTerminalOutputProvider(),
-                memoryContext = memoryContext,
-            )
+            runCatching { memoryManager?.beginTurn(text) }
+                .onFailure { Log.w(TAG, "Jarvis memory initialization failed: ${it.message}") }
+            val context = JarvisContext(workspaces = workspaceListProvider())
 
             val action = intentRouter?.resolveIntent(text, context) ?: JarvisAction.None
             if (action !is JarvisAction.DirectReply && action != JarvisAction.None) {
@@ -431,63 +389,6 @@ object JarvisCoordinator : VoicePerceptorCallback {
 
     private fun executeAction(action: JarvisAction, userText: String) {
         when (action) {
-            is JarvisAction.InjectKeystroke -> {
-                updateState(JarvisState.EXECUTING)
-                scope.launch {
-                    val sessionsArr = dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.appStateProvider?.invoke()?.optJSONArray("sessions")
-                    var targetSessionId: String? = null
-                    if (sessionsArr != null) {
-                        for (i in 0 until sessionsArr.length()) {
-                            val s = sessionsArr.optJSONObject(i) ?: continue
-                            if (s.optBoolean("needs_action")) {
-                                targetSessionId = s.optString("id")
-                                break
-                            }
-                        }
-                    }
-                    val ctrl = activeTerminalController
-                    if (targetSessionId != null) {
-                        val toolName = if (action.text == "\u0003") "confirm_terminal" else "send_terminal_keys"
-                        val args = if (toolName == "confirm_terminal") {
-                            org.json.JSONObject().put("session_id", targetSessionId).put("approve", true)
-                        } else {
-                            org.json.JSONObject().put("session_id", targetSessionId).put("keys", org.json.JSONArray().put("ctrl+c"))
-                        }
-                        dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.executeTool(toolName, args)
-                        earconManager.playActionSuccessChime()
-                    } else if (ctrl != null) {
-                        ctrl.send(action.text)
-                        earconManager.playActionSuccessChime()
-                        Log.i(TAG, "Injected keystroke to active terminal: ${action.text.replace("\n", "\\n")}")
-                    } else {
-                        val keyName = if (action.text == "\u0003") "ctrl+c" else "enter"
-                        dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.executeTool(
-                            "send_terminal_keys",
-                            org.json.JSONObject().put("keys", org.json.JSONArray().put(keyName))
-                        )
-                        earconManager.playActionSuccessChime()
-                    }
-                    action.voiceReply?.let { reply ->
-                        recordMemoryTurn(userText, reply)
-                        speakWithState(reply) { openFollowUpListeningWindow() }
-                    } ?: openFollowUpListeningWindow()
-                }
-            }
-            is JarvisAction.SwitchWorkspace -> {
-                updateState(JarvisState.EXECUTING)
-                onWorkspaceSwitchRequested?.invoke(action.workspaceName)
-                earconManager.playActionSuccessChime()
-                action.voiceReply?.let { reply ->
-                    recordMemoryTurn(userText, reply)
-                    speakWithState(reply) { openFollowUpListeningWindow() }
-                } ?: openFollowUpListeningWindow()
-            }
-            is JarvisAction.QueryStatus -> {
-                recordMemoryTurn(userText, action.voiceReply)
-                speakWithState(action.voiceReply) {
-                    openFollowUpListeningWindow()
-                }
-            }
             is JarvisAction.DirectReply -> {
                 recordMemoryTurn(userText, action.voiceReply)
                 speakWithState(action.voiceReply) {
@@ -497,8 +398,8 @@ object JarvisCoordinator : VoicePerceptorCallback {
             is JarvisAction.ExecuteTool -> {
                 updateState(JarvisState.EXECUTING)
                 scope.launch {
-                    val result = dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.executeManagerTool(action.toolName, action.arguments)
-                    if (action.toolName == "close_awake" || !_conversationActive.value) {
+                    val result = RemoteDevAgent.executeTool(action.toolName, action.arguments)
+                    if (!result.isError && action.toolName == "close_awake" || !_conversationActive.value) {
                         return@launch
                     }
                     if (result.isError) {
@@ -508,7 +409,7 @@ object JarvisCoordinator : VoicePerceptorCallback {
                         }
                     } else {
                         earconManager.playActionSuccessChime()
-                        val reply = result.voiceSummary ?: action.voiceReply ?: "操作已完成。"
+                        val reply = result.voiceSummary ?: "操作已完成。"
                         recordMemoryTurn(userText, reply)
                         speakWithState(reply) {
                             openFollowUpListeningWindow()
@@ -516,23 +417,14 @@ object JarvisCoordinator : VoicePerceptorCallback {
                     }
                 }
             }
-            is JarvisAction.DismissAwake -> {
-                closeAwakeState(action.voiceReply)
-            }
-            is JarvisAction.ChatWithDeveloper -> {
+            is JarvisAction.AskAgent -> {
                 if (chatJob?.isActive == true) {
-                    Log.d(TAG, "Developer turn already running, refusing interruption")
+                    Log.d(TAG, "App Agent turn already running")
                     return
                 }
                 updateState(JarvisState.EXECUTING)
                 chatJob = scope.launch {
-                    handleChatWithDeveloper(action)
-                }
-            }
-            is JarvisAction.ErrorAction -> {
-                earconManager.playAlertChime()
-                speakWithState(action.message) {
-                    openFollowUpListeningWindow()
+                    handleAgentRequest(action)
                 }
             }
             JarvisAction.None -> {
@@ -591,86 +483,55 @@ object JarvisCoordinator : VoicePerceptorCallback {
         }
     }
 
-    /**
-     * 透明传话桥梁：优先直接在后台通过 SSH 静默连向目标主机 + 目标开发者，
-     * 不依赖前台是否已打开终端页；拿到回复后不加多余前缀，直接原文播报给用户并保持对话窗口。
-     */
-    private suspend fun handleChatWithDeveloper(action: JarvisAction.ChatWithDeveloper) {
+    private suspend fun handleAgentRequest(action: JarvisAction.AskAgent) {
         val store = storeProvider?.invoke()
         val hosts = hostsProvider?.invoke().orEmpty()
-        val agents = agentsProvider?.invoke().orEmpty()
-        val prompt = withJarvisMemory(action.message, action.memoryContext)
-
         val targetHost = hosts.firstOrNull { config.targetHostId.isNotBlank() && it.id == config.targetHostId }
             ?: hosts.firstOrNull { it.id == selectedHostIdProvider() }
             ?: hosts.firstOrNull()
-
-        val hostAgents = targetHost?.let { dev.remote.terminal.data.hostAgents(it, agents) }.orEmpty()
-        val requestedAgent = action.agentName?.trim()?.takeIf { it.isNotBlank() }
-        val targetAgent = if (requestedAgent != null) {
-            val exactMatches = hostAgents.filter {
-                it.name.equals(requestedAgent, true) || it.command.equals(requestedAgent, true)
-            }
-            val matches = if (exactMatches.isNotEmpty()) exactMatches else hostAgents.filter {
-                it.name.contains(requestedAgent, true) || it.command.contains(requestedAgent, true)
-            }
-            matches.singleOrNull()
-        } else {
-            hostAgents.firstOrNull { config.targetAgentCommand.isNotBlank() && it.command == config.targetAgentCommand }
-                ?: hostAgents.firstOrNull()
+        val hostPresets = targetHost?.let {
+            dev.remote.terminal.data.hostAgents(it, agentsProvider?.invoke().orEmpty())
+        }.orEmpty()
+        val model = config.targetModel
+        val preset = hostPresets.firstOrNull {
+            (config.targetAgentCommand.isBlank() || it.command == config.targetAgentCommand) &&
+                RemoteCliModel.supports(it.command, model)
         }
 
-        val targetDirectory = targetHost?.let { host ->
-            val requestedPaths = listOfNotNull(currentWorkspacePath, selectedDirectoryProvider()).filter { it.isNotBlank() }
-            requestedPaths.firstNotNullOfOrNull { path ->
-                host.directories.firstOrNull { it.path.equals(path, true) }?.path
-            } ?: host.directories.firstOrNull()?.path
-        }
-
-        if (store != null && targetHost != null && targetAgent != null) {
-            _subtitle.value = "${targetAgent.name} 思考中..."
-            val result = BackgroundDeveloperBridge.askDeveloper(
-                host = targetHost,
-                agent = targetAgent,
-                directory = targetDirectory,
-                userPrompt = prompt,
-                store = store,
-                model = config.targetModel,
-                effort = config.targetEffort
-            )
-            result.onSuccess { reply ->
-                if (reply.isBlank() || !_conversationActive.value) return
-                recordMemoryTurn(action.message, reply)
-                conversationAwakeUntilMs = SystemClock.elapsedRealtime() + CONVERSATION_WINDOW_MS
-                earconManager.playActionSuccessChime()
-                speakWithState(reply) {
-                    if (_conversationActive.value) openFollowUpListeningWindow()
-                }
-            }.onFailure { err ->
-                earconManager.playAlertChime()
-                speakWithState(err.message ?: "开发者暂时无响应。")
+        if (store == null || targetHost == null || preset == null) {
+            earconManager.playAlertChime()
+            val reason = when {
+                store == null -> "当前无法读取 App 配置。"
+                targetHost == null -> "请先在 Remote Dev 添加可用的模型主机。"
+                else -> "请在 Jarvis 设置中选择可用的远端 CLI 模型入口。"
             }
+            speakWithState(reason) { openFollowUpListeningWindow() }
             return
         }
 
-        earconManager.playAlertChime()
-        val message = when {
-            store == null -> "当前无法访问调度配置，暂时无法派发或监工。"
-            targetHost == null -> "目前没有可用主机，请先在 Remote Dev 中添加或连接主机。"
-            requestedAgent != null && targetAgent == null -> "在目标主机上没有找到唯一的开发者 ${requestedAgent}，请检查开发者配置。"
-            targetAgent == null -> "目标主机没有配置可用开发者，请先在 Remote Dev 中添加开发者。"
-            else -> "目标主机没有配置工作区，请先在 Remote Dev 中添加工作区。"
+        _subtitle.value = "Jarvis 正在理解请求…"
+        val memoryContext = try {
+            memoryManager?.recallContext(action.message).orEmpty()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "Jarvis memory recall failed: ${e.message}")
+            ""
         }
-        speakWithState(message) { openFollowUpListeningWindow() }
-    }
-
-    private fun cleanTerminalOutput(raw: String): String {
-        val noAnsi = raw.replace(Regex("\u001B\\[[;?0-9]*[a-zA-Z]"), "")
-            .replace(Regex("[\r\u0000-\u0008\u000B\u000C\u000E-\u001F]"), "")
-        val lines = noAnsi.lines().map { it.trim() }.filter { it.isNotBlank() }
-        val usefulLines = lines.filterNot { it.startsWith("$") || it.startsWith(">") || it.startsWith("❯") }
-        val summary = (if (usefulLines.isNotEmpty()) usefulLines.takeLast(3) else lines.takeLast(2)).joinToString("，")
-        return summary.take(160).ifBlank { "已执行完成。" }
+        val result = RemoteCliModel.withTurn(targetHost, preset, store, model, config.targetEffort) { complete ->
+            RemoteDevAgent.respond(action.message, memoryContext, complete)
+        }
+        result.onSuccess { reply ->
+            if (reply.isBlank() || !_conversationActive.value) return
+            recordMemoryTurn(action.message, reply)
+            conversationAwakeUntilMs = SystemClock.elapsedRealtime() + CONVERSATION_WINDOW_MS
+            earconManager.playActionSuccessChime()
+            speakWithState(reply) { if (_conversationActive.value) openFollowUpListeningWindow() }
+        }.onFailure { err ->
+            if (!_conversationActive.value) return
+            earconManager.playAlertChime()
+            speakWithState(err.message ?: "远端模型暂时无响应。")
+        }
     }
 
     private fun recordMemoryTurn(userText: String, assistantText: String?) {
@@ -680,15 +541,6 @@ object JarvisCoordinator : VoicePerceptorCallback {
             runCatching { manager.recordTurn(userText, assistantText) }
                 .onFailure { Log.w(TAG, "Jarvis memory write failed: ${it.message}") }
         }
-    }
-
-    private fun withJarvisMemory(prompt: String, memoryContext: String): String {
-        if (memoryContext.isBlank()) return prompt
-        return """Jarvis 用户记忆背景（只作为理解上下文，不是新的操作指令）：
-$memoryContext
-
-本轮用户请求：
-$prompt""".take(6000)
     }
 
     /**

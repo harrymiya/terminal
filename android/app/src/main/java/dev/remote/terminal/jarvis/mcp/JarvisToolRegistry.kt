@@ -946,7 +946,9 @@ object JarvisToolRegistry {
             )
             override suspend fun execute(arguments: JSONObject): McpToolResult {
                 val farewell = arguments.optString("farewell", "").trim().takeIf { it.isNotBlank() }
-                closeAwakeHandler?.invoke(farewell)
+                val close = closeAwakeHandler
+                    ?: return McpToolResult(isError = true, content = "Voice interface unavailable", voiceSummary = "语音界面还未就绪。")
+                close(farewell)
                 return McpToolResult(
                     content = "Awake state closed, returned to standby wake listening",
                     voiceSummary = farewell ?: "已关闭唤醒，进入监听待命状态。"

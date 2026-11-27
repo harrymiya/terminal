@@ -534,8 +534,8 @@ private fun RemoteTerminalApp(store: LocalStore) {
             dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.hostsProvider = { hosts.toList() }
             dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.agentsProvider = { agents.toList() }
             dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.selectedHostIdProvider = { selectedHostId }
-            dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.selectedDirectoryProvider = {
-                hosts.firstOrNull { it.id == selectedHostId }?.directories?.firstOrNull()?.path
+            dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.workspaceListProvider = {
+                hosts.firstOrNull { it.id == selectedHostId }?.directories?.map { it.name }.orEmpty()
             }
             dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.init(appContext)
             dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.enabled = store.loadJarvisEnabled()
@@ -567,38 +567,6 @@ private fun RemoteTerminalApp(store: LocalStore) {
             }
         }
 
-        LaunchedEffect(selectedHostId, sessions.size, activePage) {
-            val selectedHost = hosts.firstOrNull { it.id == selectedHostId }
-            val activeSession = sessions.getOrNull(activePage)
-            dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.activeTerminalController = activeSession?.task?.let { dev.remote.terminal.ssh.TerminalConnectionRegistry.get(it.id) }
-            dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.currentWorkspaceName = activeSession?.task?.directory?.name ?: selectedHost?.directories?.firstOrNull()?.name
-            dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.currentWorkspacePath = activeSession?.task?.directory?.path ?: selectedHost?.directories?.firstOrNull()?.path
-            dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.workspaceListProvider = {
-                selectedHost?.directories?.map { it.name } ?: emptyList()
-            }
-            dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.agentListProvider = {
-                agents.map { it.name }
-            }
-            dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.lastTerminalOutputProvider = {
-                activeSession?.buffer?.toString()
-            }
-        }
-
-        LaunchedEffect(Unit) {
-            dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.onWorkspaceSwitchRequested = { targetWs ->
-                val selectedHost = hosts.firstOrNull { it.id == selectedHostId }
-                val targetDir = selectedHost?.directories?.firstOrNull {
-                    it.name.equals(targetWs, ignoreCase = true) || it.name.contains(targetWs, ignoreCase = true)
-                }
-                if (targetDir != null) {
-                    val existingIndex = sessions.indexOfFirst { it.task.directory.path == targetDir.path }
-                    if (existingIndex >= 0) {
-                        activePage = existingIndex
-                        route = AppRoute.TERMINAL
-                    }
-                }
-            }
-        }
         val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
         androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
             val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
@@ -2330,8 +2298,14 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 }
             }
 
-            dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.confirmTerminalHandler = { selector, approve ->
-                val target = resolveSessionMatch(selector)
+            dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.confirmTerminalHandler = confirm@{ selector, approve ->
+                val pending = if (selector.hasAnyFilter()) emptyList() else sessions.filter { it.needsAction }
+                if (pending.size > 1) {
+                    return@confirm dev.remote.terminal.jarvis.mcp.ToolOpResult(
+                        false, "Multiple sessions are awaiting confirmation", "有多个实例等待确认，请指定实例名称。"
+                    )
+                }
+                val target = pending.singleOrNull() ?: resolveSessionMatch(selector)
                 if (target != null) {
                     val ctrl = dev.remote.terminal.ssh.TerminalConnectionRegistry.get(target.task.id) ?: target.controller
                     ctrl.send(if (approve) "\r" else "\u0003")
@@ -6779,7 +6753,7 @@ private fun SettingsScreen(
                     fontSize = 11.sp
                 )
 
-                Text("借力开发者能力", color = White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                Text("远端 CLI 模型", color = White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
                 val selectedHostLabel = hosts.firstOrNull { it.id == jarvisTargetHostId }?.name ?: "自动/当前主机"
                 val selectedAgentLabel = agents.firstOrNull { it.command == jarvisTargetAgentCmd }?.name ?: "自动/当前开发者"
                 Text(
@@ -6787,7 +6761,7 @@ private fun SettingsScreen(
                     color = Muted,
                     fontSize = 11.sp
                 )
-                Text("目标主机", color = Muted, fontSize = 11.sp)
+                Text("模型主机", color = Muted, fontSize = 11.sp)
                 Row(
                     modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -6827,7 +6801,7 @@ private fun SettingsScreen(
                         ) { Text("${h.icon} ${h.name}".trim(), color = if (isSel) Mint else White, fontSize = 12.sp) }
                     }
                 }
-                Text("目标开发者", color = Muted, fontSize = 11.sp)
+                Text("CLI 入口", color = Muted, fontSize = 11.sp)
                 Row(
                     modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -6855,7 +6829,7 @@ private fun SettingsScreen(
                             dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.targetAgentCommand = ""
                         }
                     ) { Text("自动", color = if (autoAgentSel) Mint else White, fontSize = 12.sp) }
-                    agents.forEach { a ->
+                    agents.filter { dev.remote.terminal.jarvis.model.RemoteCliModel.supports(it.command, "") }.forEach { a ->
                         val isSel = jarvisTargetAgentCmd == a.command
                         AgentPill(
                             selected = isSel,
@@ -6863,8 +6837,6 @@ private fun SettingsScreen(
                                 jarvisTargetAgentCmd = a.command
                                 store.saveJarvisTargetAgentCommand(a.command)
                                 dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.targetAgentCommand = a.command
-                                dev.remote.terminal.jarvis.coordinator.BackgroundDeveloperBridge.resetWorkers()
-                                dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.warmupDeveloperWorker()
                             }
                         ) {
                             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
@@ -6900,8 +6872,6 @@ private fun SettingsScreen(
                                 jarvisModel = value
                                 store.saveJarvisModel(value)
                                 dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.targetModel = value
-                                dev.remote.terminal.jarvis.coordinator.BackgroundDeveloperBridge.resetWorkers()
-                                dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.warmupDeveloperWorker()
                             }
                         ) {
                             Box(Modifier.padding(horizontal = 12.dp, vertical = 7.dp)) {
@@ -6917,7 +6887,7 @@ private fun SettingsScreen(
                         store.saveJarvisModel(it)
                         dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.targetModel = it
                     },
-                    label = { Text("自定义模型名称 (留空走开发者默认)") },
+                    label = { Text("自定义模型名称（留空使用 CLI 默认模型）") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -6938,8 +6908,6 @@ private fun SettingsScreen(
                                 jarvisEffort = value
                                 store.saveJarvisEffort(value)
                                 dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.targetEffort = value
-                                dev.remote.terminal.jarvis.coordinator.BackgroundDeveloperBridge.resetWorkers()
-                                dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.warmupDeveloperWorker()
                             }
                         ) {
                             Box(Modifier.padding(horizontal = 12.dp, vertical = 7.dp)) {

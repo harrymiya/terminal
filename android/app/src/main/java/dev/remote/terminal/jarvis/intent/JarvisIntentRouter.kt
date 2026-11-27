@@ -4,23 +4,13 @@ import android.util.Log
 import dev.remote.terminal.jarvis.api.IntentRouter
 import dev.remote.terminal.jarvis.api.JarvisAction
 import dev.remote.terminal.jarvis.api.JarvisContext
-import dev.remote.terminal.jarvis.api.JarvisManagerPolicy
-import dev.remote.terminal.jarvis.mcp.JarvisToolRegistry
 import dev.remote.terminal.jarvis.navigation.JarvisScreen
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
-import java.net.HttpURLConnection
-import java.net.URL
 
-/**
- * 极省 Token 的分层意图路由中枢。
- * 1. Tier-1 本地快速规则拦截 (0 Token, < 5ms 响应): 覆盖回车确认、中止、切换会话、进度查询。
- * 2. Tier-2 骨架式元数据压缩派发: 仅向轻量云端大模型发送工作区与 Agent 名单，不上传繁重的终端屏幕输出。
- */
+/** Resolves deterministic App actions before a request is handed to the App Agent. */
 class JarvisIntentRouter(
-    private val syncUrlProvider: () -> String = { "" },
-    private val syncTokenProvider: () -> String = { "" },
     private val wakeWordProvider: () -> String = { "贾维斯" }
 ) : IntentRouter {
 
@@ -102,10 +92,6 @@ class JarvisIntentRouter(
 
         private val InstanceTargetRegex = Regex(
             """(?i)(?:远端|远程|共享)?\s*(?:工作区\s*)?(?:实例|任务|会话)"""
-        )
-
-        private val TalkToAgentRegex = Regex(
-            """(?i)^(?:跟|向|让|对|问一下|问问|告诉|让开发者)\s*([a-zA-Z0-9_\u4e00-\u9fa5\-]+)?\s*(?:说|聊|问|查|做|执行|看一下|分析下|排查下)?[\s:：,，]*(.+)"""
         )
 
         private val SwitchHostRegex = Regex(
@@ -213,12 +199,12 @@ class JarvisIntentRouter(
         // 1. Tier-1 本地 0-Token 拦截
         if (ConfirmRegex.matches(cleanText)) {
             Log.i(TAG, "Tier-1 matched: Confirm / Enter (0 Token)")
-            return@withContext JarvisAction.InjectKeystroke("\r", "好的，已确认执行。")
+            return@withContext JarvisAction.ExecuteTool("confirm_terminal", JSONObject().put("approve", true))
         }
 
         if (CancelRegex.matches(cleanText)) {
             Log.i(TAG, "Tier-1 matched: Cancel / SIGINT (0 Token)")
-            return@withContext JarvisAction.InjectKeystroke("\u0003", "已为您中止当前进程。")
+            return@withContext JarvisAction.ExecuteTool("confirm_terminal", JSONObject().put("approve", false))
         }
 
         resolveCloseInstance(cleanText)?.let { return@withContext it }
@@ -231,7 +217,8 @@ class JarvisIntentRouter(
             }
             if (matchedWorkspace != null) {
                 Log.i(TAG, "Tier-1 matched: Switch Workspace to $matchedWorkspace (0 Token)")
-                return@withContext JarvisAction.SwitchWorkspace(matchedWorkspace, "已为您切换至 $matchedWorkspace 工作区。")
+                val tool = if (cleanText.startsWith("打开工作区")) "open_terminal" else "focus_terminal"
+                return@withContext JarvisAction.ExecuteTool(tool, JSONObject().put("workspace_name", matchedWorkspace))
             }
         }
 
@@ -247,7 +234,7 @@ class JarvisIntentRouter(
 
         if (DismissAwakeRegex.matches(cleanText)) {
             Log.i(TAG, "Tier-1 matched: Dismiss awake popup (0 Token)")
-            return@withContext JarvisAction.DismissAwake("好的，随时叫我。")
+            return@withContext JarvisAction.ExecuteTool("close_awake", JSONObject().put("farewell", "好的，随时叫我。"))
         }
 
         if (TiledViewRegex.containsMatchIn(cleanText)) {
@@ -295,23 +282,6 @@ class JarvisIntentRouter(
             return@withContext JarvisAction.ExecuteTool("select_host", JSONObject().put("host_name", targetHost))
         }
 
-        val talkMatch = TalkToAgentRegex.find(cleanText)
-        if (talkMatch != null) {
-            val rawAgent = talkMatch.groupValues[1].trim()
-            val prompt = talkMatch.groupValues[2].trim()
-            val matchesConfiguredAgent = rawAgent.isNotBlank() && context.agents.any {
-                it.equals(rawAgent, ignoreCase = true) || it.contains(rawAgent, ignoreCase = true)
-            }
-            if (matchesConfiguredAgent && prompt.isNotBlank()) {
-                Log.i(TAG, "Tier-1 matched: Talk to agent [$rawAgent]: \"$prompt\"")
-                return@withContext JarvisAction.ChatWithDeveloper(
-                    agentName = null,
-                    message = cleanText,
-                    memoryContext = context.memoryContext,
-                )
-            }
-        }
-
         if (StatusQueryRegex.matches(cleanText) || InstanceStatusQueryRegex.containsMatchIn(cleanText)) {
             Log.i(TAG, "Tier-1 matched: MCP get_task_status for local and shared instances")
             return@withContext JarvisAction.ExecuteTool("get_task_status")
@@ -321,115 +291,6 @@ class JarvisIntentRouter(
             return@withContext JarvisAction.ExecuteTool("get_capabilities")
         }
 
-        // 2. Tier-2 复杂开放式指令：压缩元数据后由服务端轻量模型处理
-        return@withContext resolveWithCompressedLlm(cleanText, context)
-    }
-
-    /**
-     * 骨架式元数据请求：不传全量终端日志，仅传当前环境与工作区列表，消耗极低 Token。
-     */
-    private suspend fun resolveWithCompressedLlm(userPrompt: String, context: JarvisContext): JarvisAction = withContext(Dispatchers.IO) {
-        val serverUrl = syncUrlProvider().trimEnd('/')
-        val token = syncTokenProvider()
-        if (serverUrl.isBlank()) {
-            // 没有配置中枢同步服务器时，交由本机贾维斯管理模型处理并通过 MCP 派发
-            Log.w(TAG, "No sync server configured for LLM parsing, routing as ChatWithDeveloper")
-            return@withContext JarvisAction.ChatWithDeveloper(
-                null, userPrompt, "我会先检查全局状态并派发给合适的开发者。", context.memoryContext
-            )
-        }
-
-        try {
-            val endpoint = URL("$serverUrl/v1/jarvis/dispatch")
-            val conn = endpoint.openConnection() as HttpURLConnection
-            conn.requestMethod = "POST"
-            conn.connectTimeout = 5000
-            conn.readTimeout = 7000
-            conn.doOutput = true
-            conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
-            if (token.isNotBlank()) {
-                conn.setRequestProperty("Authorization", "Bearer $token")
-            }
-
-            val appState = withContext(Dispatchers.Main) {
-                runCatching { JarvisToolRegistry.appStateProvider?.invoke() }.getOrNull()
-            }
-            val payload = JSONObject().apply {
-                put("voice_input", userPrompt)
-                put("system_prompt", JarvisManagerPolicy.SYSTEM_PROMPT)
-                put("context", JSONObject().apply {
-                    put("current_workspace", context.currentWorkspaceName ?: "")
-                    put("workspaces", org.json.JSONArray(context.workspaces))
-                    put("agents", org.json.JSONArray(context.agents))
-                    if (context.memoryContext.isNotBlank()) put("memory_context", context.memoryContext)
-                    if (appState != null) {
-                        put("app_state", appState)
-                    }
-                })
-                // 将完整的 Android MCP 协议能力、操作方法说明与结构化 Schema 作为上下文发送给调度端
-                put("mcp_protocol_manual", JarvisToolRegistry.buildMcpProtocolManual())
-                put("available_tools", JarvisToolRegistry.buildMcpToolsSchemaJson())
-            }
-
-            conn.outputStream.use { os ->
-                os.write(payload.toString().toByteArray(Charsets.UTF_8))
-            }
-
-            val responseCode = conn.responseCode
-            if (responseCode in 200..299) {
-                val responseStr = conn.inputStream.bufferedReader().use { it.readText() }
-                val json = JSONObject(responseStr)
-                val voiceReply = json.optString("voice_reply", "已为您处理。")
-                val cmd = json.optString("command", "")
-                val targetWs = json.optString("target_workspace", "")
-
-                if (json.has("tool")) {
-                    val toolName = json.getString("tool")
-                    val toolArgs = json.optJSONObject("arguments") ?: JSONObject()
-                    if (toolName == "dispatch_task" || !JarvisToolRegistry.isManagerTool(toolName)) {
-                        // Task work must pass through the manager prompt and MCP enforcement locally.
-                        JarvisAction.ChatWithDeveloper(
-                            agentName = null,
-                            message = userPrompt,
-                            memoryContext = context.memoryContext,
-                        )
-                    } else {
-                        JarvisAction.ExecuteTool(toolName, toolArgs, voiceReply)
-                    }
-                } else if (targetWs.isNotBlank() && targetWs != context.currentWorkspaceName) {
-                    JarvisAction.ChatWithDeveloper(
-                        agentName = null,
-                        message = userPrompt,
-                        memoryContext = context.memoryContext,
-                    )
-                } else if (cmd.isNotBlank()) {
-                    JarvisAction.ChatWithDeveloper(
-                        agentName = null,
-                        message = userPrompt,
-                        memoryContext = context.memoryContext,
-                    )
-                } else {
-                    JarvisAction.ChatWithDeveloper(
-                        agentName = null,
-                        message = userPrompt,
-                        memoryContext = context.memoryContext,
-                    )
-                }
-            } else {
-                Log.w(TAG, "Jarvis dispatch server returned HTTP $responseCode, routing through the local manager")
-                JarvisAction.ChatWithDeveloper(
-                    agentName = null,
-                    message = userPrompt,
-                    memoryContext = context.memoryContext,
-                )
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to dispatch via remote LLM: ${e.message}")
-            JarvisAction.ChatWithDeveloper(
-                agentName = null,
-                message = userPrompt,
-                memoryContext = context.memoryContext,
-            )
-        }
+        JarvisAction.AskAgent(cleanText)
     }
 }

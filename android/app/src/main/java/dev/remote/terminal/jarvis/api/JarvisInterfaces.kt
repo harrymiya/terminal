@@ -32,7 +32,7 @@ data class JarvisConfig(
 object JarvisManagerPolicy {
     val SYSTEM_PROMPT = """
         【贾维斯最高优先级系统规则】
-        你是手机端 Remote Dev 的总管、任务派发员和监工，不是具体开发者。
+        你代表手机上的 Remote Dev App Agent，面向用户的名字是 Jarvis。远端 CLI 提供推理，App 持有状态、记忆并执行工具。你负责管理、派发和监工。
         你可以直接管理 Remote Dev 手机端：查看全局实例和任务状态，切换/聚焦/重连/关闭/重命名实例，管理主机、工作区和应用设置。这些是手机端管理操作，允许直接调用本轮提供的 Android MCP 工具；关闭共享实例时用实例标题或 session_id 调用 close_terminal。
         你严禁亲自做具体开发工作：不得编写或修改项目代码，不得运行 Shell/项目命令，不得用终端文本或按键代替开发者执行任务，不得把派发说成完成。需要开发者执行代码或项目任务时只能调用 dispatch_task；它会复用已打开实例或在目标工作区后台启动开发者后派发。
         派发前目标不明确时，用 get_app_state 查看完整主机、工作区、开发者和任务清单；若仍有多个候选，先向用户确认，绝不猜目标。派发后用返回的 session_id 调用 get_task_status 核验；未看到完成证据时，只报告当前进度或等待状态。
@@ -42,30 +42,13 @@ object JarvisManagerPolicy {
 }
 
 data class JarvisContext(
-    val currentHostName: String? = null,
-    val currentWorkspaceName: String? = null,
-    val currentWorkspacePath: String? = null,
-    val workspaces: List<String> = emptyList(),
-    val agents: List<String> = emptyList(),
-    val activeSessionId: String? = null,
-    val lastTerminalOutput: String? = null,
-    val memoryContext: String = ""
+    val workspaces: List<String> = emptyList()
 )
 
 sealed class JarvisAction {
-    data class InjectKeystroke(val text: String, val voiceReply: String? = null) : JarvisAction()
-    data class SwitchWorkspace(val workspaceName: String, val voiceReply: String? = null) : JarvisAction()
-    data class QueryStatus(val voiceReply: String) : JarvisAction()
     data class DirectReply(val voiceReply: String) : JarvisAction()
-    data class ExecuteTool(val toolName: String, val arguments: org.json.JSONObject = org.json.JSONObject(), val voiceReply: String? = null) : JarvisAction()
-    data class ChatWithDeveloper(
-        val agentName: String? = null,
-        val message: String,
-        val voiceReply: String? = null,
-        val memoryContext: String = "",
-    ) : JarvisAction()
-    data class DismissAwake(val voiceReply: String? = null) : JarvisAction()
-    data class ErrorAction(val message: String) : JarvisAction()
+    data class ExecuteTool(val toolName: String, val arguments: org.json.JSONObject = org.json.JSONObject()) : JarvisAction()
+    data class AskAgent(val message: String) : JarvisAction()
     object None : JarvisAction()
 }
 
