@@ -1337,7 +1337,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
             val titleSource = item.optString("title_source", "default").takeIf { it in setOf("default", "agent", "manual") } ?: "default"
             val task = TerminalTask(id, updatedHost, directory, agent, displayName, titleSource)
             sessionStore.save(task)
-            openTask(updatedHost, directory, agent, task)
+            openTask(updatedHost, directory, agent, task, navigateToTerminal = activate)
             if (activate) { activePage = sessions.lastIndex; route = AppRoute.TERMINAL }
         }
 
@@ -2146,15 +2146,91 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 }
             }
 
-            dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.closeTerminalHandler = { selector ->
-                val target = resolveSessionMatch(selector)
-                if (target != null) {
-                    val label = "${target.task.directory.name}（${target.task.agent.name}）"
-                    closeSession(target)
-                    dev.remote.terminal.jarvis.mcp.ToolOpResult(true, "Closed session ${target.task.id}", "已为您关闭工作区 $label。")
-                } else {
-                    dev.remote.terminal.jarvis.mcp.ToolOpResult(false, "Session not found", "未找到需要关闭的终端会话。")
+            dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.closeTerminalHandler = close@{ selector ->
+                var target = resolveSessionMatch(selector)
+                var attachedForClose = false
+                if (target == null) {
+                    val requestedId = selector.sessionId?.replace("-", "")?.lowercase()
+                    val query = selector.workspaceName ?: selector.query
+                    val candidates = startupShared.mapNotNull { (host, item) ->
+                        val id = item.optString("id").replace("-", "").lowercase()
+                        val title = item.optString("display_name")
+                        val workspace = item.optString("directory_name")
+                        val path = item.optString("directory_path")
+                        val agent = item.optString("agent_name")
+                        val command = item.optString("agent_command")
+                        if (!selector.hostName.isNullOrBlank() &&
+                            !host.id.equals(selector.hostName, true) && !host.name.contains(selector.hostName, true)
+                        ) return@mapNotNull null
+                        if (!selector.workspacePath.isNullOrBlank() && !path.equals(selector.workspacePath, true)) return@mapNotNull null
+                        if (!selector.agentName.isNullOrBlank() &&
+                            !agent.contains(selector.agentName, true) && !command.contains(selector.agentName, true)
+                        ) return@mapNotNull null
+                        val score = when {
+                            requestedId != null && (id == requestedId || id.startsWith(requestedId)) -> 120
+                            requestedId != null -> return@mapNotNull null
+                            query.isNullOrBlank() -> return@mapNotNull null
+                            title.equals(query, true) -> 100
+                            workspace.equals(query, true) -> 90
+                            title.contains(query, true) || workspace.contains(query, true) || path.contains(query, true) -> 60
+                            else -> return@mapNotNull null
+                        }
+                        Triple(score, host, item)
+                    }
+                    val bestScore = candidates.maxOfOrNull { it.first }
+                    val best = candidates.filter { it.first == bestScore }
+                    if (best.size > 1) {
+                        val names = best.joinToString("、") { (_, host, item) ->
+                            "${item.optString("display_name").ifBlank { item.optString("directory_name") }}（${host.name}）"
+                        }
+                        return@close dev.remote.terminal.jarvis.mcp.ToolOpResult(
+                            false,
+                            "Ambiguous shared instance: $names",
+                            "找到多个匹配实例：$names，请指定主机或实例 ID。"
+                        )
+                    }
+                    val shared = best.singleOrNull()
+                    if (shared != null) {
+                        openSharedSession(shared.second, shared.third, activate = false)
+                        val id = shared.third.optString("id").replace("-", "")
+                        target = sessions.firstOrNull { it.task.id.replace("-", "").equals(id, true) }
+                        attachedForClose = target != null
+                    }
                 }
+                if (target == null) {
+                    return@close dev.remote.terminal.jarvis.mcp.ToolOpResult(
+                        false,
+                        "Session or shared instance not found",
+                        "没有找到可关闭的本地或远端实例，请先核对实例名称。"
+                    )
+                }
+
+                val connected = if (target!!.isSessionConnected) true else kotlinx.coroutines.withTimeoutOrNull(20_000L) {
+                    while (true) {
+                        val state = Triple(target!!.isSessionConnected, target!!.hostFingerprint != null, target!!.status)
+                        if (state.first) return@withTimeoutOrNull true
+                        if (state.second || state.third.startsWith("远端终端已结束") || state.third.startsWith("连接失败")) {
+                            return@withTimeoutOrNull false
+                        }
+                        kotlinx.coroutines.delay(200L)
+                    }
+                    false
+                } ?: false
+                if (!connected) {
+                    val pendingHostKey = target!!.hostFingerprint != null
+                    if (attachedForClose && !pendingHostKey) closeSession(target!!, syncDeletion = false)
+                    val message = if (pendingHostKey) {
+                        "实例需要先确认 SSH 主机指纹，尚未关闭。"
+                    } else {
+                        "未能连接到该实例，尚未关闭远端会话。"
+                    }
+                    return@close dev.remote.terminal.jarvis.mcp.ToolOpResult(false, message, message)
+                }
+
+                val label = "${target!!.task.directory.name}（${target!!.task.agent.name}）"
+                val id = target!!.task.id
+                closeSession(target!!)
+                dev.remote.terminal.jarvis.mcp.ToolOpResult(true, "Closed session $id", "已为您关闭工作区实例 $label。")
             }
 
             dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.reconnectTerminalHandler = { selector ->

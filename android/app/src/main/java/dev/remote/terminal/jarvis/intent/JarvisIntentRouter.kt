@@ -54,6 +54,10 @@ class JarvisIntentRouter(
             """(?i)(?:关闭终端|关掉终端|关掉会话|关闭会话)"""
         )
 
+        private val CloseNamedInstanceRegex = Regex(
+            """(?i)^\s*(?:请)?(?:关闭|关掉|结束|停止)\s*[“\"「『]?(.+?)[”\"」』]?\s*(?:远端|远程)?(?:工作区)?(?:终端|会话|任务(?:实例)?|实例)\s*[。！!]*$"""
+        )
+
         private val DismissAwakeRegex = Regex(
             """(?i)^\s*(?:(?:关闭唤醒|退出唤醒)(?:态|状态)?|关闭弹窗|关掉弹窗|关闭浮窗|结束对话|退出对话|退下|下去吧|行了没事了|没事了|不用了|先这样|就这些|休眠|回到待命|闭嘴|再见|拜拜|关闭|退出|goodbye|bye|sleep|dismiss)\s*[:?？!！.。]*$"""
         )
@@ -178,6 +182,16 @@ class JarvisIntentRouter(
         if (ReconnectRegex.containsMatchIn(cleanText)) {
             Log.i(TAG, "Tier-1 matched: MCP reconnect_terminal (0 Token)")
             return@withContext JarvisAction.ExecuteTool("reconnect_terminal")
+        }
+
+        val namedInstanceToClose = CloseNamedInstanceRegex.find(cleanText)?.groupValues?.getOrNull(1)
+            ?.trim()?.trim('“', '”', '"', '「', '」', '『', '』')
+        if (!namedInstanceToClose.isNullOrBlank()) {
+            Log.i(TAG, "Tier-1 matched: close named Remote Dev instance [$namedInstanceToClose]")
+            return@withContext JarvisAction.ExecuteTool(
+                "close_terminal",
+                JSONObject().put("query", namedInstanceToClose)
+            )
         }
 
         if (CloseTerminalRegex.containsMatchIn(cleanText)) {

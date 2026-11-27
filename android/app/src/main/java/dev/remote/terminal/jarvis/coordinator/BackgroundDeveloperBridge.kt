@@ -613,7 +613,9 @@ object BackgroundDeveloperBridge {
                     content = "Manager policy: concrete developer work must be delegated with dispatch_task."
                 )
             } else {
-                JarvisToolRegistry.executeTool(call.toolName, call.arguments)
+                withContext(Dispatchers.Main) {
+                    JarvisToolRegistry.executeTool(call.toolName, call.arguments)
+                }
             }
             toolLogs.add("[${call.toolName}] isError=${result.isError} content=${result.content.take(3500)}")
             if (call.toolName == "close_awake" && !result.isError) {

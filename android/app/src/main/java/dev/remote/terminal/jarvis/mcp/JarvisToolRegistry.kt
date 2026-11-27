@@ -107,7 +107,7 @@ object JarvisToolRegistry {
     ) -> ToolOpResult)? = null
     var dispatchTaskHandler: (suspend (arguments: JSONObject) -> ToolOpResult)? = null
     var focusTerminalHandler: ((selector: SessionSelector) -> ToolOpResult)? = null
-    var closeTerminalHandler: ((selector: SessionSelector) -> ToolOpResult)? = null
+    var closeTerminalHandler: (suspend (selector: SessionSelector) -> ToolOpResult)? = null
     var reconnectTerminalHandler: ((selector: SessionSelector) -> ToolOpResult)? = null
     var renameTerminalHandler: ((selector: SessionSelector, newName: String) -> ToolOpResult)? = null
     var scrollTerminalHandler: ((selector: SessionSelector, direction: String) -> ToolOpResult)? = null
@@ -445,7 +445,7 @@ object JarvisToolRegistry {
         register(object : JarvisMcpTool {
             override val definition = McpToolDefinition(
                 name = "close_terminal",
-                description = "关闭指定的已打开工作区终端会话并断开 SSH 连接。",
+                description = "Jarvis手机端管理工具：关闭指定的本地或远端共享工作区实例；可按 session_id、首页实例标题、工作区名称/路径和主机名定位。共享实例会先连接并确认目标，再关闭远端会话。",
                 inputSchema = JSONObject().apply {
                     put("type", "object")
                     put("properties", sessionSelectorProperties())
@@ -1130,7 +1130,7 @@ object JarvisToolRegistry {
         val defs = getAllDefinitions()
         if (compact) {
             // 二轮及以上对话已预热工具说明，仅保留紧凑工具索引节省 prefill Token 与延迟
-            return "你是手机端Jarvis总管，只指挥、派发和监工，不能亲自写代码、运行Shell或向终端发任务文本；具体开发任务只能dispatch_task。" +
+            return "你是手机端Jarvis总管，可直接查看和管理Remote Dev手机端实例（含close_terminal关闭共享实例）；不得亲自写代码、运行Shell或向终端发任务文本；具体开发任务只能dispatch_task。" +
                 "派发用dispatch_task(host_id或host_name,workspace_path或workspace_name,agent_id或agent_name,task_prompt,focus=false)，它会复用已打开实例或后台启动新实例；派发后用get_task_status(session_id)核验和监工。" +
                 "目标有歧义先get_app_state，不要猜。可用Android MCP([[RDT_MCP:{\"tool\":\"...\",\"arguments\":{...}}]]): " +
                 defs.joinToString(", ") { it.name }
@@ -1140,7 +1140,8 @@ object JarvisToolRegistry {
         lines.appendLine("【Jarvis职责】你是手机端总管，统筹Remote Dev App内所有主机、工作区、开发者和任务；可读取全局状态、决定任务交给谁、立即派发、持续查看进展并向用户汇报。你不是开发者，不得亲自写代码、运行Shell/项目命令或通过终端文本/按键替开发者干活。")
         lines.appendLine("【任务派发流程】先从get_app_state确认hosts[*].workspaces[*]和agents目录；按用户指定目标调用dispatch_task，提供host_id/host_name、workspace_path/workspace_name、agent_id/agent_name和完整task_prompt。此工具会复用已打开的本地或共享实例；若目标工作区未打开，会后台启动指定开发者并派发，不需要先调用open_terminal。返回session_id后调用get_task_status(session_id)核验是否已接收；以后监工时再次查该session_id，或不传筛选器查看所有本地任务与共享任务。只有状态和输出证实完成后才能报告已完成。")
         lines.appendLine("【目标选择】已打开与未打开的工作区都可派发；未指定主机时可用工作区路径/名称跨主机唯一匹配。出现多个候选时先报告候选并让用户选择，不得猜测。只派发当前请求，不把派发描述成已完成。")
-        lines.appendLine("【全局操作】无论用户当前停留在首页/设置/历史还是终端页，均可直接使用Android MCP读取所有主机、工作区、开发者、已打开/共享实例、任务状态与终端屏幕，并管理Remote Dev App界面和配置。")
+        lines.appendLine("【全局操作】无论用户当前停留在首页/设置/历史还是终端页，均可直接使用Android MCP读取所有主机、工作区、开发者、已打开/共享实例、任务状态与终端屏幕，并管理Remote Dev App界面和配置。此类手机端管理不是开发工作，允许直接操作。")
+        lines.appendLine("【实例控制】用户要求关闭/结束某个首页远端实例时，先用get_app_state确认sessions或shared_tasks中的display_name、session_id和所属主机；按唯一标题或session_id调用close_terminal。若为尚未接入的共享实例，close_terminal会负责连接并关闭远端会话；目标模糊时先问用户。")
         lines.appendLine("【执行边界】run_terminal_command、run_in_workspace、send_terminal_text、send_terminal_keys、chat_with_agent、open_terminal不能用于具体开发工作；需要开发者干活时只能dispatch_task。终端屏幕只能用于了解进度和结果。不要把命令执行或派发描述成已完成开发。退出唤醒用close_awake。")
         for (def in defs) {
             val props = def.inputSchema.optJSONObject("properties")
