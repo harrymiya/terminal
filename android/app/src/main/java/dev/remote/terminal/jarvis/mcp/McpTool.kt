@@ -18,7 +18,8 @@ data class McpToolDefinition(
 data class McpToolResult(
     val isError: Boolean = false,
     val content: String,
-    val voiceSummary: String? = null
+    val voiceSummary: String? = null,
+    val expectsFollowUp: Boolean = false
 )
 
 interface JarvisMcpTool {

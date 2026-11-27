@@ -55,20 +55,22 @@ data class SessionSelector(
     }
 }
 
-/** 终端/工作区操作返回结果（含详细信息与口语播报摘要）。 */
+/** 终端/工作区操作返回结果（含标准化细节、语音摘要及是否需要二次回传给模型）。 */
 data class ToolOpResult(
     val ok: Boolean,
     val detail: String,
-    val voiceSummary: String
+    val voiceSummary: String,
+    val expectsFollowUp: Boolean = false
 )
 
 /**
  * 移动端 MCP 工具注册表 (Jarvis Tool Registry)。
- * 为本地 Jarvis 语音与 AI 开发者提供全量、对齐的 Remote Dev 工作区及应用操作接口。
+ * 为本地 Jarvis 语音与 AI 开发者提供全量、带同步等待与退出码回传的 Remote Dev 工作区及应用操作接口。
  */
 object JarvisToolRegistry {
 
     private const val TAG = "JarvisToolRegistry"
+    private const val DEFAULT_TIMEOUT_MS = 30_000L
     private val tools = ConcurrentHashMap<String, JarvisMcpTool>()
 
     // 外部由 MainActivity / Terminal 注入的桥接委托 (Bridge Delegates)
@@ -85,14 +87,36 @@ object JarvisToolRegistry {
         reuseExisting: Boolean,
         initialCommand: String?
     ) -> ToolOpResult)? = null
-    var runInWorkspaceHandler: ((selector: SessionSelector, text: String, pressEnter: Boolean, agentName: String?) -> ToolOpResult)? = null
+    var runCommandHandler: (suspend (
+        selector: SessionSelector,
+        command: String,
+        timeoutMs: Long,
+        workingDir: String?,
+        mode: String
+    ) -> ToolOpResult)? = null
+    var runInWorkspaceHandler: (suspend (
+        selector: SessionSelector,
+        text: String,
+        pressEnter: Boolean,
+        agentName: String?,
+        sync: Boolean,
+        timeoutMs: Long,
+        mode: String?
+    ) -> ToolOpResult)? = null
     var focusTerminalHandler: ((selector: SessionSelector) -> ToolOpResult)? = null
     var closeTerminalHandler: ((selector: SessionSelector) -> ToolOpResult)? = null
     var reconnectTerminalHandler: ((selector: SessionSelector) -> ToolOpResult)? = null
     var renameTerminalHandler: ((selector: SessionSelector, newName: String) -> ToolOpResult)? = null
     var scrollTerminalHandler: ((selector: SessionSelector, direction: String) -> ToolOpResult)? = null
     var confirmTerminalHandler: ((selector: SessionSelector, approve: Boolean) -> ToolOpResult)? = null
-    var sendTextHandler: ((text: String, selector: SessionSelector, pressEnter: Boolean) -> ToolOpResult)? = null
+    var sendTextHandler: (suspend (
+        text: String,
+        selector: SessionSelector,
+        pressEnter: Boolean,
+        sync: Boolean,
+        timeoutMs: Long,
+        mode: String?
+    ) -> ToolOpResult)? = null
     var sendKeysHandler: ((keys: List<String>, selector: SessionSelector) -> ToolOpResult)? = null
     var readScreenHandler: ((selector: SessionSelector, lines: Int) -> Pair<Boolean, String>)? = null
     var setViewModeHandler: ((tiled: Boolean) -> Boolean)? = null
@@ -118,8 +142,60 @@ object JarvisToolRegistry {
         put("agent_name", JSONObject().put("type", "string").put("description", "所属开发者名（如 Claude / Codex / agy2）"))
     }
 
+    private fun extractSyncFlag(arguments: JSONObject, defaultValue: Boolean): Boolean {
+        if (arguments.has("sync") && !arguments.isNull("sync")) return arguments.optBoolean("sync", defaultValue)
+        if (arguments.has("wait_for_output") && !arguments.isNull("wait_for_output")) return arguments.optBoolean("wait_for_output", defaultValue)
+        if (arguments.has("wait_for_completion") && !arguments.isNull("wait_for_completion")) return arguments.optBoolean("wait_for_completion", defaultValue)
+        return defaultValue
+    }
+
+    private fun extractTimeoutMs(arguments: JSONObject): Long {
+        val raw = if (arguments.has("timeout_ms") && !arguments.isNull("timeout_ms")) {
+            arguments.optLong("timeout_ms", DEFAULT_TIMEOUT_MS)
+        } else {
+            DEFAULT_TIMEOUT_MS
+        }
+        return raw.coerceIn(1_000L, 180_000L)
+    }
+
     private fun registerBuiltinMcpTools() {
-        // 1. get_app_state
+        // 1. run_terminal_command (同步等待执行并返回标准化 stdout / stderr / exit_code / duration_ms / timed_out)
+        register(object : JarvisMcpTool {
+            override val definition = McpToolDefinition(
+                name = "run_terminal_command",
+                description = "在指定工作区同步执行 Shell 命令并等待进程结束，直接返回包含 exit_code、stdout、stderr、duration_ms、timed_out 的标准化 JSON 结果（默认超时 30000ms）。",
+                inputSchema = JSONObject().apply {
+                    put("type", "object")
+                    put("properties", sessionSelectorProperties().apply {
+                        put("command", JSONObject().put("type", "string").put("description", "要同步执行的命令"))
+                        put("timeout_ms", JSONObject().put("type", "integer").put("description", "执行超时毫秒数，默认 30000，范围 1000~180000"))
+                        put("working_dir", JSONObject().put("type", "string").put("description", "可选：覆盖工作区执行目录"))
+                        put("mode", JSONObject().put("type", "string").put("description", "ssh_exec（默认，独立 SSH exec 通道获取精准退出码与输出）或 pty（通过哨兵在可见 PTY 内执行）"))
+                    })
+                    put("required", JSONArray().put("command"))
+                }
+            )
+            override suspend fun execute(arguments: JSONObject): McpToolResult {
+                val cmd = arguments.optString("command", "").ifBlank { arguments.optString("text", "") }.trim()
+                if (cmd.isBlank()) {
+                    return McpToolResult(isError = true, content = "{\"ok\":false,\"exit_code\":-1,\"error\":\"Missing command\"}", voiceSummary = "未指定要执行的命令。")
+                }
+                val selector = SessionSelector.fromJson(arguments)
+                val timeoutMs = extractTimeoutMs(arguments)
+                val workingDir = arguments.optString("working_dir", "").takeIf { it.isNotBlank() }
+                val mode = arguments.optString("mode", "ssh_exec").trim().lowercase().ifBlank { "ssh_exec" }
+                val res = runCommandHandler?.invoke(selector, cmd, timeoutMs, workingDir, mode)
+                    ?: ToolOpResult(false, "{\"ok\":false,\"exit_code\":-1,\"error\":\"runCommandHandler unavailable\"}", "同步执行接口不可用。")
+                return McpToolResult(
+                    isError = !res.ok,
+                    content = res.detail,
+                    voiceSummary = res.voiceSummary,
+                    expectsFollowUp = true
+                )
+            }
+        })
+
+        // 2. get_app_state
         register(object : JarvisMcpTool {
             override val definition = McpToolDefinition(
                 name = "get_app_state",
@@ -131,12 +207,13 @@ object JarvisToolRegistry {
                 val hostCount = state.optJSONArray("hosts")?.length() ?: 0
                 return McpToolResult(
                     content = state.toString(2),
-                    voiceSummary = "当前共 ${hostCount} 台主机，${sessionCount} 个打开的工作区终端实例。"
+                    voiceSummary = "当前共 ${hostCount} 台主机，${sessionCount} 个打开的工作区终端实例。",
+                    expectsFollowUp = true
                 )
             }
         })
 
-        // 2. list_open_workspaces
+        // 3. list_open_workspaces
         register(object : JarvisMcpTool {
             override val definition = McpToolDefinition(
                 name = "list_open_workspaces",
@@ -146,7 +223,7 @@ object JarvisToolRegistry {
                 val state = appStateProvider?.invoke() ?: JSONObject()
                 val arr = state.optJSONArray("sessions") ?: JSONArray()
                 if (arr.length() == 0) {
-                    return McpToolResult(content = "[]", voiceSummary = "当前没有打开任何工作区终端。")
+                    return McpToolResult(content = "[]", voiceSummary = "当前没有打开任何工作区终端。", expectsFollowUp = true)
                 }
                 val names = mutableListOf<String>()
                 for (i in 0 until arr.length()) {
@@ -158,12 +235,13 @@ object JarvisToolRegistry {
                 }
                 return McpToolResult(
                     content = arr.toString(2),
-                    voiceSummary = "当前已打开 ${arr.length()} 个工作区实例：${names.joinToString("、")}。"
+                    voiceSummary = "当前已打开 ${arr.length()} 个工作区实例：${names.joinToString("、")}。",
+                    expectsFollowUp = true
                 )
             }
         })
 
-        // 3. select_host
+        // 4. select_host
         register(object : JarvisMcpTool {
             override val definition = McpToolDefinition(
                 name = "select_host",
@@ -190,7 +268,7 @@ object JarvisToolRegistry {
             }
         })
 
-        // 4. select_agent
+        // 5. select_agent
         register(object : JarvisMcpTool {
             override val definition = McpToolDefinition(
                 name = "select_agent",
@@ -215,7 +293,7 @@ object JarvisToolRegistry {
             }
         })
 
-        // 5. open_terminal
+        // 6. open_terminal
         register(object : JarvisMcpTool {
             override val definition = McpToolDefinition(
                 name = "open_terminal",
@@ -247,20 +325,23 @@ object JarvisToolRegistry {
                 val initialCommand = arguments.optString("initial_command", "").takeIf { it.isNotBlank() }
                 val res = openTerminalHandler?.invoke(hostId, hostName, wsPath, wsName, cmd, agentName, reuseExisting, initialCommand)
                     ?: ToolOpResult(false, "openTerminalHandler unavailable", "打开终端不可用。")
-                return McpToolResult(isError = !res.ok, content = res.detail, voiceSummary = res.voiceSummary)
+                return McpToolResult(isError = !res.ok, content = res.detail, voiceSummary = res.voiceSummary, expectsFollowUp = res.expectsFollowUp)
             }
         })
 
-        // 6. run_in_workspace
+        // 7. run_in_workspace
         register(object : JarvisMcpTool {
             override val definition = McpToolDefinition(
                 name = "run_in_workspace",
-                description = "向指定工作区终端发送命令或文本（若工作区已打开则聚焦并直接发送；若尚未打开则自动打开并排队执行）。",
+                description = "在指定工作区执行命令或发送文本；支持 sync=true（默认）同步等待执行结束并返回标准化 JSON（含 exit_code、stdout、duration_ms、timed_out），也支持 timeout_ms 与 mode(ssh_exec/pty)。",
                 inputSchema = JSONObject().apply {
                     put("type", "object")
                     put("properties", sessionSelectorProperties().apply {
                         put("text", JSONObject().put("type", "string").put("description", "要发送执行的命令或对话文本"))
                         put("press_enter", JSONObject().put("type", "boolean").put("description", "是否自动回车提交，默认 true"))
+                        put("sync", JSONObject().put("type", "boolean").put("description", "是否同步等待命令完成并返回输出与退出码，默认 true"))
+                        put("timeout_ms", JSONObject().put("type", "integer").put("description", "同步等待超时毫秒数，默认 30000"))
+                        put("mode", JSONObject().put("type", "string").put("description", "可选：ssh_exec 或 pty"))
                     })
                     put("required", JSONArray().put("text"))
                 }
@@ -269,16 +350,24 @@ object JarvisToolRegistry {
                 val selector = SessionSelector.fromJson(arguments)
                 val text = arguments.optString("text", "").ifBlank { arguments.optString("command", "") }
                 val enter = arguments.optBoolean("press_enter", true)
+                val sync = extractSyncFlag(arguments, defaultValue = true)
+                val timeoutMs = extractTimeoutMs(arguments)
+                val mode = arguments.optString("mode", "").trim().lowercase().takeIf { it.isNotBlank() }
                 if (text.isBlank()) {
                     return McpToolResult(isError = true, content = "Missing text/command", voiceSummary = "未指定要执行的命令内容。")
                 }
-                val res = runInWorkspaceHandler?.invoke(selector, text, enter, selector.agentName)
+                val res = runInWorkspaceHandler?.invoke(selector, text, enter, selector.agentName, sync, timeoutMs, mode)
                     ?: ToolOpResult(false, "runInWorkspaceHandler unavailable", "执行工作区命令不可用。")
-                return McpToolResult(isError = !res.ok, content = res.detail, voiceSummary = res.voiceSummary)
+                return McpToolResult(
+                    isError = !res.ok,
+                    content = res.detail,
+                    voiceSummary = res.voiceSummary,
+                    expectsFollowUp = res.expectsFollowUp
+                )
             }
         })
 
-        // 7. focus_terminal
+        // 8. focus_terminal
         register(object : JarvisMcpTool {
             override val definition = McpToolDefinition(
                 name = "focus_terminal",
@@ -295,7 +384,7 @@ object JarvisToolRegistry {
             }
         })
 
-        // 8. close_terminal
+        // 9. close_terminal
         register(object : JarvisMcpTool {
             override val definition = McpToolDefinition(
                 name = "close_terminal",
@@ -312,7 +401,7 @@ object JarvisToolRegistry {
             }
         })
 
-        // 9. reconnect_terminal
+        // 10. reconnect_terminal
         register(object : JarvisMcpTool {
             override val definition = McpToolDefinition(
                 name = "reconnect_terminal",
@@ -329,7 +418,7 @@ object JarvisToolRegistry {
             }
         })
 
-        // 10. rename_terminal
+        // 11. rename_terminal
         register(object : JarvisMcpTool {
             override val definition = McpToolDefinition(
                 name = "rename_terminal",
@@ -353,7 +442,7 @@ object JarvisToolRegistry {
             }
         })
 
-        // 11. scroll_terminal
+        // 12. scroll_terminal
         register(object : JarvisMcpTool {
             override val definition = McpToolDefinition(
                 name = "scroll_terminal",
@@ -373,11 +462,11 @@ object JarvisToolRegistry {
             }
         })
 
-        // 12. confirm_terminal
+        // 13. confirm_terminal
         register(object : JarvisMcpTool {
             override val definition = McpToolDefinition(
                 name = "confirm_terminal",
-                description = "响应指定工作区终端的待确认提示（approve=true 发送回车批准，false 发送 Ctrl+C/Esc 取消）。",
+                description = "响应指定工作区终端的待确认提示（approve=true 发送回车批准，false 发送 Ctrl+C 取消）。",
                 inputSchema = JSONObject().apply {
                     put("type", "object")
                     put("properties", sessionSelectorProperties().apply {
@@ -393,16 +482,19 @@ object JarvisToolRegistry {
             }
         })
 
-        // 13. send_terminal_text
+        // 14. send_terminal_text
         register(object : JarvisMcpTool {
             override val definition = McpToolDefinition(
                 name = "send_terminal_text",
-                description = "向已打开的工作区终端实例发送文本或 Shell/Agent 指令并默认按回车提交。可通过 workspace_name、session_index 或 session_id 精准定位任意已打开工作区。",
+                description = "向已打开的工作区终端实例发送文本或命令；支持 sync=true 同步等待执行完成并返回 stdout、exit_code、duration_ms、timed_out（默认 timeout_ms=30000）。",
                 inputSchema = JSONObject().apply {
                     put("type", "object")
                     put("properties", sessionSelectorProperties().apply {
                         put("text", JSONObject().put("type", "string").put("description", "要发送的文本或命令"))
                         put("press_enter", JSONObject().put("type", "boolean").put("description", "发送后是否自动按回车，默认 true"))
+                        put("sync", JSONObject().put("type", "boolean").put("description", "是否同步等待命令结束并返回 stdout 与退出码，默认 false；当希望拿到返回值时请设 true 或使用 run_terminal_command"))
+                        put("timeout_ms", JSONObject().put("type", "integer").put("description", "同步等待超时毫秒数，默认 30000"))
+                        put("mode", JSONObject().put("type", "string").put("description", "可选：ssh_exec 或 pty"))
                     })
                     put("required", JSONArray().put("text"))
                 }
@@ -413,13 +505,21 @@ object JarvisToolRegistry {
                     return McpToolResult(isError = true, content = "Empty text", voiceSummary = "发送的指令文本为空。")
                 }
                 val enter = arguments.optBoolean("press_enter", true)
-                val res = sendTextHandler?.invoke(text, SessionSelector.fromJson(arguments), enter)
+                val sync = extractSyncFlag(arguments, defaultValue = false) && enter
+                val timeoutMs = extractTimeoutMs(arguments)
+                val mode = arguments.optString("mode", "").trim().lowercase().takeIf { it.isNotBlank() }
+                val res = sendTextHandler?.invoke(text, SessionSelector.fromJson(arguments), enter, sync, timeoutMs, mode)
                     ?: ToolOpResult(false, "sendTextHandler unavailable", "指令发送失败。")
-                return McpToolResult(isError = !res.ok, content = res.detail, voiceSummary = res.voiceSummary)
+                return McpToolResult(
+                    isError = !res.ok,
+                    content = res.detail,
+                    voiceSummary = res.voiceSummary,
+                    expectsFollowUp = res.expectsFollowUp
+                )
             }
         })
 
-        // 14. send_terminal_keys
+        // 15. send_terminal_keys
         register(object : JarvisMcpTool {
             override val definition = McpToolDefinition(
                 name = "send_terminal_keys",
@@ -455,7 +555,7 @@ object JarvisToolRegistry {
             }
         })
 
-        // 15. read_terminal_screen
+        // 16. read_terminal_screen
         register(object : JarvisMcpTool {
             override val definition = McpToolDefinition(
                 name = "read_terminal_screen",
@@ -472,18 +572,19 @@ object JarvisToolRegistry {
                 val pair = readScreenHandler?.invoke(SessionSelector.fromJson(arguments), lines)
                     ?: (false to "终端无输出")
                 if (!pair.first) {
-                    return McpToolResult(isError = true, content = pair.second, voiceSummary = pair.second.take(60))
+                    return McpToolResult(isError = true, content = pair.second, voiceSummary = pair.second.take(60), expectsFollowUp = true)
                 }
                 val screen = pair.second
                 val lastLine = screen.lines().lastOrNull { it.isNotBlank() } ?: "空行"
                 return McpToolResult(
                     content = screen,
-                    voiceSummary = "屏幕最新输出为：${lastLine.take(40)}"
+                    voiceSummary = "屏幕最新输出为：${lastLine.take(40)}",
+                    expectsFollowUp = true
                 )
             }
         })
 
-        // 16. set_view_mode
+        // 17. set_view_mode
         register(object : JarvisMcpTool {
             override val definition = McpToolDefinition(
                 name = "set_view_mode",
@@ -506,7 +607,7 @@ object JarvisToolRegistry {
             }
         })
 
-        // 17. set_auto_confirm
+        // 18. set_auto_confirm
         register(object : JarvisMcpTool {
             override val definition = McpToolDefinition(
                 name = "set_auto_confirm",
@@ -528,7 +629,7 @@ object JarvisToolRegistry {
             }
         })
 
-        // 18. trigger_sync
+        // 19. trigger_sync
         register(object : JarvisMcpTool {
             override val definition = McpToolDefinition(
                 name = "trigger_sync",
@@ -540,7 +641,7 @@ object JarvisToolRegistry {
             }
         })
 
-        // 19. get_ssh_public_key
+        // 20. get_ssh_public_key
         register(object : JarvisMcpTool {
             override val definition = McpToolDefinition(
                 name = "get_ssh_public_key",
@@ -549,14 +650,14 @@ object JarvisToolRegistry {
             override suspend fun execute(arguments: JSONObject): McpToolResult {
                 val key = publicKeyProvider?.invoke()
                 return if (key != null) {
-                    McpToolResult(content = key, voiceSummary = "本机 SSH 公钥已读取完毕。")
+                    McpToolResult(content = key, voiceSummary = "本机 SSH 公钥已读取完毕。", expectsFollowUp = true)
                 } else {
                     McpToolResult(isError = true, content = "No public key found", voiceSummary = "未找到公钥，请在设置中生成。")
                 }
             }
         })
 
-        // 20. add_workspace
+        // 21. add_workspace
         register(object : JarvisMcpTool {
             override val definition = McpToolDefinition(
                 name = "add_workspace",
@@ -586,7 +687,7 @@ object JarvisToolRegistry {
             }
         })
 
-        // 21. delete_workspace
+        // 22. delete_workspace
         register(object : JarvisMcpTool {
             override val definition = McpToolDefinition(
                 name = "delete_workspace",
@@ -614,15 +715,17 @@ object JarvisToolRegistry {
             }
         })
 
-        // 22. chat_with_agent
+        // 23. chat_with_agent
         register(object : JarvisMcpTool {
             override val definition = McpToolDefinition(
                 name = "chat_with_agent",
-                description = "向指定已打开工作区中的 AI 开发者发送文本指令。",
+                description = "向指定已打开工作区中的 AI 开发者发送文本指令，并支持同步等待回显。",
                 inputSchema = JSONObject().apply {
                     put("type", "object")
                     put("properties", sessionSelectorProperties().apply {
                         put("message", JSONObject().put("type", "string"))
+                        put("sync", JSONObject().put("type", "boolean").put("description", "是否同步等待响应"))
+                        put("timeout_ms", JSONObject().put("type", "integer"))
                     })
                     put("required", JSONArray().put("message"))
                 }
@@ -632,13 +735,15 @@ object JarvisToolRegistry {
                 if (msg.isBlank()) {
                     return McpToolResult(isError = true, content = "Empty message", voiceSummary = "发送内容为空。")
                 }
-                val res = sendTextHandler?.invoke(msg, SessionSelector.fromJson(arguments), true)
+                val sync = extractSyncFlag(arguments, defaultValue = false)
+                val timeoutMs = extractTimeoutMs(arguments)
+                val res = sendTextHandler?.invoke(msg, SessionSelector.fromJson(arguments), true, sync, timeoutMs, "pty")
                     ?: ToolOpResult(false, "sendTextHandler unavailable", "向开发者发送失败。")
-                return McpToolResult(isError = !res.ok, content = res.detail, voiceSummary = res.voiceSummary)
+                return McpToolResult(isError = !res.ok, content = res.detail, voiceSummary = res.voiceSummary, expectsFollowUp = res.expectsFollowUp)
             }
         })
 
-        // 23. speak_to_user
+        // 24. speak_to_user
         register(object : JarvisMcpTool {
             override val definition = McpToolDefinition(
                 name = "speak_to_user",
@@ -662,7 +767,7 @@ object JarvisToolRegistry {
             }
         })
 
-        // 24. vibrate_phone
+        // 25. vibrate_phone
         register(object : JarvisMcpTool {
             override val definition = McpToolDefinition(
                 name = "vibrate_phone",
@@ -681,7 +786,7 @@ object JarvisToolRegistry {
             }
         })
 
-        // 25. get_device_state
+        // 26. get_device_state
         register(object : JarvisMcpTool {
             override val definition = McpToolDefinition(
                 name = "get_device_state",
@@ -691,12 +796,13 @@ object JarvisToolRegistry {
                 val state = deviceStateProvider?.invoke() ?: JSONObject()
                 return McpToolResult(
                     content = state.toString(2),
-                    voiceSummary = "当前手机电量为 ${state.optInt("battery_level", -1)}%。"
+                    voiceSummary = "当前手机电量为 ${state.optInt("battery_level", -1)}%。",
+                    expectsFollowUp = true
                 )
             }
         })
 
-        // 26. navigate_screen
+        // 27. navigate_screen
         register(object : JarvisMcpTool {
             override val definition = McpToolDefinition(
                 name = "navigate_screen",
@@ -745,18 +851,19 @@ object JarvisToolRegistry {
 
     /**
      * 动态从实时注册表生成 Android MCP 可操作能力与调用协议说明文本。
-     * 确保需要执行操作的 JARVIS 在首轮与多轮对话中始终掌握最新、全量的工作区与端侧操作方法。
+     * 确保需要执行操作的 JARVIS 在首轮与多轮对话中始终掌握最新、全量的工作区同步执行与端侧操作方法。
      */
     fun buildMcpProtocolManual(compact: Boolean = false): String {
         val defs = getAllDefinitions()
         val lines = StringBuilder()
         if (!compact) {
-            lines.appendLine("【Remote Dev 安卓端 MCP 协议与可操作接口手册（共 ${defs.size} 项）】")
+            lines.appendLine("【Remote Dev 安卓端 MCP 协议与同步执行接口手册（共 ${defs.size} 项）】")
             lines.appendLine("调用语法：在回复正文或末尾附加一行或多行 [[RDT_MCP:{\"tool\":\"工具名\",\"arguments\":{...}}]]，系统会按顺序在安卓端真实执行并返回结果。")
-            lines.appendLine("目标工作区定位方法：先查看状态中的 open_sessions（已打开的工作区实例），调用终端/工作区接口时优先传入 workspace_name、session_index 或 session_id；若工作区未打开可直接调用 run_in_workspace 或 open_terminal。")
+            lines.appendLine("同步等待约定：执行需要查看输出或退出码的 Shell 命令请优先调用 run_terminal_command（或在 run_in_workspace / send_terminal_text 传 sync=true, timeout_ms=30000），接口会等待结束并回传包含 exit_code、stdout、stderr、duration_ms、timed_out 的完整 JSON 供你汇总汇报。")
+            lines.appendLine("目标工作区定位：先查看状态中的 open_sessions，优先传入 workspace_name、session_index 或 session_id。")
             lines.appendLine("可用接口与参数列表（* 为必填参数）：")
         } else {
-            lines.appendLine("【Android MCP 操作协议与全量接口（附 [[RDT_MCP:{\"tool\":\"...\",\"arguments\":{...}}]] 执行）】")
+            lines.appendLine("【Android MCP 操作协议与全量接口（附 [[RDT_MCP:{\"tool\":\"...\",\"arguments\":{...}}]]；同步命令优先用 run_terminal_command 或 sync=true）】")
         }
         for (def in defs) {
             val props = def.inputSchema.optJSONObject("properties")
@@ -774,7 +881,7 @@ object JarvisToolRegistry {
                     "$k:$type$star"
                 }
             } else ""
-            val desc = if (compact) def.description.take(45) else def.description
+            val desc = if (compact) def.description.take(48) else def.description
             lines.appendLine("- ${def.name}($paramText): $desc")
         }
         return lines.toString().trimEnd()

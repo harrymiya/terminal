@@ -6,6 +6,7 @@ import com.jcraft.jsch.HostKeyRepository
 import com.jcraft.jsch.JSch
 import com.jcraft.jsch.Session
 import com.jcraft.jsch.UserInfo
+import dev.remote.terminal.data.HostProfile
 import dev.remote.terminal.data.HostRoute
 import dev.remote.terminal.data.HostRouteResolver
 import dev.remote.terminal.data.LocalStore
@@ -18,6 +19,8 @@ import java.io.IOException
 import java.io.InputStreamReader
 import java.io.OutputStream
 import java.security.MessageDigest
+import java.util.UUID
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.LinkedBlockingDeque
 import java.util.concurrent.Executors
 import java.util.concurrent.CountDownLatch
@@ -65,6 +68,186 @@ class SshTerminalController(
     private var copyModeConnection: ActiveConnection? = null
     @Volatile private var columns = 80
     @Volatile private var rows = 30
+    private val ptyOutputListeners = CopyOnWriteArrayList<(String) -> Unit>()
+
+    data class CommandExecResult(
+        val ok: Boolean,
+        val exitCode: Int,
+        val stdout: String,
+        val stderr: String,
+        val durationMs: Long,
+        val timedOut: Boolean,
+        val truncated: Boolean,
+        val mode: String,
+        val workingDir: String,
+        val error: String? = null
+    )
+
+    companion object {
+        const val DEFAULT_SYNC_TIMEOUT_MS = 30_000L
+        private const val MIN_SYNC_TIMEOUT_MS = 1_000L
+        private const val MAX_SYNC_TIMEOUT_MS = 180_000L
+        private const val MAX_OUTPUT_CHARS = 16_000
+        private val ANSI_CSI_REGEX = Regex("""\u001B\[[0-?]*[ -/]*[@-~]""")
+        private val ANSI_OSC_REGEX = Regex("""\u001B\][^\u0007\u001B]*(?:\u0007|\u001B\\)""")
+        private val ANSI_SINGLE_REGEX = Regex("""\u001B[@-Z\\-_]""")
+        private val AGENT_EXIT_STATUS_REGEX = Regex("""\[Agent exited with status (-?\d+)""")
+
+        fun stripAnsiSequences(raw: String): String {
+            return raw
+                .replace(ANSI_OSC_REGEX, "")
+                .replace(ANSI_CSI_REGEX, "")
+                .replace(ANSI_SINGLE_REGEX, "")
+                .replace("\r\n", "\n")
+                .replace('\r', '\n')
+        }
+
+        fun truncateOutput(raw: String, maxChars: Int = MAX_OUTPUT_CHARS): Pair<String, Boolean> {
+            if (raw.length <= maxChars) return raw to false
+            val headLen = 4_000
+            val tailLen = (maxChars - headLen - 64).coerceAtLeast(1_000)
+            val omitted = raw.length - headLen - tailLen
+            val shortened = raw.take(headLen) + "\n...[已截断 ${omitted} 字符]...\n" + raw.takeLast(tailLen)
+            return shortened to true
+        }
+
+        private fun posixQuote(value: String): String = "'" + value.replace("'", "'\\''") + "'"
+
+        /**
+         * 通过指定 SSH Session 打开独立 ChannelExec 同步执行命令并等待退出码与输出。
+         */
+        fun execOnSshSession(
+            session: Session,
+            command: String,
+            workingDir: String,
+            timeoutMs: Long = DEFAULT_SYNC_TIMEOUT_MS
+        ): CommandExecResult {
+            val effectiveTimeout = timeoutMs.coerceIn(MIN_SYNC_TIMEOUT_MS, MAX_SYNC_TIMEOUT_MS)
+            val t0 = SystemClock.elapsedRealtime()
+            var channel: ChannelExec? = null
+            return try {
+                channel = session.openChannel("exec") as ChannelExec
+                val inner = if (workingDir.isNotBlank()) {
+                    "cd -- ${posixQuote(workingDir)} && $command"
+                } else {
+                    command
+                }
+                val wrapped = "if [ -x /bin/bash ]; then /bin/bash -lc ${posixQuote(inner)}; else /bin/sh -c ${posixQuote(inner)}; fi"
+                channel.setCommand(wrapped)
+                val outStream = channel.inputStream
+                val errStream = channel.errStream
+                val stdinStream = channel.outputStream
+
+                val connectTimeout = minOf(effectiveTimeout, 12_000L).toInt()
+                channel.connect(connectTimeout)
+                runCatching { stdinStream.close() }
+
+                val stdoutBuf = ByteArrayOutputStream()
+                val stderrBuf = ByteArrayOutputStream()
+                val chunk = ByteArray(4096)
+                val deadline = t0 + effectiveTimeout
+                var timedOut = false
+
+                while (session.isConnected) {
+                    var readAny = false
+                    if (outStream.available() > 0) {
+                        val n = outStream.read(chunk, 0, minOf(chunk.size, outStream.available()))
+                        if (n > 0) {
+                            stdoutBuf.write(chunk, 0, n)
+                            readAny = true
+                        }
+                    }
+                    if (errStream.available() > 0) {
+                        val n = errStream.read(chunk, 0, minOf(chunk.size, errStream.available()))
+                        if (n > 0) {
+                            stderrBuf.write(chunk, 0, n)
+                            readAny = true
+                        }
+                    }
+                    if (!readAny) {
+                        if (channel.isClosed) break
+                        if (SystemClock.elapsedRealtime() >= deadline) {
+                            timedOut = true
+                            break
+                        }
+                        Thread.sleep(25)
+                    } else if (SystemClock.elapsedRealtime() >= deadline && !channel.isClosed) {
+                        timedOut = true
+                        break
+                    }
+                }
+
+                if (timedOut || !channel.isClosed) {
+                    runCatching { channel.disconnect() }
+                }
+
+                val durationMs = SystemClock.elapsedRealtime() - t0
+                val exitCode = if (timedOut) -1 else channel.exitStatus
+                val (cleanOut, outTruncated) = truncateOutput(stripAnsiSequences(stdoutBuf.toString(Charsets.UTF_8.name())).trimEnd())
+                val (cleanErr, errTruncated) = truncateOutput(stripAnsiSequences(stderrBuf.toString(Charsets.UTF_8.name())).trimEnd())
+                CommandExecResult(
+                    ok = !timedOut && exitCode == 0 && session.isConnected,
+                    exitCode = exitCode,
+                    stdout = cleanOut,
+                    stderr = cleanErr,
+                    durationMs = durationMs,
+                    timedOut = timedOut,
+                    truncated = outTruncated || errTruncated,
+                    mode = "ssh_exec",
+                    workingDir = workingDir,
+                    error = when {
+                        timedOut -> "命令执行超时 (${effectiveTimeout}ms)"
+                        !session.isConnected -> "SSH 连接在执行过程中断开"
+                        else -> null
+                    }
+                )
+            } catch (e: Exception) {
+                val durationMs = SystemClock.elapsedRealtime() - t0
+                CommandExecResult(
+                    ok = false,
+                    exitCode = -1,
+                    stdout = "",
+                    stderr = "",
+                    durationMs = durationMs,
+                    timedOut = false,
+                    truncated = false,
+                    mode = "ssh_exec",
+                    workingDir = workingDir,
+                    error = e.message ?: e.javaClass.simpleName
+                )
+            } finally {
+                runCatching { channel?.disconnect() }
+            }
+        }
+
+        fun execOnHostSync(
+            host: HostProfile,
+            store: LocalStore,
+            command: String,
+            workingDir: String,
+            timeoutMs: Long = DEFAULT_SYNC_TIMEOUT_MS
+        ): CommandExecResult {
+            val t0 = SystemClock.elapsedRealtime()
+            return try {
+                RemoteDirectoryBrowser.withSshSession(host, store) { session ->
+                    execOnSshSession(session, command, workingDir, timeoutMs)
+                }
+            } catch (e: Exception) {
+                CommandExecResult(
+                    ok = false,
+                    exitCode = -1,
+                    stdout = "",
+                    stderr = "",
+                    durationMs = SystemClock.elapsedRealtime() - t0,
+                    timedOut = false,
+                    truncated = false,
+                    mode = "ssh_exec",
+                    workingDir = workingDir,
+                    error = e.message ?: "无法连接到主机 ${host.name}"
+                )
+            }
+        }
+    }
 
     fun isConnected(): Boolean = activeConnection.get()?.session?.isConnected == true
     fun isClosed(): Boolean = !running.get()
@@ -223,6 +406,254 @@ class SshTerminalController(
         return AgentQuotaReader.read(session, command, directory)
     }
 
+    /**
+     * 在当前工作区对应主机同步执行命令（优先复用已有 SSH Session 下的 ChannelExec，不干扰交互 PTY 界面）。
+     */
+    fun execCommandSync(
+        command: String,
+        timeoutMs: Long = DEFAULT_SYNC_TIMEOUT_MS,
+        workingDir: String? = null
+    ): CommandExecResult {
+        val dir = workingDir?.takeIf { it.isNotBlank() } ?: task.directory.path
+        val liveSession = activeConnection.get()?.session?.takeIf { it.isConnected }
+        return if (liveSession != null) {
+            execOnSshSession(liveSession, command, dir, timeoutMs)
+        } else {
+            execOnHostSync(task.host, store, command, dir, timeoutMs)
+        }
+    }
+
+    /**
+     * 判断当前终端预设是否为传统交互 Shell，可安全使用前后哨兵标记捕获精确退出码。
+     */
+    fun isShellSession(): Boolean {
+        val bin = task.agent.command.trim().split(Regex("\\s+")).firstOrNull()
+            ?.substringAfterLast('/')?.lowercase().orEmpty()
+        return bin in setOf("", "bash", "zsh", "sh", "fish", "dash", "ksh", "csh", "tcsh")
+    }
+
+    /**
+     * 在当前交互式 PTY 中通过唯一哨兵标记同步发送并等待命令执行结束，解析精确 stdout 与退出码。
+     */
+    fun execInPtySync(
+        command: String,
+        timeoutMs: Long = DEFAULT_SYNC_TIMEOUT_MS,
+        workingDir: String? = null
+    ): CommandExecResult {
+        val effectiveTimeout = timeoutMs.coerceIn(MIN_SYNC_TIMEOUT_MS, MAX_SYNC_TIMEOUT_MS)
+        val t0 = SystemClock.elapsedRealtime()
+        val deadline = t0 + effectiveTimeout
+        val dir = workingDir?.takeIf { it.isNotBlank() } ?: task.directory.path
+
+        if (!awaitConnectedUntil(minOf(deadline, t0 + 8_000L))) {
+            return CommandExecResult(
+                ok = false,
+                exitCode = -1,
+                stdout = "",
+                stderr = "",
+                durationMs = SystemClock.elapsedRealtime() - t0,
+                timedOut = SystemClock.elapsedRealtime() >= deadline,
+                truncated = false,
+                mode = "pty",
+                workingDir = dir,
+                error = "终端会话未连接或已断开，无法在 PTY 中同步执行命令"
+            )
+        }
+
+        val token = UUID.randomUUID().toString().replace("-", "").take(12)
+        val startMarker = "__RDT_S_${token}__"
+        val endPrefix = "__RDT_E_${token}:"
+        val startRegex = Regex("""(?m)^${Regex.escape(startMarker)}$""")
+        val endRegex = Regex("""(?m)^${Regex.escape(endPrefix)}(-?\d+)__$""")
+
+        val captured = StringBuilder()
+        val waitLock = Object()
+        val listener: (String) -> Unit = { chunk ->
+            synchronized(waitLock) {
+                captured.append(chunk)
+                waitLock.notifyAll()
+            }
+        }
+        ptyOutputListeners.add(listener)
+
+        try {
+            val cleanCmd = command.trim().trimEnd('\r', '\n', ';').trim()
+            val innerCmd = if (workingDir != null && workingDir.isNotBlank()) {
+                "cd -- ${posixQuote(workingDir)} && $cleanCmd"
+            } else {
+                cleanCmd
+            }
+            val sentinelLine = "printf '\\n%s\\n' '$startMarker'; $innerCmd; printf '\\n${endPrefix}%d__\\n' $?"
+            send("$sentinelLine\r")
+
+            var parsedExitCode = -1
+            var parsedStdout = ""
+            var matchedComplete = false
+
+            while (SystemClock.elapsedRealtime() < deadline) {
+                if (!running.get()) {
+                    return CommandExecResult(
+                        ok = false,
+                        exitCode = -1,
+                        stdout = truncateOutput(stripAnsiSequences(captured.toString())).first,
+                        stderr = "",
+                        durationMs = SystemClock.elapsedRealtime() - t0,
+                        timedOut = false,
+                        truncated = false,
+                        mode = "pty",
+                        workingDir = dir,
+                        error = "终端会话在命令执行期间被关闭"
+                    )
+                }
+
+                val cleanSnapshot = synchronized(waitLock) { stripAnsiSequences(captured.toString()) }
+                val startMatch = startRegex.find(cleanSnapshot)
+                if (startMatch != null) {
+                    val afterStart = startMatch.range.last + 1
+                    val endMatch = endRegex.find(cleanSnapshot, afterStart)
+                    if (endMatch != null) {
+                        parsedStdout = cleanSnapshot.substring(afterStart, endMatch.range.first)
+                            .removePrefix("\n")
+                            .trimEnd('\n')
+                        parsedExitCode = endMatch.groupValues[1].toIntOrNull() ?: -1
+                        matchedComplete = true
+                        break
+                    }
+                }
+
+                val remaining = deadline - SystemClock.elapsedRealtime()
+                if (remaining <= 0) break
+                synchronized(waitLock) {
+                    waitLock.wait(minOf(remaining, 150L))
+                }
+            }
+
+            val rawCaptured = if (matchedComplete) parsedStdout else stripAnsiSequences(captured.toString()).trim()
+            val (finalOut, isTruncated) = truncateOutput(rawCaptured)
+            val durationMs = SystemClock.elapsedRealtime() - t0
+            return CommandExecResult(
+                ok = matchedComplete && parsedExitCode == 0,
+                exitCode = if (matchedComplete) parsedExitCode else -1,
+                stdout = finalOut,
+                stderr = "",
+                durationMs = durationMs,
+                timedOut = !matchedComplete,
+                truncated = isTruncated,
+                mode = "pty",
+                workingDir = dir,
+                error = if (!matchedComplete) "PTY 命令等待超时 (${effectiveTimeout}ms)" else null
+            )
+        } finally {
+            ptyOutputListeners.remove(listener)
+        }
+    }
+
+    /**
+     * 向交互式 PTY 发送文本，并同步等待新输出产生且静默稳定（适用于 Claude/Codex TUI 或通用交互输入）。
+     */
+    fun sendTextAndWaitSync(
+        text: String,
+        pressEnter: Boolean,
+        timeoutMs: Long = DEFAULT_SYNC_TIMEOUT_MS,
+        idleSettleMs: Long = 1_400L,
+        terminalBuffer: TerminalBuffer? = null
+    ): CommandExecResult {
+        val effectiveTimeout = timeoutMs.coerceIn(MIN_SYNC_TIMEOUT_MS, MAX_SYNC_TIMEOUT_MS)
+        val t0 = SystemClock.elapsedRealtime()
+        val deadline = t0 + effectiveTimeout
+        val dir = task.directory.path
+
+        if (!awaitConnectedUntil(minOf(deadline, t0 + 8_000L))) {
+            return CommandExecResult(
+                ok = false,
+                exitCode = -1,
+                stdout = "",
+                stderr = "",
+                durationMs = SystemClock.elapsedRealtime() - t0,
+                timedOut = SystemClock.elapsedRealtime() >= deadline,
+                truncated = false,
+                mode = "pty_wait",
+                workingDir = dir,
+                error = "终端会话未连接或已断开"
+            )
+        }
+
+        val captured = StringBuilder()
+        val waitLock = Object()
+        var lastByteAt = 0L
+        val listener: (String) -> Unit = { chunk ->
+            synchronized(waitLock) {
+                captured.append(chunk)
+                lastByteAt = SystemClock.elapsedRealtime()
+                waitLock.notifyAll()
+            }
+        }
+        ptyOutputListeners.add(listener)
+
+        try {
+            val cleanText = text.trimEnd('\r', '\n')
+            val outgoingText = if (cleanText.contains('\n') && terminalBuffer != null) {
+                terminalBuffer.pasteSequence(cleanText)
+            } else {
+                cleanText
+            }
+            if (outgoingText.isNotEmpty()) send(outgoingText)
+            if (pressEnter) {
+                Thread.sleep(120)
+                send("\r")
+            }
+
+            var settled = false
+            while (SystemClock.elapsedRealtime() < deadline) {
+                if (!running.get()) break
+                val now = SystemClock.elapsedRealtime()
+                val (hasBytes, quietDuration) = synchronized(waitLock) {
+                    (captured.isNotEmpty() && lastByteAt > t0 + 180L) to (now - lastByteAt)
+                }
+                if (hasBytes && quietDuration >= idleSettleMs) {
+                    settled = true
+                    break
+                }
+                val remaining = deadline - now
+                if (remaining <= 0) break
+                synchronized(waitLock) {
+                    waitLock.wait(minOf(remaining, 180L))
+                }
+            }
+
+            val cleanDelta = synchronized(waitLock) { stripAnsiSequences(captured.toString()).trim() }
+            val fallbackTail = terminalBuffer?.visibleTextTail(20)?.trim().orEmpty()
+            val effectiveOut = cleanDelta.ifBlank { fallbackTail }
+            val (finalOut, truncated) = truncateOutput(effectiveOut)
+            val exitMatch = AGENT_EXIT_STATUS_REGEX.find(finalOut)
+            val parsedExit = exitMatch?.groupValues?.getOrNull(1)?.toIntOrNull()
+                ?: if (settled || !pressEnter) 0 else -1
+            val timedOut = !settled && SystemClock.elapsedRealtime() >= deadline
+
+            return CommandExecResult(
+                ok = !timedOut && parsedExit == 0,
+                exitCode = parsedExit,
+                stdout = finalOut,
+                stderr = "",
+                durationMs = SystemClock.elapsedRealtime() - t0,
+                timedOut = timedOut,
+                truncated = truncated,
+                mode = "pty_wait",
+                workingDir = dir,
+                error = if (timedOut) "等待终端响应超时 (${effectiveTimeout}ms)" else null
+            )
+        } finally {
+            ptyOutputListeners.remove(listener)
+        }
+    }
+
+    private fun awaitConnectedUntil(deadlineMillis: Long): Boolean {
+        while (running.get() && !isConnected() && SystemClock.elapsedRealtime() < deadlineMillis) {
+            Thread.sleep(50)
+        }
+        return running.get() && isConnected()
+    }
+
     /** All keystrokes go through one writer. A stale stream can only invalidate its own channel. */
     private fun writerLoop() {
         while (running.get()) {
@@ -351,7 +782,11 @@ class SshTerminalController(
                         }
                         throw IOException("SSH 传输读取结束")
                     }
-                    onBytes(String(buffer, 0, count))
+                    val chunk = String(buffer, 0, count)
+                    onBytes(chunk)
+                    for (listener in ptyOutputListeners) {
+                        runCatching { listener.invoke(chunk) }
+                    }
                 }
                 val remoteExitStatus = channel.exitStatus
                 remoteTerminalEnded = remoteTerminalEnded ||

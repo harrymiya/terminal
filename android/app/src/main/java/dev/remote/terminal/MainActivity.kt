@@ -1441,16 +1441,73 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 return sessions.mapIndexed { i, s -> "${i}:${s.task.directory.name}(${s.task.agent.name})" }.joinToString(", ")
             }
 
-            fun dispatchTextToSession(
+            fun formatExecResult(
+                res: dev.remote.terminal.ssh.SshTerminalController.CommandExecResult,
+                workspaceLabel: String
+            ): dev.remote.terminal.jarvis.mcp.ToolOpResult {
+                val json = org.json.JSONObject().apply {
+                    put("ok", res.ok)
+                    put("exit_code", res.exitCode)
+                    put("timed_out", res.timedOut)
+                    put("duration_ms", res.durationMs)
+                    put("mode", res.mode)
+                    put("workspace", workspaceLabel)
+                    put("working_dir", res.workingDir)
+                    put("stdout", res.stdout)
+                    put("stderr", res.stderr)
+                    put("truncated", res.truncated)
+                    if (!res.error.isNullOrBlank()) put("error", res.error)
+                }
+                val preview = res.stdout.lines().lastOrNull { it.isNotBlank() }
+                    ?: res.stderr.lines().lastOrNull { it.isNotBlank() }
+                    ?: ""
+                val voice = when {
+                    res.timedOut -> "$workspaceLabel 命令执行超时（耗时 ${res.durationMs / 1000.0} 秒）。"
+                    res.ok && preview.isNotBlank() -> "$workspaceLabel 执行完成，退出码 0，输出：${preview.take(45)}"
+                    res.ok -> "$workspaceLabel 命令执行完成，退出码 0。"
+                    else -> "$workspaceLabel 命令执行失败，退出码 ${res.exitCode}${if (preview.isNotBlank()) "，${preview.take(40)}" else ""}。"
+                }
+                return dev.remote.terminal.jarvis.mcp.ToolOpResult(
+                    ok = res.ok,
+                    detail = json.toString(),
+                    voiceSummary = voice,
+                    expectsFollowUp = true
+                )
+            }
+
+            suspend fun dispatchTextToSession(
                 target: TerminalSessionState,
                 text: String,
-                pressEnter: Boolean
+                pressEnter: Boolean,
+                sync: Boolean = false,
+                timeoutMs: Long = dev.remote.terminal.ssh.SshTerminalController.DEFAULT_SYNC_TIMEOUT_MS,
+                mode: String? = null
             ): dev.remote.terminal.jarvis.mcp.ToolOpResult {
-                val ctrl = dev.remote.terminal.ssh.TerminalConnectionRegistry.get(target.task.id) ?: target.controller
                 val label = "${target.task.directory.name}（${target.task.agent.name}）"
-                if (target.status.startsWith("已断开") || target.status.startsWith("远端终端已结束")) {
-                    ctrl.start()
+                val ctrl = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    val c = dev.remote.terminal.ssh.TerminalConnectionRegistry.get(target.task.id) ?: target.controller
+                    if (target.status.startsWith("已断开") || target.status.startsWith("远端终端已结束")) {
+                        c.start()
+                    }
+                    c
                 }
+                if (sync && pressEnter) {
+                    val execRes = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        val effectiveMode = mode ?: if (ctrl.isShellSession()) "pty" else "pty_wait"
+                        when (effectiveMode) {
+                            "ssh_exec" -> ctrl.execCommandSync(text.trimEnd('\r', '\n'), timeoutMs)
+                            "pty" -> if (ctrl.isShellSession()) {
+                                ctrl.execInPtySync(text.trimEnd('\r', '\n'), timeoutMs)
+                            } else {
+                                ctrl.sendTextAndWaitSync(text, pressEnter = true, timeoutMs = timeoutMs, terminalBuffer = target.buffer)
+                            }
+                            else -> ctrl.sendTextAndWaitSync(text, pressEnter = true, timeoutMs = timeoutMs, terminalBuffer = target.buffer)
+                        }
+                    }
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) { target.clearAttention() }
+                    return formatExecResult(execRes, label)
+                }
+
                 val cleanText = text.trimEnd('\r', '\n')
                 val outgoing = if (cleanText.contains('\n')) target.buffer.pasteSequence(cleanText) else cleanText
                 if (outgoing.isNotEmpty()) {
@@ -1593,7 +1650,13 @@ private fun RemoteTerminalApp(store: LocalStore) {
                             activePage = existingIdx
                             route = AppRoute.TERMINAL
                             if (!initialCommand.isNullOrBlank()) {
-                                dispatchTextToSession(existing, initialCommand, true)
+                                val ctrl = dev.remote.terminal.ssh.TerminalConnectionRegistry.get(existing.task.id) ?: existing.controller
+                                val cleanCmd = initialCommand.trimEnd('\r', '\n')
+                                ctrl.send(if (cleanCmd.contains('\n')) existing.buffer.pasteSequence(cleanCmd) else cleanCmd)
+                                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                                    ctrl.send("\r")
+                                    existing.clearAttention()
+                                }, 120L)
                                 dev.remote.terminal.jarvis.mcp.ToolOpResult(
                                     true,
                                     "Focused existing session ${existing.task.id} and ran command",
@@ -1610,7 +1673,13 @@ private fun RemoteTerminalApp(store: LocalStore) {
                             openTask(targetHost, targetDir, targetAgent)
                             val opened = sessions.lastOrNull()
                             if (opened != null && !initialCommand.isNullOrBlank()) {
-                                dispatchTextToSession(opened, initialCommand, true)
+                                val ctrl = dev.remote.terminal.ssh.TerminalConnectionRegistry.get(opened.task.id) ?: opened.controller
+                                val cleanCmd = initialCommand.trimEnd('\r', '\n')
+                                ctrl.send(if (cleanCmd.contains('\n')) opened.buffer.pasteSequence(cleanCmd) else cleanCmd)
+                                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                                    ctrl.send("\r")
+                                    opened.clearAttention()
+                                }, 120L)
                                 dev.remote.terminal.jarvis.mcp.ToolOpResult(
                                     true,
                                     "Opened session ${opened.task.id} and queued command",
@@ -1628,39 +1697,90 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 }
             }
 
-            dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.runInWorkspaceHandler = { selector, text, pressEnter, agentName ->
-                val existing = resolveSessionMatch(selector)
-                if (existing != null) {
-                    val idx = sessions.indexOf(existing)
-                    if (idx >= 0) {
-                        activePage = idx
-                        route = AppRoute.TERMINAL
-                    }
-                    dispatchTextToSession(existing, text, pressEnter)
-                } else {
-                    val targetHost = resolveHostBy(selector.hostName, selector.hostName)
-                    val wsQuery = selector.workspacePath ?: selector.workspaceName ?: selector.query ?: selector.sessionId
-                    val targetDir = targetHost?.directories?.firstOrNull { d ->
-                        wsQuery != null && (d.path.equals(wsQuery, true) || d.path.contains(wsQuery, true) || d.name.equals(wsQuery, true) || d.name.contains(wsQuery, true))
-                    } ?: if (wsQuery == null) targetHost?.directories?.firstOrNull() else null
-                    val targetAgent = (if (agentName != null) agents.firstOrNull { it.name.contains(agentName, true) || it.command.contains(agentName, true) } else null)
-                        ?: agents.firstOrNull { it.id == selectedAgentId } ?: agents.firstOrNull()
-
-                    if (targetHost != null && targetDir != null && targetAgent != null) {
-                        openTask(targetHost, targetDir, targetAgent)
-                        val newlyOpened = sessions.lastOrNull()
-                        if (newlyOpened != null) {
-                            dispatchTextToSession(newlyOpened, text, pressEnter)
-                        } else {
-                            dev.remote.terminal.jarvis.mcp.ToolOpResult(false, "Failed to open session", "打开工作区终端失败。")
-                        }
+            dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.runCommandHandler = { selector, command, timeoutMs, workingDir, mode ->
+                val resolved = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    val existing = resolveSessionMatch(selector)
+                    if (existing != null) {
+                        Triple(existing, existing.task.host, workingDir ?: existing.task.directory.path)
                     } else {
-                        dev.remote.terminal.jarvis.mcp.ToolOpResult(
-                            false,
-                            "Session/workspace not found. Open sessions: [${openSessionsHint()}]",
-                            "未找到匹配的工作区实例。当前已打开：${openSessionsHint()}。"
-                        )
+                        val host = resolveHostBy(selector.hostName, selector.hostName)
+                        val wsQuery = selector.workspacePath ?: selector.workspaceName ?: selector.query ?: selector.sessionId
+                        val dir = host?.directories?.firstOrNull { d ->
+                            wsQuery != null && (d.path.equals(wsQuery, true) || d.path.contains(wsQuery, true) || d.name.equals(wsQuery, true) || d.name.contains(wsQuery, true))
+                        } ?: if (wsQuery == null) host?.directories?.firstOrNull() else null
+                        Triple(null, host, workingDir ?: dir?.path)
                     }
+                }
+                val session = resolved.first
+                val host = resolved.second
+                val targetDir = resolved.third
+                if (session == null && (host == null || targetDir.isNullOrBlank())) {
+                    val hint = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) { openSessionsHint() }
+                    val errJson = org.json.JSONObject().apply {
+                        put("ok", false)
+                        put("exit_code", -1)
+                        put("timed_out", false)
+                        put("error", "Workspace/session not found. Open sessions: [$hint]")
+                    }.toString()
+                    dev.remote.terminal.jarvis.mcp.ToolOpResult(false, errJson, "未找到对应工作区，当前已打开：$hint。", expectsFollowUp = true)
+                } else {
+                    val wsLabel = session?.let { "${it.task.directory.name}（${it.task.agent.name}）" }
+                        ?: "${targetDir?.substringAfterLast('/').orEmpty()}（${host?.name.orEmpty()}）"
+                    val execRes = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        when {
+                            mode == "pty" && session != null -> {
+                                val ctrl = dev.remote.terminal.ssh.TerminalConnectionRegistry.get(session.task.id) ?: session.controller
+                                ctrl.execInPtySync(command, timeoutMs, workingDir)
+                            }
+                            session != null -> {
+                                val ctrl = dev.remote.terminal.ssh.TerminalConnectionRegistry.get(session.task.id) ?: session.controller
+                                ctrl.execCommandSync(command, timeoutMs, workingDir)
+                            }
+                            else -> {
+                                dev.remote.terminal.ssh.SshTerminalController.execOnHostSync(host!!, store, command, targetDir!!, timeoutMs)
+                            }
+                        }
+                    }
+                    formatExecResult(execRes, wsLabel)
+                }
+            }
+
+            dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.runInWorkspaceHandler = { selector, text, pressEnter, agentName, sync, timeoutMs, mode ->
+                val resolved = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    val existing = resolveSessionMatch(selector)
+                    if (existing != null) {
+                        val idx = sessions.indexOf(existing)
+                        if (idx >= 0) {
+                            activePage = idx
+                            route = AppRoute.TERMINAL
+                        }
+                        existing to null
+                    } else {
+                        val targetHost = resolveHostBy(selector.hostName, selector.hostName)
+                        val wsQuery = selector.workspacePath ?: selector.workspaceName ?: selector.query ?: selector.sessionId
+                        val targetDir = targetHost?.directories?.firstOrNull { d ->
+                            wsQuery != null && (d.path.equals(wsQuery, true) || d.path.contains(wsQuery, true) || d.name.equals(wsQuery, true) || d.name.contains(wsQuery, true))
+                        } ?: if (wsQuery == null) targetHost?.directories?.firstOrNull() else null
+                        val targetAgent = (if (agentName != null) agents.firstOrNull { it.name.contains(agentName, true) || it.command.contains(agentName, true) } else null)
+                            ?: agents.firstOrNull { it.id == selectedAgentId } ?: agents.firstOrNull()
+                        if (targetHost != null && targetDir != null && targetAgent != null) {
+                            openTask(targetHost, targetDir, targetAgent)
+                            sessions.lastOrNull() to null
+                        } else {
+                            null to openSessionsHint()
+                        }
+                    }
+                }
+                val target = resolved.first
+                if (target != null) {
+                    dispatchTextToSession(target, text, pressEnter, sync = sync, timeoutMs = timeoutMs, mode = mode)
+                } else {
+                    val hint = resolved.second ?: ""
+                    dev.remote.terminal.jarvis.mcp.ToolOpResult(
+                        false,
+                        "Session/workspace not found. Open sessions: [$hint]",
+                        "未找到匹配的工作区实例。当前已打开：$hint。"
+                    )
                 }
             }
 
@@ -1753,15 +1873,19 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 }
             }
 
-            dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.sendTextHandler = { text, selector, pressEnter ->
-                val target = resolveSessionMatch(selector)
+            dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.sendTextHandler = { text, selector, pressEnter, sync, timeoutMs, mode ->
+                val resolved = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    resolveSessionMatch(selector) to openSessionsHint()
+                }
+                val target = resolved.first
                 if (target != null) {
-                    dispatchTextToSession(target, text, pressEnter)
+                    dispatchTextToSession(target, text, pressEnter, sync = sync, timeoutMs = timeoutMs, mode = mode)
                 } else {
+                    val hint = resolved.second
                     dev.remote.terminal.jarvis.mcp.ToolOpResult(
                         ok = false,
-                        detail = "Target workspace/session not found. Open sessions: [${openSessionsHint()}]. Use open_terminal or run_in_workspace if it needs to be opened.",
-                        voiceSummary = if (sessions.isEmpty()) "当前没有打开的工作区终端，请先打开终端。" else "未找到对应工作区会话，当前已打开：${openSessionsHint()}。"
+                        detail = "Target workspace/session not found. Open sessions: [$hint]. Use open_terminal or run_in_workspace if it needs to be opened.",
+                        voiceSummary = if (sessions.isEmpty()) "当前没有打开的工作区终端，请先打开终端。" else "未找到对应工作区会话，当前已打开：$hint。"
                     )
                 }
             }

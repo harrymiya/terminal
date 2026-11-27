@@ -42,8 +42,9 @@ import java.util.concurrent.ConcurrentHashMap
 object BackgroundDeveloperBridge {
 
     private const val TAG = "JarvisDevBridge"
-    private const val EXEC_TIMEOUT_MS = 60_000L
+    private const val EXEC_TIMEOUT_MS = 120_000L
     private val READ_TOOLS = setOf(
+        "run_terminal_command",
         "get_app_state",
         "list_open_workspaces",
         "get_device_state",
@@ -554,24 +555,26 @@ object BackgroundDeveloperBridge {
 
         for (call in calls) {
             Log.i(TAG, "Developer requested Remote Dev MCP tool: ${call.toolName} args=${call.arguments}")
-            val result = withContext(Dispatchers.Main) {
-                JarvisToolRegistry.executeTool(call.toolName, call.arguments)
+            val result = JarvisToolRegistry.executeTool(call.toolName, call.arguments)
+            toolLogs.add("[${call.toolName}] isError=${result.isError} content=${result.content.take(3500)}")
+
+            val triggerFollowUp = allowReadFollowUp && (result.expectsFollowUp || call.toolName in READ_TOOLS)
+            if (triggerFollowUp) {
+                needsFollowUp = true
             }
-            toolLogs.add("[${call.toolName}] isError=${result.isError} content=${result.content.take(1200)}")
 
             if (result.isError) {
                 hasError = true
                 val errSummary = result.voiceSummary?.takeIf { it.isNotBlank() }
-                    ?: "执行 ${call.toolName} 失败：${result.content.take(60)}"
+                    ?: "执行 ${call.toolName} 失败：${result.content.take(80)}"
                 reports.add(errSummary)
             } else {
                 val okSummary = result.voiceSummary?.takeIf { it.isNotBlank() }
                     ?: "已完成 ${call.toolName} 操作。"
-                if (call.toolName !in READ_TOOLS && call.toolName != "speak_to_user") {
+                // 若结果已触发模型二次整合（如 read_terminal_screen 或 run_terminal_command 返回了真实 stdout/exit_code），
+                // 则由模型结合真实输出直接汇报，避免额外拼接重复摘要。
+                if (!triggerFollowUp && call.toolName !in READ_TOOLS && call.toolName != "speak_to_user") {
                     reports.add(okSummary)
-                }
-                if (allowReadFollowUp && call.toolName in READ_TOOLS) {
-                    needsFollowUp = true
                 }
             }
         }
@@ -602,7 +605,7 @@ object BackgroundDeveloperBridge {
         val visibleWithoutTags = sanitizeForSpeech(stripMcpTags(rawReply, calls))
 
         if (firstBatch.needsFollowUp && firstBatch.toolLogs.isNotEmpty()) {
-            val followPrompt = "这是刚调用手机端 MCP 返回的实际结果，请直接用1到3句精简中文口语向用户汇报检查结果或已完成的操作，不要输出思维链、Markdown 或 RDT_MCP 标签：\n" +
+            val followPrompt = "这是刚调用手机端 MCP 返回的实际执行结果（含退出码 exit_code、stdout/stderr 或屏幕内容），请直接用1到3句精简中文口语向用户准确汇报执行结果与关键输出，不要输出思维链、Markdown 或 RDT_MCP 标签：\n" +
                 firstBatch.toolLogs.joinToString("\n")
             val followReply = invokeDeveloperTurn(
                 session = session,
