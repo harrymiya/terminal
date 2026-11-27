@@ -497,7 +497,7 @@ object JarvisCoordinator : VoicePerceptorCallback {
             is JarvisAction.ExecuteTool -> {
                 updateState(JarvisState.EXECUTING)
                 scope.launch {
-                    val result = dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.executeTool(action.toolName, action.arguments)
+                    val result = dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.executeManagerTool(action.toolName, action.arguments)
                     if (action.toolName == "close_awake" || !_conversationActive.value) {
                         return@launch
                     }

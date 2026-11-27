@@ -5,6 +5,7 @@ import dev.remote.terminal.jarvis.api.IntentRouter
 import dev.remote.terminal.jarvis.api.JarvisAction
 import dev.remote.terminal.jarvis.api.JarvisContext
 import dev.remote.terminal.jarvis.api.JarvisManagerPolicy
+import dev.remote.terminal.jarvis.mcp.JarvisToolRegistry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -111,7 +112,7 @@ class JarvisIntentRouter(
         )
 
         private val HelpRegex = Regex(
-            """(?i)(?:你能做什么|帮助|功能|指令|help|who are you)"""
+            """(?i)^(?:请)?(?:你能做什么|你能做些什么|你会做什么|你会什么|你有什么功能|你有哪些功能|你有哪些能力|你能调用哪些工具|帮助|功能|指令|help|who are you)[\s?？!！.。]*$"""
         )
 
         private val GreetingRegex = Regex(
@@ -311,8 +312,7 @@ class JarvisIntentRouter(
         }
 
         if (HelpRegex.containsMatchIn(cleanText)) {
-            Log.i(TAG, "Tier-1 matched: Help Query (0 Token)")
-            return@withContext JarvisAction.DirectReply("先生，我是贾维斯。已为您接入全套 MCP 工具集，您可以吩咐我读屏幕、切换主机、重连会话、平铺布局，或派发后台开发任务。")
+            return@withContext JarvisAction.ExecuteTool("get_capabilities")
         }
 
         // 2. Tier-2 复杂开放式指令：压缩元数据后由服务端轻量模型处理
@@ -345,7 +345,9 @@ class JarvisIntentRouter(
                 conn.setRequestProperty("Authorization", "Bearer $token")
             }
 
-            val appState = runCatching { dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.appStateProvider?.invoke() }.getOrNull()
+            val appState = withContext(Dispatchers.Main) {
+                runCatching { JarvisToolRegistry.appStateProvider?.invoke() }.getOrNull()
+            }
             val payload = JSONObject().apply {
                 put("voice_input", userPrompt)
                 put("system_prompt", JarvisManagerPolicy.SYSTEM_PROMPT)
@@ -359,8 +361,8 @@ class JarvisIntentRouter(
                     }
                 })
                 // 将完整的 Android MCP 协议能力、操作方法说明与结构化 Schema 作为上下文发送给调度端
-                put("mcp_protocol_manual", dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.buildMcpProtocolManual(compact = false))
-                put("available_tools", dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.buildMcpToolsSchemaJson())
+                put("mcp_protocol_manual", JarvisToolRegistry.buildMcpProtocolManual())
+                put("available_tools", JarvisToolRegistry.buildMcpToolsSchemaJson())
             }
 
             conn.outputStream.use { os ->
@@ -378,10 +380,7 @@ class JarvisIntentRouter(
                 if (json.has("tool")) {
                     val toolName = json.getString("tool")
                     val toolArgs = json.optJSONObject("arguments") ?: JSONObject()
-                    if (toolName in setOf(
-                            "dispatch_task", "run_terminal_command", "run_in_workspace",
-                            "send_terminal_text", "send_terminal_keys", "chat_with_agent", "open_terminal"
-                        )) {
+                    if (toolName == "dispatch_task" || !JarvisToolRegistry.isManagerTool(toolName)) {
                         // Task work must pass through the manager prompt and MCP enforcement locally.
                         JarvisAction.ChatWithDeveloper(
                             agentName = null,

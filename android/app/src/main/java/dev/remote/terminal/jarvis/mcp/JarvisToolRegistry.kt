@@ -72,6 +72,9 @@ object JarvisToolRegistry {
     private const val TAG = "JarvisToolRegistry"
     private const val DEFAULT_TIMEOUT_MS = 30_000L
     private val tools = ConcurrentHashMap<String, JarvisMcpTool>()
+    private val developerWorkTools = setOf(
+        "run_terminal_command", "run_in_workspace", "send_terminal_text", "send_terminal_keys", "chat_with_agent"
+    )
 
     // 外部由 MainActivity / Terminal 注入的桥接委托 (Bridge Delegates)
     var appStateProvider: (() -> JSONObject)? = null
@@ -173,6 +176,17 @@ object JarvisToolRegistry {
     }
 
     private fun registerBuiltinMcpTools() {
+        register(object : JarvisMcpTool {
+            override val definition = McpToolDefinition(
+                name = "get_capabilities",
+                description = "查看 Jarvis 当前可调用的 Remote Dev 安卓功能、工具用途及参数。"
+            )
+            override suspend fun execute(arguments: JSONObject): McpToolResult = McpToolResult(
+                content = buildMcpToolsSchemaJson().toString(),
+                voiceSummary = buildCapabilitiesSummary()
+            )
+        })
+
         // 1. run_terminal_command (同步等待执行并返回标准化 stdout / stderr / exit_code / duration_ms / timed_out)
         register(object : JarvisMcpTool {
             override val definition = McpToolDefinition(
@@ -1074,7 +1088,7 @@ object JarvisToolRegistry {
         register(object : JarvisMcpTool {
             override val definition = McpToolDefinition(
                 name = "update_settings",
-                description = "修改安卓端任意设置项（布局模式 auto/phone/pad、平铺模式、自动确认开关/延迟、离线/自动同步/同步URL与周期、Jarvis 模型/effort/唤醒词/蓝牙SCO/完成播报、生成SSH密钥）。",
+                description = "修改参数所列的 App 设置，包括布局、自动确认、同步和 Jarvis 配置。可生成 SSH 密钥。",
                 inputSchema = JSONObject().apply {
                     put("type", "object")
                     put("properties", JSONObject().apply {
@@ -1132,14 +1146,38 @@ object JarvisToolRegistry {
 
     fun getTool(name: String): JarvisMcpTool? = tools[name]
 
-    fun getAllDefinitions(): List<McpToolDefinition> = tools.values.map { it.definition }.sortedBy { it.name }
+    fun isManagerTool(name: String): Boolean = name in tools.keys && name !in developerWorkTools
+
+    private fun managerDefinitions(): List<McpToolDefinition> = tools.values
+        .map { it.definition }
+        .filter { isManagerTool(it.name) }
+        .sortedBy { it.name }
+        .map { definition ->
+            if (definition.name != "open_terminal") return@map definition
+            val schema = JSONObject(definition.inputSchema.toString())
+            schema.getJSONObject("properties").remove("initial_command")
+            definition.copy(description = "打开或复用指定主机、工作区和开发者的终端。可选择打开页面或在后台启动。", inputSchema = schema)
+        }
+
+    private fun buildCapabilitiesSummary(): String {
+        val groups = listOf(
+            setOf("get_app_state", "get_task_status", "read_terminal_screen") to "查看实例状态和终端输出",
+            setOf("open_terminal", "focus_terminal", "close_terminal", "rename_terminal", "reconnect_terminal") to "打开、接入、关闭、重命名和重连实例",
+            setOf("manage_host", "manage_workspace", "manage_agent") to "管理主机、工作区和开发者",
+            setOf("manage_logs") to "查询历史并恢复会话",
+            setOf("navigate_screen", "manage_session_window", "update_settings", "trigger_sync") to "切换页面、调整窗口和设置、同步数据",
+            setOf("dispatch_task", "get_task_status") to "分配开发任务并查看进度",
+            setOf("close_awake") to "退出唤醒态"
+        )
+        val actions = groups.filter { (names, _) -> names.all(::isManagerTool) }.map { it.second }
+        return "我可以${actions.joinToString("；")}。"
+    }
 
     /**
-     * 导出所有已注册 Android MCP 工具的结构化定义（含完整 inputSchema 参数定义），
-     * 用于直接作为上下文发送给需要执行操作的 JARVIS / LLM。
+     * 导出 Jarvis 管理模型可调用的工具及完整参数定义。
      */
     fun buildMcpToolsSchemaJson(): JSONArray = JSONArray().apply {
-        getAllDefinitions().forEach { def ->
+        managerDefinitions().forEach { def ->
             put(JSONObject().apply {
                 put("name", def.name)
                 put("description", def.description)
@@ -1148,53 +1186,36 @@ object JarvisToolRegistry {
         }
     }
 
-    /**
-     * 动态从实时注册表生成 Android MCP 可操作能力与调用协议说明文本。
-     * 确保需要执行操作的 JARVIS 在首轮与多轮对话中始终掌握最新、全量的工作区同步执行与端侧操作方法。
-     */
-    fun buildMcpProtocolManual(compact: Boolean = false): String {
-        val defs = getAllDefinitions()
-        if (compact) {
-            // 常驻会话后续轮次仍完整交付可调用工具、参数和用途，避免模型把“紧凑上下文”误判为没有端侧工具。
-            val toolIndex = defs.joinToString("\n") { def ->
-                val props = def.inputSchema.optJSONObject("properties")
-                val params = props?.keys()?.asSequence()?.joinToString(",") { it }.orEmpty()
-                "- ${def.name}($params): ${def.description.take(76)}"
-            }
-            return """【本轮可调用的 Android MCP 工具】以下工具已由 Remote Dev 手机端注册并可执行；需要操作时必须输出工具标记，不能声称本轮没有工具。
-调用格式：[[RDT_MCP:{"tool":"工具名","arguments":{...}}]]。手机端会执行并返回真实结果。
-你是手机端Jarvis总管，可查看和管理Remote Dev手机端实例；不得亲自写代码、运行Shell或向终端发开发指令，具体开发任务只能dispatch_task。
-接入或打开首页远端共享实例时调用 focus_terminal(title 或 query)，手机端会先附着共享会话再切到终端页。实例目标有歧义时先调用 get_app_state 或 get_task_status 并向用户确认。
-派发用 dispatch_task(host_id/host_name,workspace_path/workspace_name,agent_id/agent_name,task_prompt,focus=false)，会复用已打开实例或后台启动新实例；派发后用 get_task_status(session_id) 核验。
-${toolIndex}"""
+    fun buildMcpProtocolManual(): String = """
+        【本轮可调用的 Android 工具】
+        以下工具由 Remote Dev 安卓 App 执行。通过文本桥接调用时输出独立标记：
+        [[RDT_MCP:{"tool":"工具名","arguments":{}}]]
+        实例管理：用 get_app_state 查看 sessions 和 shared_tasks，按首页标题找到唯一记录，将其 id 传作 session_id。
+        接入已有实例用 focus_terminal，关闭用 close_terminal，改名用 rename_terminal。打开尚未启动的工作区用 open_terminal，传主机和工作区，不发送命令。目标有歧义时请用户明确目标。
+        派发和监工：从 get_app_state 选主机、工作区和开发者，向 dispatch_task 提交 task_prompt。已有实例可指定 session_id，没有实例时工具会在所选工作区启动开发者。随后将返回的 session_id 传给 get_task_status 核验接收或进度。
+        配置管理：用 get_app_state 读取当前资源和设置，从 manage_host、manage_workspace、manage_agent 选择对应的 action 并传入目标。用 update_settings 写入用户要求修改的字段，再读取状态核验。
+        历史和界面：用 manage_logs 的 list 查询历史，用 restore 和会话 ID 恢复会话；用 navigate_screen 切换页面，用 manage_session_window 管理会话窗口；用 close_awake 退出唤醒态。
+        调用示例：[[RDT_MCP:{"tool":"get_task_status","arguments":{}}]]
+        读写时使用下方参数定义。收到 App 返回结果后报告操作结果。
+        ${buildMcpToolsSchemaJson()}
+    """.trimIndent()
+
+    suspend fun executeManagerTool(name: String, arguments: JSONObject): McpToolResult {
+        if (!isManagerTool(name)) {
+            return McpToolResult(
+                isError = true,
+                content = "Tool is not available to Jarvis: $name",
+                voiceSummary = if (name in developerWorkTools) "开发任务请通过任务派发交给开发者。" else "手机端没有找到工具 $name。"
+            )
         }
-        val lines = StringBuilder()
-        lines.appendLine("【Android MCP(${defs.size}) 语法 [[RDT_MCP:{\"tool\":\"名\",\"arguments\":{...}}]]】")
-        lines.appendLine("【Jarvis职责】你是手机端总管，统筹Remote Dev App内所有主机、工作区、开发者和任务；可读取全局状态、决定任务交给谁、立即派发、持续查看进展并向用户汇报。你不是开发者，不得亲自写代码、运行Shell/项目命令或通过终端文本/按键替开发者干活。")
-        lines.appendLine("【任务派发流程】先从get_app_state确认hosts[*].workspaces[*]和agents目录；按用户指定目标调用dispatch_task，提供host_id/host_name、workspace_path/workspace_name、agent_id/agent_name和完整task_prompt。此工具会复用已打开的本地或共享实例；若目标工作区未打开，会后台启动指定开发者并派发，不需要先调用open_terminal。返回session_id后调用get_task_status(session_id)核验是否已接收；以后监工时再次查该session_id，或不传筛选器查看所有本地任务与共享任务。只有状态和输出证实完成后才能报告已完成。")
-        lines.appendLine("【目标选择】已打开与未打开的工作区都可派发；未指定主机时可用工作区路径/名称跨主机唯一匹配。出现多个候选时先报告候选并让用户选择，不得猜测。只派发当前请求，不把派发描述成已完成。")
-        lines.appendLine("【全局操作】无论用户当前停留在首页/设置/历史还是终端页，均可直接使用Android MCP读取所有主机、工作区、开发者、已打开/共享实例、任务状态与终端屏幕，并管理Remote Dev App界面和配置。此类手机端管理不是开发工作，允许直接操作。")
-        lines.appendLine("【打开/接入实例】用户要求打开、接入或聚焦某个首页远端共享实例时，调用focus_terminal并传title或query（可选host_name）；手机端会自动附着共享会话并切换到终端页。")
-        lines.appendLine("【实例控制】用户要求关闭/结束某个首页远端实例时，先用get_app_state确认sessions或shared_tasks中的display_name、session_id和所属主机；按唯一标题或session_id调用close_terminal。若为尚未接入的共享实例，close_terminal会负责连接并关闭远端会话；目标模糊时先问用户。")
-        lines.appendLine("【执行边界】run_terminal_command、run_in_workspace、send_terminal_text、send_terminal_keys、chat_with_agent、open_terminal不能用于具体开发工作；需要开发者干活时只能dispatch_task。终端屏幕只能用于了解进度和结果。不要把命令执行或派发描述成已完成开发。退出唤醒用close_awake。")
-        for (def in defs) {
-            val props = def.inputSchema.optJSONObject("properties")
-            val requiredSet = buildSet {
-                val reqArr = def.inputSchema.optJSONArray("required")
-                if (reqArr != null) {
-                    for (i in 0 until reqArr.length()) add(reqArr.optString(i))
-                }
-            }
-            val paramText = if (props != null && props.length() > 0) {
-                props.keys().asSequence().joinToString(",") { k ->
-                    val type = props.optJSONObject(k)?.optString("type")?.firstOrNull()?.toString() ?: "s"
-                    val star = if (k in requiredSet) "*" else ""
-                    "$k:$type$star"
-                }
-            } else ""
-            lines.appendLine("- ${def.name}($paramText): ${def.description.take(36)}")
+        if (name == "open_terminal" && arguments.optString("initial_command", "").isNotBlank()) {
+            return McpToolResult(
+                isError = true,
+                content = "Opening a terminal cannot include a command. Use dispatch_task for developer work.",
+                voiceSummary = "可以打开终端。如需执行开发任务，请派发给开发者。"
+            )
         }
-        return lines.toString().trimEnd()
+        return executeTool(name, arguments)
     }
 
     suspend fun executeTool(name: String, arguments: JSONObject): McpToolResult {
