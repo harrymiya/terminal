@@ -78,6 +78,15 @@ object JarvisCoordinator : VoicePerceptorCallback {
     fun start() {
         val ctx = appContext ?: return
         if (perceptor?.isRunning == true) return
+        val hasAudioPermission = androidx.core.content.ContextCompat.checkSelfPermission(
+            ctx, android.Manifest.permission.RECORD_AUDIO
+        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (!hasAudioPermission) {
+            Log.w(TAG, "Cannot start Jarvis without RECORD_AUDIO permission")
+            _subtitle.value = "请先授予麦克风权限"
+            updateState(JarvisState.DISABLED)
+            return
+        }
 
         config.enabled = true
         speaker?.rebuildSynthesizer()
@@ -380,7 +389,7 @@ object JarvisCoordinator : VoicePerceptorCallback {
             Log.w(TAG, "Perception error: $error")
             listeningTimeoutJob?.cancel()
             listeningTimeoutJob = null
-            if (_state.value == JarvisState.LISTENING || _subtitle.value == "正在倾听..." || _subtitle.value == "先生，我在。") {
+            if (_state.value == JarvisState.LISTENING || _subtitle.value == "正在倾听..." || _subtitle.value == "先生，我在，请讲..." || _subtitle.value == "先生，我在。") {
                 _subtitle.value = ""
                 updateState(if (config.enabled) JarvisState.STANDBY else JarvisState.DISABLED)
             }
@@ -411,7 +420,7 @@ object JarvisCoordinator : VoicePerceptorCallback {
         }
         when (newState) {
             JarvisState.LISTENING -> {
-                if (_subtitle.value.isBlank() || _subtitle.value == "先生，我在。") _subtitle.value = "正在倾听..."
+                if (_subtitle.value.isBlank() || _subtitle.value == "先生，我在。") _subtitle.value = "先生，我在，请讲..."
                 listeningTimeoutJob?.cancel()
                 listeningTimeoutJob = scope.launch {
                     kotlinx.coroutines.delay(10_000L)

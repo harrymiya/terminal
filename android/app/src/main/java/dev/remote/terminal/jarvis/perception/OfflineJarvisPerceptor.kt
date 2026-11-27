@@ -43,6 +43,7 @@ class OfflineJarvisPerceptor(
 
     private val scope = CoroutineScope(Dispatchers.IO)
     private var recordJob: Job? = null
+    private var watchdogJob: Job? = null
     private var audioRecord: AudioRecord? = null
 
     @Volatile override var isRunning: Boolean = false
@@ -55,6 +56,14 @@ class OfflineJarvisPerceptor(
 
     override fun start(callback: VoicePerceptorCallback) {
         if (isRunning) return
+        val hasAudioPermission = androidx.core.content.ContextCompat.checkSelfPermission(
+            context, android.Manifest.permission.RECORD_AUDIO
+        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (!hasAudioPermission) {
+            Log.w(TAG, "Cannot start OfflineJarvisPerceptor: RECORD_AUDIO not granted")
+            callback.onError("缺少麦克风权限")
+            return
+        }
         this.callback = callback
         isRunning = true
         initOfflineRecognizer()
@@ -65,7 +74,10 @@ class OfflineJarvisPerceptor(
     private fun initOfflineRecognizer() {
         scope.launch(Dispatchers.Main) {
             try {
-                if (SpeechRecognizer.isRecognitionAvailable(context)) {
+                val available = SpeechRecognizer.isRecognitionAvailable(context)
+                Log.i(TAG, "SpeechRecognizer.isRecognitionAvailable=$available")
+                if (available) {
+                    speechRecognizer?.destroy()
                     speechRecognizer = SpeechRecognizer.createSpeechRecognizer(context).apply {
                         setRecognitionListener(object : RecognitionListener {
                             override fun onReadyForSpeech(params: Bundle?) {
@@ -85,17 +97,22 @@ class OfflineJarvisPerceptor(
 
                             override fun onError(error: Int) {
                                 Log.w(TAG, "ASR recognition error code=$error")
+                                watchdogJob?.cancel()
                                 if ((error == SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED || error == SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE || error == 12 || error == 13) && allowPreferOffline) {
                                     allowPreferOffline = false
                                     Log.i(TAG, "Offline speech pack unavailable (code=$error), falling back to system recognizer")
                                     startAsrListening()
                                 } else {
+                                    if (error == SpeechRecognizer.ERROR_CLIENT || error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) {
+                                        initOfflineRecognizer()
+                                    }
                                     resumeAudioRecordCapture()
                                     callback?.onError("asr_error_$error")
                                 }
                             }
 
                             override fun onResults(results: Bundle?) {
+                                watchdogJob?.cancel()
                                 val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                                 val recognizedText = matches?.firstOrNull() ?: ""
                                 Log.i(TAG, "ASR Final text: \"$recognizedText\"")
@@ -161,6 +178,7 @@ class OfflineJarvisPerceptor(
                 audioRecord?.startRecording()
                 val frameBuffer = ShortArray(SAMPLES_PER_FRAME)
                 var consecutiveSpeechFrames = 0
+                var ambientRms = 65.0
 
                 while (isActive && isRunning) {
                     val isSpeaking = dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.state.value == dev.remote.terminal.jarvis.api.JarvisState.SPEAKING
@@ -178,16 +196,18 @@ class OfflineJarvisPerceptor(
                     val readCount = record.read(frameBuffer, 0, SAMPLES_PER_FRAME)
                     if (readCount <= 0) continue
 
-                    // 1. Tier-0: VAD 音频能量与活动检测
+                    // 1. Tier-0: 自适应门限 VAD 音频能量与人声活动检测
                     val rms = calculateRms(frameBuffer, readCount)
-                    if (rms > ENERGY_THRESHOLD) {
+                    val adaptiveThreshold = (ambientRms * 2.4).coerceIn(110.0, 380.0)
+                    if (rms > adaptiveThreshold && rms > ENERGY_THRESHOLD * 0.55) {
                         consecutiveSpeechFrames++
-                        // 当处于休眠且检测到持续人声时（>=3帧，即60ms），立即触发唤醒识别窗口
                         if (!isListeningCommand && consecutiveSpeechFrames >= 3) {
                             consecutiveSpeechFrames = 0
+                            Log.d(TAG, "VAD triggered wake (rms=${rms.toInt()}, threshold=${adaptiveThreshold.toInt()})")
                             triggerWakeWordDetected()
                         }
                     } else {
+                        ambientRms = ambientRms * 0.96 + rms * 0.04
                         consecutiveSpeechFrames = maxOf(0, consecutiveSpeechFrames - 1)
                     }
                 }
@@ -197,6 +217,7 @@ class OfflineJarvisPerceptor(
             } catch (e: Exception) {
                 Log.e(TAG, "Error in audio capture loop: ${e.message}")
             } finally {
+                isRunning = false
                 safeReleaseAudioRecord()
             }
         }
@@ -218,11 +239,24 @@ class OfflineJarvisPerceptor(
             Log.w(TAG, "Pause AudioRecord error: ${e.message}")
         }
 
+        // 看门狗保护：防止底层识别器无回调导致永久锁死在倾听中
+        watchdogJob?.cancel()
+        watchdogJob = scope.launch {
+            kotlinx.coroutines.delay(9500L)
+            if (isListeningCommand) {
+                Log.w(TAG, "SpeechRecognizer watchdog timeout, cancelling and resuming VAD")
+                cancelListening()
+                callback?.onError("asr_watchdog_timeout")
+            }
+        }
+
         // 在主线程开启单次端侧语音转写
         startAsrListening()
     }
 
     fun cancelListening() {
+        watchdogJob?.cancel()
+        watchdogJob = null
         scope.launch(Dispatchers.Main) {
             try {
                 speechRecognizer?.cancel()
@@ -236,9 +270,15 @@ class OfflineJarvisPerceptor(
     private fun startAsrListening() {
         scope.launch(Dispatchers.Main) {
             try {
+                if (speechRecognizer == null && SpeechRecognizer.isRecognitionAvailable(context)) {
+                    initOfflineRecognizer()
+                    kotlinx.coroutines.delay(80)
+                }
                 val recognizer = speechRecognizer
                 if (recognizer == null) {
                     Log.w(TAG, "SpeechRecognizer unavailable on this device")
+                    watchdogJob?.cancel()
+                    kotlinx.coroutines.delay(500)
                     resumeAudioRecordCapture()
                     callback?.onError("recognizer_unavailable")
                     return@launch
@@ -282,11 +322,13 @@ class OfflineJarvisPerceptor(
     override fun stop() {
         isRunning = false
         isListeningCommand = false
+        watchdogJob?.cancel()
+        watchdogJob = null
         recordJob?.cancel()
         recordJob = null
         safeReleaseAudioRecord()
         scope.launch(Dispatchers.Main) {
-            speechRecognizer?.stopListening()
+            speechRecognizer?.cancel()
         }
     }
 

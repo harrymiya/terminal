@@ -4922,10 +4922,42 @@ private fun SettingsScreen(
                     Text("启用贾维斯语音控制", color = White, fontSize = 13.sp)
                     Text("启用麦克风低功耗监听与唤醒词检测，支持放入口袋全盲操", color = Muted, fontSize = 11.sp)
                 }
-                Switch(checked = jarvisEnabled, onCheckedChange = {
-                    jarvisEnabled = it
-                    store.saveJarvisEnabled(it)
-                    dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.toggleEnabled(it)
+                val jarvisPermissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+                    androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
+                ) { permissions ->
+                    val audioGranted = permissions[android.Manifest.permission.RECORD_AUDIO] == true ||
+                        androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                    if (audioGranted) {
+                        jarvisEnabled = true
+                        store.saveJarvisEnabled(true)
+                        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.toggleEnabled(true)
+                    } else {
+                        jarvisEnabled = false
+                        store.saveJarvisEnabled(false)
+                        keyMessage = "需要麦克风权限才能响应「贾维斯」唤醒"
+                    }
+                }
+                Switch(checked = jarvisEnabled, onCheckedChange = { wantEnable ->
+                    if (!wantEnable) {
+                        jarvisEnabled = false
+                        store.saveJarvisEnabled(false)
+                        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.toggleEnabled(false)
+                    } else {
+                        val audioOk = androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                        val btOk = android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.S ||
+                            androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.BLUETOOTH_CONNECT) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                        if (audioOk && btOk) {
+                            jarvisEnabled = true
+                            store.saveJarvisEnabled(true)
+                            dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.toggleEnabled(true)
+                        } else {
+                            val reqs = mutableListOf(android.Manifest.permission.RECORD_AUDIO)
+                            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+                                reqs.add(android.Manifest.permission.BLUETOOTH_CONNECT)
+                            }
+                            jarvisPermissionLauncher.launch(reqs.toTypedArray())
+                        }
+                    }
                 })
             }
 
