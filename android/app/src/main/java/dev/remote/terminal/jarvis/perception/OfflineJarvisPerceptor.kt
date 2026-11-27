@@ -180,11 +180,15 @@ class OfflineJarvisPerceptor(
 
                 while (isActive && isRunning) {
                     val now = SystemClock.elapsedRealtime()
-                    val isSpeaking = JarvisCoordinator.state.value == JarvisState.SPEAKING
-                    if (isSpeaking) {
+                    val coordState = JarvisCoordinator.state.value
+                    val isBusy = coordState == JarvisState.SPEAKING ||
+                        coordState == JarvisState.PROCESSING ||
+                        coordState == JarvisState.EXECUTING
+                    if (coordState == JarvisState.SPEAKING) {
                         lastSpeakingSeenAtMs = now
                     }
-                    val inEchoGuard = isSpeaking || (now - lastSpeakingSeenAtMs) < POST_SPEAKING_ECHO_GUARD_MS
+                    // 对话思考/执行/播报期间禁止拾音打断，并在播报后保留回声保护窗口
+                    val inEchoGuard = isBusy || (now - lastSpeakingSeenAtMs) < POST_SPEAKING_ECHO_GUARD_MS
 
                     if (resetRequested) {
                         resetRequested = false
@@ -196,17 +200,18 @@ class OfflineJarvisPerceptor(
                         preRoll.clear()
                     }
 
-                    // 从播报返回拾音后，自动重新激活蓝牙耳机麦克风通道
+                    // 思考/播报结束恢复待命后，按需重连蓝牙耳机麦克风通道并刷新诊断状态
                     if (wasInEchoGuard && !inEchoGuard) {
                         wasInEchoGuard = false
                         val desiredBt = if (preferBluetoothMicProvider()) scoManager?.findBluetoothInputDevice() else null
-                        if (desiredBt != null) {
+                        if (desiredBt != null && scoManager?.isScoActive != true) {
                             scoManager?.startChannel()
                             delay(150)
                             audioRecord?.preferredDevice = desiredBt
                             activeBtDevice = desiredBt
                             logAudioRouting(audioRecord, desiredBt)
                         }
+                        updateIdleDiagnostic(activeBtDevice != null)
                     }
 
                     // 空闲期定期检查蓝牙耳机热插拔，自动在耳机麦/手机麦间无缝切换
@@ -321,12 +326,11 @@ class OfflineJarvisPerceptor(
                             preRoll.clear()
 
                             Log.i(TAG, "Sherpa Final text: \"$finalText\" (endpoint=$endpoint, timedOut=$timedOut)")
-                            val currentWake = wakeWordProvider().ifBlank { "贾维斯" }
                             if (finalText.isNotBlank()) {
                                 onDiagnosticChanged?.invoke("最近识别：$finalText")
                                 callback?.onSpeechRecognized(finalText, isFinal = true)
                             } else {
-                                onDiagnosticChanged?.invoke("监听待命中 (端侧离线 · 唤醒词: $currentWake)")
+                                updateIdleDiagnostic(activeBtDevice != null)
                                 callback?.onError("empty_result")
                             }
                         }

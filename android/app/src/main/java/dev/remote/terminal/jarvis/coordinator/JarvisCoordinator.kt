@@ -137,6 +137,8 @@ object JarvisCoordinator : VoicePerceptorCallback {
         _diagnosticStatus.value = "已关闭"
         listeningTimeoutJob?.cancel()
         listeningTimeoutJob = null
+        chatJob?.cancel()
+        chatJob = null
         perceptor?.stop()
         perceptor?.release()
         perceptor = null
@@ -176,8 +178,17 @@ object JarvisCoordinator : VoicePerceptorCallback {
         }
     }
 
+    private fun isBusyTurn(): Boolean {
+        val s = _state.value
+        return s == JarvisState.PROCESSING || s == JarvisState.EXECUTING || s == JarvisState.SPEAKING || chatJob?.isActive == true
+    }
+
     override fun onListeningWindowOpened() {
         scope.launch {
+            if (isBusyTurn()) {
+                Log.d(TAG, "Ignoring onListeningWindowOpened while busy (${_state.value})")
+                return@launch
+            }
             wakeConfirmedThisTurn = false
             updateState(JarvisState.LISTENING)
         }
@@ -185,6 +196,10 @@ object JarvisCoordinator : VoicePerceptorCallback {
 
     override fun onWakeWordDetected(keyword: String) {
         scope.launch {
+            if (isBusyTurn()) {
+                Log.d(TAG, "Ignoring wake word \"$keyword\" while thinking/speaking (${_state.value})")
+                return@launch
+            }
             Log.i(TAG, "Wake word confirmed: $keyword")
             conversationAwakeUntilMs = SystemClock.elapsedRealtime() + CONVERSATION_WINDOW_MS
             wakeConfirmedThisTurn = true
@@ -196,12 +211,17 @@ object JarvisCoordinator : VoicePerceptorCallback {
 
     override fun onSpeechStart() {
         scope.launch {
+            if (isBusyTurn()) return@launch
             updateState(JarvisState.LISTENING)
         }
     }
 
     override fun onSpeechRecognized(text: String, isFinal: Boolean) {
         scope.launch {
+            if (isBusyTurn()) {
+                Log.d(TAG, "Ignoring speech \"$text\" (final=$isFinal) while busy (${_state.value})")
+                return@launch
+            }
             val hasWake = intentRouter?.containsWakeWord(text) == true
             val inWindow = SystemClock.elapsedRealtime() < conversationAwakeUntilMs
             if (!isFinal) {
@@ -291,8 +311,11 @@ object JarvisCoordinator : VoicePerceptorCallback {
                 }
             }
             is JarvisAction.ChatWithDeveloper -> {
+                if (chatJob?.isActive == true) {
+                    Log.d(TAG, "Developer turn already running, refusing interruption")
+                    return
+                }
                 updateState(JarvisState.EXECUTING)
-                chatJob?.cancel()
                 chatJob = scope.launch {
                     handleChatWithDeveloper(action)
                 }
@@ -475,6 +498,10 @@ object JarvisCoordinator : VoicePerceptorCallback {
     override fun onError(error: String) {
         scope.launch {
             Log.w(TAG, "Perception error: $error")
+            if (isBusyTurn()) {
+                Log.d(TAG, "Ignoring perception error \"$error\" while thinking/speaking")
+                return@launch
+            }
             listeningTimeoutJob?.cancel()
             listeningTimeoutJob = null
             if (_state.value == JarvisState.LISTENING || _subtitle.value == "正在倾听..." || _subtitle.value == "先生，我在，请讲..." || _subtitle.value == "先生，我在。") {
@@ -489,6 +516,10 @@ object JarvisCoordinator : VoicePerceptorCallback {
      */
     fun dismissOverlay() {
         scope.launch {
+            if (_state.value == JarvisState.PROCESSING || _state.value == JarvisState.EXECUTING || chatJob?.isActive == true) {
+                Log.d(TAG, "Developer thinking in progress, keeping turn uninterrupted")
+                return@launch
+            }
             listeningTimeoutJob?.cancel()
             listeningTimeoutJob = null
             (perceptor as? OfflineJarvisPerceptor)?.cancelListening()
