@@ -31,7 +31,8 @@ import java.util.concurrent.CopyOnWriteArrayList
 object JarvisCoordinator : VoicePerceptorCallback {
 
     private const val TAG = "JarvisCoordinator"
-    private const val CONVERSATION_WINDOW_MS = 15_000L
+    private const val CONVERSATION_IDLE_TIMEOUT_SEC = 20
+    private const val CONVERSATION_WINDOW_MS = CONVERSATION_IDLE_TIMEOUT_SEC * 1_000L
     private val scope = CoroutineScope(Dispatchers.Main)
 
     val config = JarvisConfig()
@@ -42,7 +43,7 @@ object JarvisCoordinator : VoicePerceptorCallback {
     private var speaker: JarvisSpeaker? = null
     private var intentRouter: JarvisIntentRouter? = null
     private var perceptor: VoicePerceptor? = null
-    private var listeningTimeoutJob: kotlinx.coroutines.Job? = null
+    private var conversationIdleJob: kotlinx.coroutines.Job? = null
     private var chatJob: kotlinx.coroutines.Job? = null
 
     @Volatile
@@ -51,11 +52,20 @@ object JarvisCoordinator : VoicePerceptorCallback {
     @Volatile
     private var wakeConfirmedThisTurn: Boolean = false
 
+    @Volatile
+    private var userCurrentlySpeaking: Boolean = false
+
     private val _state = MutableStateFlow(JarvisState.DISABLED)
     val state: StateFlow<JarvisState> = _state.asStateFlow()
 
     private val _subtitle = MutableStateFlow("")
     val subtitle: StateFlow<String> = _subtitle.asStateFlow()
+
+    private val _conversationActive = MutableStateFlow(false)
+    val conversationActive: StateFlow<Boolean> = _conversationActive.asStateFlow()
+
+    private val _idleRemainingSeconds = MutableStateFlow(0)
+    val idleRemainingSeconds: StateFlow<Int> = _idleRemainingSeconds.asStateFlow()
 
     private val _diagnosticStatus = MutableStateFlow("未启动")
     val diagnosticStatus: StateFlow<String> = _diagnosticStatus.asStateFlow()
@@ -156,11 +166,8 @@ object JarvisCoordinator : VoicePerceptorCallback {
 
     fun stop() {
         config.enabled = false
-        conversationAwakeUntilMs = 0L
-        wakeConfirmedThisTurn = false
+        endConversationSession(resetToDisabled = true)
         _diagnosticStatus.value = "已关闭"
-        listeningTimeoutJob?.cancel()
-        listeningTimeoutJob = null
         chatJob?.cancel()
         chatJob = null
         BackgroundDeveloperBridge.resetWorkers()
@@ -169,8 +176,6 @@ object JarvisCoordinator : VoicePerceptorCallback {
         perceptor = null
         speaker?.stop()
         scoManager?.stopChannel()
-        _subtitle.value = ""
-        updateState(JarvisState.DISABLED)
         Log.i(TAG, "Jarvis master coordinator stopped")
     }
 
@@ -208,13 +213,63 @@ object JarvisCoordinator : VoicePerceptorCallback {
         return s == JarvisState.PROCESSING || s == JarvisState.EXECUTING || s == JarvisState.SPEAKING || chatJob?.isActive == true
     }
 
+    private fun enterConversationMode() {
+        _conversationActive.value = true
+        conversationAwakeUntilMs = SystemClock.elapsedRealtime() + CONVERSATION_WINDOW_MS
+    }
+
+    private fun resetConversationIdleTimer() {
+        if (!config.enabled) return
+        _conversationActive.value = true
+        conversationAwakeUntilMs = SystemClock.elapsedRealtime() + CONVERSATION_WINDOW_MS
+        conversationIdleJob?.cancel()
+        _idleRemainingSeconds.value = CONVERSATION_IDLE_TIMEOUT_SEC
+        conversationIdleJob = scope.launch {
+            var remaining = CONVERSATION_IDLE_TIMEOUT_SEC
+            while (_conversationActive.value && config.enabled) {
+                kotlinx.coroutines.delay(1_000L)
+                if (!_conversationActive.value || !config.enabled) break
+                if (isBusyTurn() || userCurrentlySpeaking) {
+                    // 说话、思考、执行或播报期间不扣除 20 秒静默倒计时
+                    remaining = CONVERSATION_IDLE_TIMEOUT_SEC
+                    conversationAwakeUntilMs = SystemClock.elapsedRealtime() + CONVERSATION_WINDOW_MS
+                    _idleRemainingSeconds.value = 0
+                    continue
+                }
+                remaining -= 1
+                _idleRemainingSeconds.value = remaining.coerceAtLeast(0)
+                if (remaining <= 0) {
+                    Log.i(TAG, "No voice input for ${CONVERSATION_IDLE_TIMEOUT_SEC}s, closing conversation popup")
+                    endConversationSession(resetToDisabled = false)
+                    break
+                }
+            }
+        }
+    }
+
+    private fun endConversationSession(resetToDisabled: Boolean) {
+        conversationIdleJob?.cancel()
+        conversationIdleJob = null
+        _conversationActive.value = false
+        _idleRemainingSeconds.value = 0
+        conversationAwakeUntilMs = 0L
+        wakeConfirmedThisTurn = false
+        userCurrentlySpeaking = false
+        _subtitle.value = ""
+        updateState(if (!resetToDisabled && config.enabled) JarvisState.STANDBY else JarvisState.DISABLED)
+    }
+
     override fun onListeningWindowOpened() {
         scope.launch {
             if (isBusyTurn()) {
                 Log.d(TAG, "Ignoring onListeningWindowOpened while busy (${_state.value})")
                 return@launch
             }
-            wakeConfirmedThisTurn = false
+            if (!_conversationActive.value) {
+                wakeConfirmedThisTurn = false
+            } else {
+                resetConversationIdleTimer()
+            }
             updateState(JarvisState.LISTENING)
         }
     }
@@ -226,10 +281,15 @@ object JarvisCoordinator : VoicePerceptorCallback {
                 return@launch
             }
             Log.i(TAG, "Wake word confirmed: $keyword")
-            conversationAwakeUntilMs = SystemClock.elapsedRealtime() + CONVERSATION_WINDOW_MS
+            enterConversationMode()
             wakeConfirmedThisTurn = true
+            userCurrentlySpeaking = false
+            if (_subtitle.value.isBlank()) {
+                _subtitle.value = "我在，请讲..."
+            }
             hapticFeedbackProvider?.invoke()
             updateState(JarvisState.LISTENING)
+            resetConversationIdleTimer()
             earconManager.playWakeChime()
         }
     }
@@ -237,6 +297,11 @@ object JarvisCoordinator : VoicePerceptorCallback {
     override fun onSpeechStart() {
         scope.launch {
             if (isBusyTurn()) return@launch
+            userCurrentlySpeaking = true
+            if (_conversationActive.value) {
+                conversationAwakeUntilMs = SystemClock.elapsedRealtime() + CONVERSATION_WINDOW_MS
+                _idleRemainingSeconds.value = 0
+            }
             updateState(JarvisState.LISTENING)
         }
     }
@@ -248,28 +313,38 @@ object JarvisCoordinator : VoicePerceptorCallback {
                 return@launch
             }
             val hasWake = intentRouter?.containsWakeWord(text) == true
-            val inWindow = SystemClock.elapsedRealtime() < conversationAwakeUntilMs
+            val inWindow = _conversationActive.value || SystemClock.elapsedRealtime() < conversationAwakeUntilMs
             if (!isFinal) {
                 Log.d(TAG, "Partial speech: \"$text\" (hasWake=$hasWake, inWindow=$inWindow)")
                 if (hasWake || inWindow) {
+                    if (!_conversationActive.value) {
+                        enterConversationMode()
+                    }
+                    userCurrentlySpeaking = true
+                    _idleRemainingSeconds.value = 0
+                    conversationAwakeUntilMs = SystemClock.elapsedRealtime() + CONVERSATION_WINDOW_MS
                     _subtitle.value = text
+                    updateState(JarvisState.LISTENING)
                 }
                 return@launch
             }
 
+            userCurrentlySpeaking = false
             if (!hasWake && !inWindow) {
                 Log.d(TAG, "Ignoring speech without wake word \"${config.wakeWord}\": \"$text\"")
-                _subtitle.value = ""
-                updateState(if (config.enabled) JarvisState.STANDBY else JarvisState.DISABLED)
+                if (!_conversationActive.value) {
+                    _subtitle.value = ""
+                    updateState(if (config.enabled) JarvisState.STANDBY else JarvisState.DISABLED)
+                }
                 return@launch
             }
 
+            enterConversationMode()
             if (hasWake && !wakeConfirmedThisTurn) {
                 wakeConfirmedThisTurn = true
                 hapticFeedbackProvider?.invoke()
                 earconManager.playWakeChime()
             }
-            conversationAwakeUntilMs = SystemClock.elapsedRealtime() + CONVERSATION_WINDOW_MS
             Log.i(TAG, "Final speech recognized: \"$text\"")
             _subtitle.value = text
             updateState(JarvisState.PROCESSING)
@@ -303,19 +378,21 @@ object JarvisCoordinator : VoicePerceptorCallback {
                     Log.w(TAG, "No active terminal controller to inject keystroke")
                 }
                 action.voiceReply?.let { reply ->
-                    speakWithState(reply)
-                } ?: updateState(JarvisState.STANDBY)
+                    speakWithState(reply) { openFollowUpListeningWindow() }
+                } ?: openFollowUpListeningWindow()
             }
             is JarvisAction.SwitchWorkspace -> {
                 updateState(JarvisState.EXECUTING)
                 onWorkspaceSwitchRequested?.invoke(action.workspaceName)
                 earconManager.playActionSuccessChime()
                 action.voiceReply?.let { reply ->
-                    speakWithState(reply)
-                } ?: updateState(JarvisState.STANDBY)
+                    speakWithState(reply) { openFollowUpListeningWindow() }
+                } ?: openFollowUpListeningWindow()
             }
             is JarvisAction.QueryStatus -> {
-                speakWithState(action.voiceReply)
+                speakWithState(action.voiceReply) {
+                    openFollowUpListeningWindow()
+                }
             }
             is JarvisAction.DirectReply -> {
                 speakWithState(action.voiceReply) {
@@ -328,10 +405,14 @@ object JarvisCoordinator : VoicePerceptorCallback {
                     val result = dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.executeTool(action.toolName, action.arguments)
                     if (result.isError) {
                         earconManager.playAlertChime()
-                        speakWithState(action.voiceReply ?: result.voiceSummary ?: "执行工具失败。")
+                        speakWithState(result.voiceSummary ?: "执行工具失败。") {
+                            openFollowUpListeningWindow()
+                        }
                     } else {
                         earconManager.playActionSuccessChime()
-                        speakWithState(action.voiceReply ?: result.voiceSummary ?: "操作已完成。")
+                        speakWithState(result.voiceSummary ?: action.voiceReply ?: "操作已完成。") {
+                            openFollowUpListeningWindow()
+                        }
                     }
                 }
             }
@@ -347,22 +428,30 @@ object JarvisCoordinator : VoicePerceptorCallback {
             }
             is JarvisAction.ErrorAction -> {
                 earconManager.playAlertChime()
-                speakWithState(action.message)
+                speakWithState(action.message) {
+                    openFollowUpListeningWindow()
+                }
             }
             JarvisAction.None -> {
-                updateState(JarvisState.STANDBY)
+                if (_conversationActive.value) {
+                    openFollowUpListeningWindow()
+                } else {
+                    updateState(JarvisState.STANDBY)
+                }
             }
         }
     }
 
     fun speakWithState(message: String, onFinished: (() -> Unit)? = null) {
         _subtitle.value = message
+        _conversationActive.value = true
+        _idleRemainingSeconds.value = 0
         hapticFeedbackProvider?.invoke()
         updateState(JarvisState.SPEAKING)
         val currentSpeaker = speaker
         if (currentSpeaker == null) {
-            updateState(if (config.enabled) JarvisState.STANDBY else JarvisState.DISABLED)
-            onFinished?.invoke()
+            updateState(if (config.enabled) JarvisState.LISTENING else JarvisState.DISABLED)
+            onFinished?.invoke() ?: openFollowUpListeningWindow()
             return
         }
         scope.launch {
@@ -373,11 +462,11 @@ object JarvisCoordinator : VoicePerceptorCallback {
             }
             currentSpeaker.speak(message) {
                 scope.launch {
-                    updateState(if (config.enabled) JarvisState.STANDBY else JarvisState.DISABLED)
-                    onFinished?.invoke()
-                    kotlinx.coroutines.delay(2500)
-                    if (_state.value == JarvisState.STANDBY) {
-                        _subtitle.value = ""
+                    updateState(if (config.enabled) JarvisState.LISTENING else JarvisState.DISABLED)
+                    if (onFinished != null) {
+                        onFinished.invoke()
+                    } else {
+                        openFollowUpListeningWindow()
                     }
                 }
             }
@@ -386,11 +475,13 @@ object JarvisCoordinator : VoicePerceptorCallback {
 
     private fun openFollowUpListeningWindow() {
         if (!config.enabled) return
-        if (SystemClock.elapsedRealtime() >= conversationAwakeUntilMs) return
         scope.launch {
             kotlinx.coroutines.delay(180)
-            if (config.enabled && _state.value == JarvisState.STANDBY && SystemClock.elapsedRealtime() < conversationAwakeUntilMs) {
+            if (config.enabled && !isBusyTurn()) {
+                enterConversationMode()
+                resetConversationIdleTimer()
                 (perceptor as? OfflineJarvisPerceptor)?.openCommandWindow()
+                updateState(JarvisState.LISTENING)
             }
         }
     }
@@ -510,27 +601,43 @@ object JarvisCoordinator : VoicePerceptorCallback {
     }
 
     /**
-     * 智能体任务完成主动耳语通知。
+     * 智能体/终端任务完成主动汇报。
+     * 若当前正处于语音思考/播报中，先排队等待本轮结束再主动播报，不打断当前对话。
      */
     fun onTaskCompleted(workspace: String, status: String) {
         if (!config.enabled || !config.notifyOnTaskFinished) return
+        val cleanStatus = status.trim().ifBlank { "已完成" }.take(80)
         scope.launch {
-            Log.i(TAG, "Task completed in $workspace, whispering to headset")
+            var waited = 0
+            while (isBusyTurn() && waited < 30_000) {
+                kotlinx.coroutines.delay(400)
+                waited += 400
+            }
+            if (!config.enabled || !config.notifyOnTaskFinished || isBusyTurn()) return@launch
+            Log.i(TAG, "Task completed in $workspace: $cleanStatus")
+            conversationAwakeUntilMs = SystemClock.elapsedRealtime() + CONVERSATION_WINDOW_MS
             earconManager.playActionSuccessChime()
-            val text = "先生，${workspace} 的任务已推进完毕，状态：$status。"
-            speakWithState(text)
+            val text = "${workspace} 已完成操作：$cleanStatus"
+            speakWithState(text) {
+                openFollowUpListeningWindow()
+            }
         }
     }
 
     override fun onError(error: String) {
         scope.launch {
             Log.w(TAG, "Perception error: $error")
+            userCurrentlySpeaking = false
             if (isBusyTurn()) {
                 Log.d(TAG, "Ignoring perception error \"$error\" while thinking/speaking")
                 return@launch
             }
-            listeningTimeoutJob?.cancel()
-            listeningTimeoutJob = null
+            if (_conversationActive.value) {
+                // 多轮对话期间若偶发空音段，保持弹窗与 20 秒静默倒计时不中断
+                resetConversationIdleTimer()
+                updateState(JarvisState.LISTENING)
+                return@launch
+            }
             if (_state.value == JarvisState.LISTENING || _subtitle.value == "正在倾听..." || _subtitle.value == "先生，我在，请讲..." || _subtitle.value == "先生，我在。") {
                 _subtitle.value = ""
                 updateState(if (config.enabled) JarvisState.STANDBY else JarvisState.DISABLED)
@@ -547,40 +654,25 @@ object JarvisCoordinator : VoicePerceptorCallback {
                 Log.d(TAG, "Developer thinking in progress, keeping turn uninterrupted")
                 return@launch
             }
-            listeningTimeoutJob?.cancel()
-            listeningTimeoutJob = null
             (perceptor as? OfflineJarvisPerceptor)?.cancelListening()
             speaker?.stop()
             scoManager?.stopChannel()
-            _subtitle.value = ""
-            updateState(if (config.enabled) JarvisState.STANDBY else JarvisState.DISABLED)
+            endConversationSession(resetToDisabled = false)
             Log.i(TAG, "Overlay dismissed by user")
         }
     }
 
     private fun updateState(newState: JarvisState) {
         _state.value = newState
-        if (newState != JarvisState.LISTENING) {
-            listeningTimeoutJob?.cancel()
-            listeningTimeoutJob = null
-        }
         when (newState) {
             JarvisState.LISTENING -> {
-                // 持续后台倾听时不弹出提示框，保持字幕为空，直到用户说话或系统行动时再显式弹窗
-                listeningTimeoutJob?.cancel()
-                listeningTimeoutJob = scope.launch {
-                    kotlinx.coroutines.delay(10_000L)
-                    if (_state.value == JarvisState.LISTENING) {
-                        Log.i(TAG, "Listening window timed out cleanly, returning to STANDBY")
-                        (perceptor as? OfflineJarvisPerceptor)?.cancelListening()
-                        _subtitle.value = ""
-                        updateState(if (config.enabled) JarvisState.STANDBY else JarvisState.DISABLED)
-                    }
+                if (_conversationActive.value && conversationIdleJob?.isActive != true && !userCurrentlySpeaking) {
+                    resetConversationIdleTimer()
                 }
             }
             JarvisState.PROCESSING -> _subtitle.value = "正在理解指令..."
             JarvisState.EXECUTING -> if (_subtitle.value.isBlank()) _subtitle.value = "正在调度终端执行..."
-            JarvisState.STANDBY -> { /* 保持当前字幕，由协程延迟清空 */ }
+            JarvisState.STANDBY -> { /* 保持当前状态，由 20s 静默计时器或用户划走清空 */ }
             JarvisState.DISABLED -> _subtitle.value = ""
             JarvisState.SPEAKING -> { /* 由 speakWithState 负责设置 */ }
         }

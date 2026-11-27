@@ -47,6 +47,10 @@ class OfflineJarvisPerceptor(
         private const val CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO
         private const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
         private const val VAD_WINDOW_SAMPLES = 512 // 32ms @ 16kHz (Silero VAD exact window)
+        private const val PRE_ROLL_FRAMES = 12 // ~384ms 音频预缓冲，避免首字被吞
+        private const val MAX_SPEECH_SAMPLES = 25 * SAMPLE_RATE
+        private const val STREAM_PREVIEW_INTERVAL_MS = 550L
+        private const val MIN_PREVIEW_SAMPLES = (SAMPLE_RATE * 0.45f).toInt()
         private const val POST_SPEAKING_ECHO_GUARD_MS = 650L
         private const val BT_POLL_INTERVAL_MS = 1500L
         private const val BT_MIC_GAIN = 1.6f
@@ -58,12 +62,14 @@ class OfflineJarvisPerceptor(
 
     private var sileroVad: Vad? = null
     private var offlineRecognizer: OfflineRecognizer? = null
+    private val decoderLock = Any()
 
     @Volatile override var isRunning: Boolean = false
         private set
 
     @Volatile private var resetRequested: Boolean = false
     @Volatile private var lastSpeakingSeenAtMs: Long = 0L
+    @Volatile private var previewDecodeBusy: Boolean = false
 
     private var callback: VoicePerceptorCallback? = null
     var scoManager: BluetoothScoManager? = null
@@ -166,6 +172,12 @@ class OfflineJarvisPerceptor(
                 updateIdleDiagnostic(activeBtDevice != null)
 
                 val frameBuffer = ShortArray(VAD_WINDOW_SAMPLES)
+                val preRollRing = ArrayDeque<FloatArray>(PRE_ROLL_FRAMES + 1)
+                val speechBuf = FloatArray(MAX_SPEECH_SAMPLES)
+                var speechLen = 0
+                var speechSegmentPending = false
+                var lastPreviewAtMs = 0L
+                var lastPreviewText = ""
                 var wasInSpeech = false
                 var wasInEchoGuard = false
                 var lastBtPollAtMs = SystemClock.elapsedRealtime()
@@ -187,6 +199,10 @@ class OfflineJarvisPerceptor(
                         resetRequested = false
                         vad.clear()
                         wasInSpeech = false
+                        speechSegmentPending = false
+                        speechLen = 0
+                        preRollRing.clear()
+                        lastPreviewText = ""
                     }
 
                     // 思考/播报结束恢复待命后，按需重连蓝牙耳机麦克风通道并刷新诊断状态
@@ -194,6 +210,10 @@ class OfflineJarvisPerceptor(
                         wasInEchoGuard = false
                         vad.clear()
                         wasInSpeech = false
+                        speechSegmentPending = false
+                        speechLen = 0
+                        preRollRing.clear()
+                        lastPreviewText = ""
                         val desiredBt = if (preferBluetoothMicProvider()) scoManager?.findBluetoothInputDevice() else null
                         if (desiredBt != null && scoManager?.isScoActive != true) {
                             scoManager?.startChannel()
@@ -206,7 +226,7 @@ class OfflineJarvisPerceptor(
                     }
 
                     // 空闲期定期检查蓝牙耳机热插拔，自动在耳机麦/手机麦间无缝切换
-                    if (!wasInSpeech && !inEchoGuard && (now - lastBtPollAtMs) >= BT_POLL_INTERVAL_MS) {
+                    if (!wasInSpeech && !speechSegmentPending && !inEchoGuard && (now - lastBtPollAtMs) >= BT_POLL_INTERVAL_MS) {
                         lastBtPollAtMs = now
                         val desiredBt = if (preferBluetoothMicProvider()) scoManager?.findBluetoothInputDevice() else null
                         if (desiredBt?.id != activeBtDevice?.id) {
@@ -223,6 +243,7 @@ class OfflineJarvisPerceptor(
                                 updateIdleDiagnostic(activeBtDevice != null)
                             }
                             vad.clear()
+                            preRollRing.clear()
                         }
                     }
 
@@ -242,9 +263,13 @@ class OfflineJarvisPerceptor(
 
                     if (inEchoGuard) {
                         wasInEchoGuard = true
-                        if (wasInSpeech || !vad.empty()) {
+                        if (wasInSpeech || speechSegmentPending || !vad.empty()) {
                             vad.clear()
                             wasInSpeech = false
+                            speechSegmentPending = false
+                            speechLen = 0
+                            preRollRing.clear()
+                            lastPreviewText = ""
                         }
                         continue
                     }
@@ -259,31 +284,75 @@ class OfflineJarvisPerceptor(
                     if (speechActiveNow && !wasInSpeech) {
                         wasInSpeech = true
                         speechStartedAtMs = now
+                        if (!speechSegmentPending) {
+                            speechSegmentPending = true
+                            speechLen = 0
+                            lastPreviewText = ""
+                            lastPreviewAtMs = now
+                            for (pre in preRollRing) {
+                                val copyLen = minOf(pre.size, speechBuf.size - speechLen)
+                                if (copyLen > 0) {
+                                    pre.copyInto(speechBuf, destinationOffset = speechLen, startIndex = 0, endIndex = copyLen)
+                                    speechLen += copyLen
+                                }
+                            }
+                        }
                         val rms = calculateRms(frameBuffer, readCount).toInt()
                         Log.d(TAG, "Silero VAD speech start (bt=${activeBtDevice != null}, rms=$rms)")
                         onDiagnosticChanged?.invoke("正在倾听语音...")
-                        callback?.onListeningWindowOpened()
+                        callback?.onSpeechStart()
                     } else if (!speechActiveNow && wasInSpeech) {
                         wasInSpeech = false
+                    }
+
+                    if (speechSegmentPending) {
+                        val copyLen = minOf(floatSamples.size, speechBuf.size - speechLen)
+                        if (copyLen > 0) {
+                            floatSamples.copyInto(speechBuf, destinationOffset = speechLen, startIndex = 0, endIndex = copyLen)
+                            speechLen += copyLen
+                        }
+                        if (speechLen >= MIN_PREVIEW_SAMPLES &&
+                            !previewDecodeBusy &&
+                            (now - lastPreviewAtMs) >= STREAM_PREVIEW_INTERVAL_MS
+                        ) {
+                            lastPreviewAtMs = now
+                            previewDecodeBusy = true
+                            val snapshot = speechBuf.copyOf(speechLen)
+                            scope.launch(Dispatchers.Default) {
+                                try {
+                                    val partial = decodeAudioSamples(recognizer, snapshot)
+                                    if (partial.isNotBlank() && partial != lastPreviewText && !inEchoGuard) {
+                                        lastPreviewText = partial
+                                        onDiagnosticChanged?.invoke("实时识别：$partial")
+                                        callback?.onSpeechRecognized(partial, isFinal = false)
+                                    }
+                                } finally {
+                                    previewDecodeBusy = false
+                                }
+                            }
+                        }
+                    } else {
+                        if (preRollRing.size >= PRE_ROLL_FRAMES) preRollRing.removeFirst()
+                        preRollRing.addLast(floatSamples)
                     }
 
                     while (!vad.empty()) {
                         val segment = vad.front()
                         vad.pop()
+                        speechSegmentPending = false
+                        speechLen = 0
+                        preRollRing.clear()
+                        lastPreviewText = ""
                         val samples = segment.samples
                         val durationSec = samples.size / SAMPLE_RATE.toFloat()
                         if (samples.size < SAMPLE_RATE / 5) {
-                            // 过滤低于 200ms 的极短杂音
+                            // 过滤低于 200ms 的极短杂音，并通知结束本次人声触发
+                            callback?.onError("short_noise")
                             continue
                         }
                         val decodeT0 = SystemClock.elapsedRealtime()
-                        val stream = recognizer.createStream()
-                        stream.acceptWaveform(samples, SAMPLE_RATE)
-                        recognizer.decode(stream)
-                        val rawText = recognizer.getResult(stream).text
-                        stream.release()
+                        val finalText = decodeAudioSamples(recognizer, samples)
                         val decodeMs = SystemClock.elapsedRealtime() - decodeT0
-                        val finalText = normalizeRecognizedText(rawText)
 
                         Log.i(
                             TAG,
@@ -399,6 +468,19 @@ class OfflineJarvisPerceptor(
             Log.i(TAG, "Paraformer self-test 0.wav -> \"$resultText\"")
         } catch (e: Throwable) {
             Log.w(TAG, "Paraformer self-test skipped/failed: ${e.message}")
+        }
+    }
+
+    private fun decodeAudioSamples(recognizer: OfflineRecognizer, samples: FloatArray): String {
+        return synchronized(decoderLock) {
+            val stream = recognizer.createStream()
+            try {
+                stream.acceptWaveform(samples, SAMPLE_RATE)
+                recognizer.decode(stream)
+                normalizeRecognizedText(recognizer.getResult(stream).text)
+            } finally {
+                stream.release()
+            }
         }
     }
 

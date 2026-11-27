@@ -323,6 +323,10 @@ private class TerminalSessionState(
     var autoEnterDeadline by mutableStateOf<Long?>(null)
         private set
     @Volatile var isSessionConnected = false
+    @Volatile private var streamActiveStartedAt = 0L
+    @Volatile private var receivedChunkBytes = 0L
+    @Volatile private var lastReportedTailSignature: String? = null
+    private var idleCompletionCheckRunnable: Runnable? = null
     lateinit var controller: SshTerminalController
 
     override fun isConnected(): Boolean = isSessionConnected && controller.isConnected()
@@ -374,8 +378,71 @@ private class TerminalSessionState(
     }
 
     fun onConnectionUnavailable() {
+        idleCompletionCheckRunnable?.let { mainHandler.removeCallbacks(it) }
+        idleCompletionCheckRunnable = null
+        streamActiveStartedAt = 0L
+        receivedChunkBytes = 0L
         pauseAutoEnter()
         handledPromptSignature = null
+    }
+
+    fun noteOutputChunk(byteCount: Int) {
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (streamActiveStartedAt == 0L) {
+            streamActiveStartedAt = now
+        }
+        receivedChunkBytes += byteCount
+        idleCompletionCheckRunnable?.let { mainHandler.removeCallbacks(it) }
+        val check = Runnable { evaluateTaskCompletionReport() }
+        idleCompletionCheckRunnable = check
+        mainHandler.postDelayed(check, 2_800L)
+    }
+
+    private fun evaluateTaskCompletionReport() {
+        val now = android.os.SystemClock.elapsedRealtime()
+        val activeDuration = if (streamActiveStartedAt > 0L) now - streamActiveStartedAt else 0L
+        val totalBytes = receivedChunkBytes
+        val awaiting = autoEnterAwaitingResponse
+        streamActiveStartedAt = 0L
+        receivedChunkBytes = 0L
+
+        if (!isConnected() || isClosed() || needsAction) return
+        if (now - startedAt < 5_000L) return
+        if (!awaiting && (activeDuration < 2_500L || totalBytes < 256L)) return
+
+        val tail = buffer.visibleTextTail(30)
+        val nonBlankLines = tail.lineSequence()
+            .map { it.trim().trim('│', '┃', '║', '|', ' ') }
+            .filter { line ->
+                line.isNotBlank() &&
+                    !line.all { ch -> ch in "─━═╭╮╰╯┌┐└┘+·• " }
+            }
+            .toList()
+        if (nonBlankLines.isEmpty()) return
+
+        val readyPromptRegex = Regex("""(?:^|[\s\]\)~])(?:\$|#|%|❯|›|>)\s*$""")
+        val hasPromptReady = awaiting || nonBlankLines.takeLast(3).any { readyPromptRegex.containsMatchIn(it) }
+        if (!hasPromptReady) return
+
+        val normalizedSig = AutoConfirmEngine.normalizeSignature(nonBlankLines.takeLast(8).joinToString("\n"))
+        if (normalizedSig.isBlank() || normalizedSig == lastReportedTailSignature) return
+        lastReportedTailSignature = normalizedSig
+        autoEnterAwaitingResponse = false
+
+        val summaryLines = nonBlankLines
+            .filterNot { readyPromptRegex.matches(it) }
+            .filterNot { it.startsWith("$ ") || it.startsWith("> ") || it.startsWith("❯ ") }
+        val summary = (if (summaryLines.isNotEmpty()) summaryLines.takeLast(2) else nonBlankLines.takeLast(1))
+            .joinToString("，")
+            .replace(Regex("""[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]+"""), "")
+            .trim()
+            .take(70)
+            .ifBlank { "已执行完成并回到待命状态" }
+
+        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.onTaskCompleted(
+            workspace = "${task.directory.name}（${task.agent.name}）",
+            status = summary
+        )
     }
 
     fun clearAttention() {
@@ -986,7 +1053,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 refreshShared(session.task.host)
             }
             AutoConfirmEngine.unregisterSession(session.task.id)
-            session.cancelAutoEnter()
+            session.onConnectionUnavailable()
             TerminalConnectionRegistry.unregister(session.task.id, session.controller)
             session.controller.close(terminateRemote = true)
             sessions.removeAt(index)
@@ -1148,6 +1215,14 @@ private fun RemoteTerminalApp(store: LocalStore) {
                         if (value.contains("重连") || value.contains("恢复 SSH") || value == "已断开" || value.startsWith("远端终端已结束")) {
                             state.onConnectionUnavailable()
                         }
+                        if (value.startsWith("远端终端已结束") &&
+                            android.os.SystemClock.elapsedRealtime() - state.startedAt >= 5_000L
+                        ) {
+                            dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.onTaskCompleted(
+                                workspace = "${state.task.directory.name}（${state.task.agent.name}）",
+                                status = value
+                            )
+                        }
                         if (value.startsWith("已连接")) state.resumeAutoEnter(autoEnterDelaySeconds, autoEnterEnabled)
                     }
                 },
@@ -1157,6 +1232,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
                     mainHandler.post {
                         state.lastOutputAt = android.os.SystemClock.elapsedRealtime()
                         state.isStreaming = true
+                        state.noteOutputChunk(bytes.length)
                         mainHandler.postDelayed({
                             if (android.os.SystemClock.elapsedRealtime() - state.lastOutputAt >= 1_100L) state.isStreaming = false
                         }, 1_150L)

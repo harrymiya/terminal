@@ -83,10 +83,12 @@ fun JarvisVoiceprintOverlay(
 ) {
     val state by JarvisCoordinator.state.collectAsState()
     val subtitle by JarvisCoordinator.subtitle.collectAsState()
+    val conversationActive by JarvisCoordinator.conversationActive.collectAsState()
+    val idleRemainingSeconds by JarvisCoordinator.idleRemainingSeconds.collectAsState()
 
     val isWorking = when (state) {
         JarvisState.DISABLED -> false
-        JarvisState.STANDBY, JarvisState.LISTENING -> subtitle.isNotBlank()
+        JarvisState.STANDBY, JarvisState.LISTENING -> conversationActive || subtitle.isNotBlank()
         JarvisState.PROCESSING, JarvisState.EXECUTING, JarvisState.SPEAKING -> true
     }
     val offsetX = remember { Animatable(0f) }
@@ -118,6 +120,8 @@ fun JarvisVoiceprintOverlay(
             JarvisHudCard(
                 state = state,
                 subtitle = subtitle,
+                conversationActive = conversationActive,
+                idleRemainingSeconds = idleRemainingSeconds,
                 modifier = Modifier
                     .offset { IntOffset(offsetX.value.roundToInt(), 0) }
                     .alpha(dragAlpha)
@@ -159,6 +163,8 @@ fun JarvisVoiceprintOverlay(
 private fun JarvisHudCard(
     state: JarvisState,
     subtitle: String,
+    conversationActive: Boolean,
+    idleRemainingSeconds: Int,
     modifier: Modifier = Modifier
 ) {
     val cardBackground = Brush.verticalGradient(
@@ -214,7 +220,7 @@ private fun JarvisHudCard(
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             // 1. 顶部状态指示徽章 (Status Badge)
-            HudStatusBadge(state)
+            HudStatusBadge(state, conversationActive, idleRemainingSeconds)
 
             // 2. 霓虹声纹动态曲线 (两端渐变透明，中部大振幅)
             NeonWaveformCanvas(
@@ -224,7 +230,7 @@ private fun JarvisHudCard(
                     .height(50.dp)
             )
 
-            // 3. 底部文字输出与字幕 (Subtitle Text Output)
+            // 3. 底部实时识别文字与播报字幕 (Live Transcript & Subtitle Output)
             if (subtitle.isNotBlank()) {
                 Text(
                     text = subtitle,
@@ -233,8 +239,18 @@ private fun JarvisHudCard(
                     lineHeight = 18.sp,
                     fontWeight = FontWeight.Medium,
                     textAlign = TextAlign.Center,
-                    maxLines = 3,
+                    maxLines = 6,
                     overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 4.dp, vertical = 2.dp)
+                )
+            } else if (conversationActive) {
+                Text(
+                    text = "请继续说话...",
+                    color = Color(0x99F1F5F9),
+                    fontSize = 12.sp,
+                    textAlign = TextAlign.Center,
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 4.dp, vertical = 2.dp)
@@ -245,13 +261,25 @@ private fun JarvisHudCard(
 }
 
 @Composable
-private fun HudStatusBadge(state: JarvisState) {
+private fun HudStatusBadge(
+    state: JarvisState,
+    conversationActive: Boolean,
+    idleRemainingSeconds: Int
+) {
     val (statusText, dotColor) = when (state) {
         JarvisState.SPEAKING -> "JARVIS • 正在耳语播报" to Color(0xFFFF007F)
-        JarvisState.LISTENING -> "JARVIS • 倾听中" to Color(0xFF00F5FF)
+        JarvisState.LISTENING -> when {
+            idleRemainingSeconds > 0 -> "JARVIS • 多轮倾听 (${idleRemainingSeconds}s)"
+            conversationActive -> "JARVIS • 实时识别中"
+            else -> "JARVIS • 倾听中"
+        } to Color(0xFF00F5FF)
         JarvisState.PROCESSING -> "JARVIS • 意图解析中" to Color(0xFFFFD600)
         JarvisState.EXECUTING -> "JARVIS • 调度终端任务" to Color(0xFF00E676)
-        JarvisState.STANDBY -> "JARVIS • 待命" to Color(0xFF00F5FF)
+        JarvisState.STANDBY -> if (conversationActive && idleRemainingSeconds > 0) {
+            "JARVIS • 多轮待命 (${idleRemainingSeconds}s)" to Color(0xFF00F5FF)
+        } else {
+            "JARVIS • 待命" to Color(0xFF00F5FF)
+        }
         JarvisState.DISABLED -> "JARVIS • 已休眠" to Color.Gray
     }
 

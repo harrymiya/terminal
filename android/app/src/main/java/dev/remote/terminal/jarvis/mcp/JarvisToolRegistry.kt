@@ -131,9 +131,9 @@ object JarvisToolRegistry {
                 val cmd = arguments.optString("agent_command").takeIf { it.isNotBlank() }
                 val ok = openTerminalHandler?.invoke(hostId, wsPath, cmd, wsName) ?: false
                 return if (ok) {
-                    McpToolResult(content = "Terminal opened", voiceSummary = "正在为您启动 ${wsName ?: "指定"} 终端。")
+                    McpToolResult(content = "Terminal opened", voiceSummary = "已为您打开 ${wsName ?: wsPath?.substringAfterLast('/') ?: "指定"} 终端。")
                 } else {
-                    McpToolResult(isError = true, content = "Failed to open terminal", voiceSummary = "启动终端失败。")
+                    McpToolResult(isError = true, content = "Failed to open terminal", voiceSummary = "打开终端失败。")
                 }
             }
         })
@@ -184,7 +184,7 @@ object JarvisToolRegistry {
                 val sid = arguments.optString("session_id").takeIf { it.isNotBlank() }
                 val ok = reconnectTerminalHandler?.invoke(sid) ?: false
                 return if (ok) {
-                    McpToolResult(content = "Reconnecting terminal", voiceSummary = "正在为您重连终端。")
+                    McpToolResult(content = "Reconnecting terminal", voiceSummary = "已为您发起终端重连。")
                 } else {
                     McpToolResult(isError = true, content = "Reconnect failed", voiceSummary = "重连终端失败。")
                 }

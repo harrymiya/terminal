@@ -384,6 +384,60 @@ object BackgroundDeveloperBridge {
         return parsed
     }
 
+    private data class McpBatchOutcome(
+        val toolLogs: List<String>,
+        val reports: List<String>,
+        val hasError: Boolean,
+        val needsFollowUp: Boolean
+    )
+
+    private suspend fun executeMcpCalls(
+        matches: List<MatchResult>,
+        allowReadFollowUp: Boolean
+    ): McpBatchOutcome {
+        val toolLogs = mutableListOf<String>()
+        val reports = mutableListOf<String>()
+        var hasError = false
+        var needsFollowUp = false
+
+        for (match in matches) {
+            val jsonStr = match.groupValues[1].trim()
+            val callObj = runCatching { JSONObject(jsonStr) }.getOrNull() ?: continue
+            val toolName = callObj.optString("tool").trim()
+            if (toolName.isBlank()) continue
+            val args = callObj.optJSONObject("arguments") ?: JSONObject()
+
+            Log.i(TAG, "Developer requested Remote Dev MCP tool: $toolName args=$args")
+            val result = withContext(Dispatchers.Main) {
+                JarvisToolRegistry.executeTool(toolName, args)
+            }
+            toolLogs.add("[$toolName] isError=${result.isError} content=${result.content.take(1200)}")
+
+            if (result.isError) {
+                hasError = true
+                val errSummary = result.voiceSummary?.takeIf { it.isNotBlank() }
+                    ?: "执行 ${toolName} 失败：${result.content.take(60)}"
+                reports.add(errSummary)
+            } else {
+                val okSummary = result.voiceSummary?.takeIf { it.isNotBlank() }
+                    ?: "已完成 ${toolName} 操作。"
+                if (toolName !in READ_TOOLS && toolName != "speak_to_user") {
+                    reports.add(okSummary)
+                }
+                if (allowReadFollowUp && toolName in READ_TOOLS) {
+                    needsFollowUp = true
+                }
+            }
+        }
+
+        return McpBatchOutcome(
+            toolLogs = toolLogs,
+            reports = reports,
+            hasError = hasError,
+            needsFollowUp = needsFollowUp
+        )
+    }
+
     private suspend fun executeEmbeddedMcpToolsAndMaybeFollowUp(
         rawReply: String,
         session: Session,
@@ -398,34 +452,12 @@ object BackgroundDeveloperBridge {
             return sanitizeForSpeech(rawReply)
         }
 
-        val toolResults = mutableListOf<String>()
-        var needsFollowUp = false
-        var lastVoiceSummary: String? = null
+        val firstBatch = executeMcpCalls(matches, allowReadFollowUp = true)
+        val visibleWithoutTags = sanitizeForSpeech(rawReply.replace(MCP_TAG_REGEX, ""))
 
-        for (match in matches) {
-            val jsonStr = match.groupValues[1].trim()
-            val callObj = runCatching { JSONObject(jsonStr) }.getOrNull() ?: continue
-            val toolName = callObj.optString("tool").trim()
-            if (toolName.isBlank()) continue
-            val args = callObj.optJSONObject("arguments") ?: JSONObject()
-
-            Log.i(TAG, "Developer requested Remote Dev MCP tool: $toolName args=$args")
-            val result = withContext(Dispatchers.Main) {
-                JarvisToolRegistry.executeTool(toolName, args)
-            }
-            toolResults.add("[$toolName] isError=${result.isError} content=${result.content.take(1200)}")
-            if (!result.voiceSummary.isNullOrBlank()) {
-                lastVoiceSummary = result.voiceSummary
-            }
-            if (toolName in READ_TOOLS && !result.isError) {
-                needsFollowUp = true
-            }
-        }
-
-        val visibleWithoutTags = rawReply.replace(MCP_TAG_REGEX, "").trim()
-        if (needsFollowUp && toolResults.isNotEmpty()) {
-            val followPrompt = "这是刚调用手机端 MCP 返回的实际结果，请直接用1到3句精简中文口语回答用户，不要输出思维链、Markdown 或 RDT_MCP 标签：\n" +
-                toolResults.joinToString("\n")
+        if (firstBatch.needsFollowUp && firstBatch.toolLogs.isNotEmpty()) {
+            val followPrompt = "这是刚调用手机端 MCP 返回的实际结果，请直接用1到3句精简中文口语向用户汇报检查结果或已完成的操作，不要输出思维链、Markdown 或 RDT_MCP 标签：\n" +
+                firstBatch.toolLogs.joinToString("\n")
             val followReply = invokeDeveloperTurn(
                 session = session,
                 command = command,
@@ -439,25 +471,35 @@ object BackgroundDeveloperBridge {
             ).getOrNull()
             if (!followReply.isNullOrBlank()) {
                 val secondMatches = MCP_TAG_REGEX.findAll(followReply).toList()
-                for (m in secondMatches) {
-                    val obj = runCatching { JSONObject(m.groupValues[1].trim()) }.getOrNull() ?: continue
-                    val tn = obj.optString("tool").trim()
-                    if (tn.isNotBlank() && tn !in READ_TOOLS) {
-                        val a = obj.optJSONObject("arguments") ?: JSONObject()
-                        withContext(Dispatchers.Main) { JarvisToolRegistry.executeTool(tn, a) }
-                    }
+                val secondBatch = if (secondMatches.isNotEmpty()) {
+                    executeMcpCalls(secondMatches, allowReadFollowUp = false)
+                } else {
+                    null
                 }
-                return sanitizeForSpeech(followReply.replace(MCP_TAG_REGEX, ""))
+                val cleanFollow = sanitizeForSpeech(followReply.replace(MCP_TAG_REGEX, ""))
+                val extraReports = (firstBatch.reports + secondBatch?.reports.orEmpty()).distinct()
+                if (secondBatch?.hasError == true || firstBatch.hasError) {
+                    return extraReports.joinToString(" ").ifBlank { cleanFollow }
+                }
+                return when {
+                    extraReports.isNotEmpty() && cleanFollow.isNotBlank() -> "$cleanFollow ${extraReports.joinToString(" ")}"
+                    extraReports.isNotEmpty() -> extraReports.joinToString(" ")
+                    else -> cleanFollow.ifBlank { "已完成检查与操作。" }
+                }
             }
         }
 
-        return sanitizeForSpeech(visibleWithoutTags).ifBlank { lastVoiceSummary ?: "操作已完成。" }
+        val verifiedReport = firstBatch.reports.distinct().joinToString(" ")
+        if (firstBatch.hasError) {
+            return verifiedReport.ifBlank { "执行操作失败，请稍后重试。" }
+        }
+        return verifiedReport.ifBlank { visibleWithoutTags.ifBlank { "操作已完成。" } }
     }
 
     private fun buildPromptWithMcp(userPrompt: String, appStateSnapshot: String, compact: Boolean): String {
         if (compact) {
             val stateHint = if (appStateSnapshot.isNotBlank()) "最新App状态：${appStateSnapshot.take(600)}\n" else ""
-            return "${stateHint}请用1到3句精简中文口语回答（无思维链、无Markdown）；如需操作手机端请末尾附 [[RDT_MCP:...]]：\n用户说：$userPrompt"
+            return "${stateHint}请用1到3句精简中文口语向用户汇报结果（无思维链、无Markdown）；如需操作手机端请末尾附 [[RDT_MCP:...]]：\n用户说：$userPrompt"
         }
         val stateLine = if (appStateSnapshot.isNotBlank()) "当前手机端状态快照：$appStateSnapshot\n" else ""
         return """你是用户的 AI 开发者助手，同时拥有手机端 Remote Dev App 的全部 MCP 操作权限（可替用户做界面与终端一切操作）。
@@ -467,7 +509,7 @@ object BackgroundDeveloperBridge {
 - send_terminal_text(text, session_id?, press_enter?) / send_terminal_keys(keys, session_id?)
 - select_host(host_id?, host_name?, host_index?) / select_agent(agent_id?, agent_name?) / set_view_mode(tiled)
 - add_workspace(path, name?, host_id?) / delete_workspace(path, host_id?) / trigger_sync() / navigate_screen(screen) / vibrate_phone(duration_ms?)
-${stateLine}规则：直接用1到3句精简中文口语回答（不要思维链或Markdown代码块）。
+${stateLine}规则：直接用1到3句精简中文口语回答并清楚汇报已完成的操作与结果（不要思维链或Markdown代码块）。
 用户说：$userPrompt"""
     }
 
