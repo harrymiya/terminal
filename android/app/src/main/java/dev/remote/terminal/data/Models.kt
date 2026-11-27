@@ -595,11 +595,12 @@ class LocalStore(context: Context) {
 
     fun saveJarvisModelApi(url: String, model: String, key: String) {
         val encrypted = vault.encrypt(key)
-        preferences.edit()
+        val saved = preferences.edit()
             .putString("jarvis_model_api_url", url)
             .putString("jarvis_model_api_name", model)
             .putString("jarvis_model_api_key", encrypted)
-            .apply()
+            .commit()
+        check(saved) { "Could not persist model API settings" }
     }
 
     fun clearJarvisModelApiKey() = preferences.edit().remove("jarvis_model_api_key").apply()

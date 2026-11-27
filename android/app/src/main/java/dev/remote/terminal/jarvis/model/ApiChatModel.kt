@@ -24,7 +24,13 @@ internal object ApiChatModel {
         return URI(if (path.endsWith("/chat/completions")) base else "$base/chat/completions")
     }
 
-    suspend fun complete(baseUrl: String, model: String, apiKey: String, prompt: String): Result<String> =
+    suspend fun complete(
+        baseUrl: String,
+        model: String,
+        apiKey: String,
+        prompt: String,
+        connectionTest: Boolean = false
+    ): Result<String> =
         withContext(Dispatchers.IO) {
             try {
                 require(model.isNotBlank()) { "请填写 API 模型名称。" }
@@ -33,8 +39,8 @@ internal object ApiChatModel {
                 val connection = target.toURL().openConnection() as HttpsURLConnection
                 try {
                     connection.instanceFollowRedirects = false
-                    connection.connectTimeout = 10_000
-                    connection.readTimeout = 90_000
+                    connection.connectTimeout = if (connectionTest) 8_000 else 10_000
+                    connection.readTimeout = if (connectionTest) 15_000 else 90_000
                     connection.requestMethod = "POST"
                     connection.doOutput = true
                     connection.setRequestProperty("Authorization", "Bearer $apiKey")
@@ -43,7 +49,7 @@ internal object ApiChatModel {
                     val body = JSONObject()
                         .put("model", model)
                         .put("stream", false)
-                        .put("max_tokens", 4096)
+                        .put("max_tokens", if (connectionTest) 64 else 4096)
                         .put("response_format", JSONObject().put("type", "json_object"))
                         .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", prompt)))
                     if (target.host.equals("api.deepseek.com", true)) {

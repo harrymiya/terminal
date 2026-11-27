@@ -6540,15 +6540,43 @@ private fun SettingsScreen(
 
     var selectedSection by rememberSaveable { mutableStateOf<String?>(null) }
     val section = selectedSection?.let(SettingsSection::valueOf)
+    var apiDraftDirty by remember { mutableStateOf(false) }
+    var apiFormBusy by remember { mutableStateOf(false) }
+    var afterDiscard by remember { mutableStateOf<(() -> Unit)?>(null) }
+    fun leaveModelApi(action: () -> Unit) {
+        if (apiFormBusy) return
+        if (apiDraftDirty) afterDiscard = action else action()
+    }
     fun saveSyncAddress() {
         val url = draftSyncUrl.trim()
         if (url != syncUrl) onSyncSettingsChange(url, "")
     }
     fun finish() {
         if (section == SettingsSection.SYNC) saveSyncAddress()
-        if (section != null) selectedSection = null else onBack()
+        if (section == SettingsSection.MODEL && jarvisUsesApi) {
+            leaveModelApi { selectedSection = null }
+        } else if (section != null) {
+            selectedSection = null
+        } else {
+            onBack()
+        }
     }
     BackHandler { finish() }
+    afterDiscard?.let { navigate ->
+        AlertDialog(
+            onDismissRequest = { afterDiscard = null },
+            title = { Text("API 配置尚未保存") },
+            text = { Text("可继续编辑并保存，或放弃本次修改。") },
+            confirmButton = { TextButton(onClick = { afterDiscard = null }) { Text("继续编辑") } },
+            dismissButton = {
+                TextButton(onClick = {
+                    afterDiscard = null
+                    apiDraftDirty = false
+                    navigate()
+                }) { Text("放弃修改") }
+            }
+        )
+    }
 
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
         Column(Modifier.widthIn(max = 680.dp).fillMaxSize().imePadding().padding(horizontal = 20.dp)) {
@@ -6612,7 +6640,12 @@ private fun SettingsScreen(
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 androidx.compose.material3.FilterChip(
                                     selected = !jarvisUsesApi,
-                                    onClick = { store.saveJarvisUsesModelApi(false); jarvisUsesApi = false },
+                                    onClick = {
+                                        leaveModelApi {
+                                            store.saveJarvisUsesModelApi(false)
+                                            jarvisUsesApi = false
+                                        }
+                                    },
                                     label = { Text("远端 CLI") }
                                 )
                                 androidx.compose.material3.FilterChip(
@@ -6621,7 +6654,12 @@ private fun SettingsScreen(
                                     label = { Text("模型 API") }
                                 )
                             }
-                            if (jarvisUsesApi) dev.remote.terminal.jarvis.ui.JarvisModelApiSettings(store)
+                            if (jarvisUsesApi) {
+                                dev.remote.terminal.jarvis.ui.JarvisModelApiSettings(store) { dirty, busy ->
+                                    apiDraftDirty = dirty
+                                    apiFormBusy = busy
+                                }
+                            }
                             if (!jarvisUsesApi) {
                                 val selectedHostLabel = hosts.firstOrNull { it.id == jarvisTargetHostId }?.name ?: "自动/当前主机"
                                 val selectedAgentLabel = agents.firstOrNull { it.command == jarvisTargetAgentCmd }?.name ?: "自动/当前开发者"
