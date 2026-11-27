@@ -199,6 +199,16 @@ class DesktopUIEnhancementsTest(unittest.TestCase):
             mod.session_display_name({"directory_name": "proj", "agent_name": "Codex", "display_name": "Fix headers"}),
             "Fix headers · proj · Codex",
         )
+        self.assertEqual(
+            mod.session_display_name({"directory_name": "proj", "agent_name": "Codex",
+                                      "display_name": "Fix headers · proj · Codex"}),
+            "Fix headers · proj · Codex",
+        )
+        self.assertEqual(
+            mod.session_workspace_label({"directory_name": "proj", "agent_name": "Codex",
+                                         "display_name": "Fix headers · proj · Codex"}),
+            "Fix headers · proj",
+        )
         app = mod.App()
         try:
             app.persist = lambda: None

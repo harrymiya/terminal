@@ -86,6 +86,12 @@ def session_display_name(item, agent=None):
     default_names = (f"{agent_name} · {workspace_name}", f"{workspace_name} · {agent_name}")
     if not current or current in default_names:
         return f"{agent_name} · {workspace_name}"
+    # Sync payloads may already contain the fully formatted header title. Keep
+    # formatting idempotent so a poll cannot persist another workspace/agent
+    # suffix onto an Agent generated title.
+    suffix = f" · {workspace_name} · {agent_name}"
+    if current.endswith(suffix):
+        return current
     return f"{current} · {workspace_name} · {agent_name}"
 
 
@@ -99,6 +105,9 @@ def session_workspace_label(item, agent=None):
         return current or workspace_name
     if current in (None, "", f"{agent_name} · {workspace_name}", f"{workspace_name} · {agent_name}"):
         return workspace_name
+    suffix = f" · {workspace_name} · {agent_name}"
+    if current.endswith(suffix):
+        return current[:-len(suffix)] + f" · {workspace_name}"
     return f"{current} · {workspace_name}"
 
 
