@@ -8,6 +8,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.media.AudioAttributes
+import android.media.AudioDeviceInfo
 import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.os.Build
@@ -78,11 +79,28 @@ class BluetoothScoManager(private val context: Context) : AudioChannelManager {
     private fun checkInitialHeadsetState() {
         try {
             val adapter = BluetoothAdapter.getDefaultAdapter()
-            if (adapter != null && adapter.isEnabled) {
-                isHeadsetConnected = adapter.getProfileConnectionState(BluetoothProfile.HEADSET) == BluetoothProfile.STATE_CONNECTED
-            }
+            val profileConnected = adapter != null && adapter.isEnabled &&
+                adapter.getProfileConnectionState(BluetoothProfile.HEADSET) == BluetoothProfile.STATE_CONNECTED
+            val audioDevicePresent = findBluetoothInputDevice() != null
+            isHeadsetConnected = profileConnected || audioDevicePresent
         } catch (e: Exception) {
+            isHeadsetConnected = findBluetoothInputDevice() != null
             Log.w(TAG, "Unable to check bluetooth headset status: ${e.message}")
+        }
+    }
+
+    /**
+     * 查找当前已连接的蓝牙耳机麦克风设备（优先 BLE Headset，其次 BT SCO）。
+     */
+    fun findBluetoothInputDevice(): AudioDeviceInfo? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return null
+        return try {
+            val inputs = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS)
+            inputs.firstOrNull { it.type == AudioDeviceInfo.TYPE_BLE_HEADSET }
+                ?: inputs.firstOrNull { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to query audio input devices: ${e.message}")
+            null
         }
     }
 
@@ -99,10 +117,33 @@ class BluetoothScoManager(private val context: Context) : AudioChannelManager {
 
     override fun startChannel() {
         try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val commDevices = audioManager.availableCommunicationDevices
+                val btComm = commDevices.firstOrNull { it.type == AudioDeviceInfo.TYPE_BLE_HEADSET }
+                    ?: commDevices.firstOrNull { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO }
+                if (btComm != null) {
+                    if (audioManager.mode != AudioManager.MODE_IN_COMMUNICATION) {
+                        audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+                    }
+                    val ok = audioManager.setCommunicationDevice(btComm)
+                    Log.i(TAG, "setCommunicationDevice(type=${btComm.type}, name=${btComm.productName}) -> $ok")
+                    if (ok) {
+                        isScoActive = true
+                        notifyListeners(true)
+                        return
+                    }
+                }
+            }
+            @Suppress("DEPRECATION")
             if (audioManager.isBluetoothScoAvailableOffCall) {
+                if (audioManager.mode != AudioManager.MODE_IN_COMMUNICATION) {
+                    audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+                }
+                @Suppress("DEPRECATION")
                 audioManager.startBluetoothSco()
+                @Suppress("DEPRECATION")
                 audioManager.isBluetoothScoOn = true
-                Log.i(TAG, "Requested Bluetooth SCO start")
+                Log.i(TAG, "Requested legacy Bluetooth SCO start")
             } else {
                 Log.w(TAG, "Bluetooth SCO is not available off call on this device")
             }
@@ -113,13 +154,24 @@ class BluetoothScoManager(private val context: Context) : AudioChannelManager {
 
     override fun stopChannel() {
         try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                audioManager.clearCommunicationDevice()
+            }
+            @Suppress("DEPRECATION")
             if (audioManager.isBluetoothScoOn) {
+                @Suppress("DEPRECATION")
                 audioManager.isBluetoothScoOn = false
+                @Suppress("DEPRECATION")
                 audioManager.stopBluetoothSco()
+            }
+            if (audioManager.mode != AudioManager.MODE_NORMAL) {
+                audioManager.mode = AudioManager.MODE_NORMAL
+            }
+            if (isScoActive) {
                 isScoActive = false
-                Log.i(TAG, "Stopped Bluetooth SCO")
                 notifyListeners(false)
             }
+            Log.i(TAG, "Stopped Bluetooth mic channel (restored MODE_NORMAL)")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to stop Bluetooth SCO: ${e.message}")
         }

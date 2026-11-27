@@ -33,6 +33,7 @@ object JarvisToolRegistry {
     var deleteWorkspaceHandler: ((path: String, hostId: String?) -> Boolean)? = null
     var vibrateHandler: ((durationMs: Long?) -> Unit)? = null
     var deviceStateProvider: (() -> JSONObject)? = null
+    var navigateScreenHandler: ((screen: String) -> Boolean)? = null
 
     init {
         registerBuiltinMcpTools()
@@ -418,6 +419,23 @@ object JarvisToolRegistry {
                     content = state.toString(2),
                     voiceSummary = "当前手机电量为 ${state.optInt("battery_level", -1)}%。"
                 )
+            }
+        })
+
+        // 20. navigate_screen
+        register(object : JarvisMcpTool {
+            override val definition = McpToolDefinition(
+                name = "navigate_screen",
+                description = "切换 Remote Dev 手机端页面（home / terminal / settings / manage / agents / logs）。"
+            )
+            override suspend fun execute(arguments: JSONObject): McpToolResult {
+                val screen = arguments.optString("screen", "home").trim().lowercase()
+                val ok = navigateScreenHandler?.invoke(screen) ?: false
+                return if (ok) {
+                    McpToolResult(content = "Navigated to $screen", voiceSummary = "已为您跳转至 $screen 页面。")
+                } else {
+                    McpToolResult(isError = true, content = "Unknown or unavailable screen: $screen", voiceSummary = "无法跳转至该页面。")
+                }
             }
         })
     }

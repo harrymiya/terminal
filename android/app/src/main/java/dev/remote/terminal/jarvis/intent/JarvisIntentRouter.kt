@@ -124,14 +124,17 @@ class JarvisIntentRouter(
         Log.d(TAG, "Resolving intent for input: \"$rawText\"")
 
         val wakePattern = buildWakePattern()
-        val pureWakeRegex = Regex("""^(?:$wakePattern)[，,、\s!！?？.。]*${'$'}""", RegexOption.IGNORE_CASE)
+        val pureWakeRegex = Regex(
+            """^(?:(?:喂|嘿|嗨|你好|请问|呼叫|胡教|胡作|叫一声|叫下|叫)\s*)*(?:$wakePattern)[，,、\s!！?？.。]*${'$'}""",
+            RegexOption.IGNORE_CASE
+        )
         if (pureWakeRegex.matches(rawText)) {
             Log.i(TAG, "Pure wake word matched for \"${wakeWordProvider()}\"")
             return@withContext JarvisAction.DirectReply("我在，请讲。")
         }
 
         // 去除指令句首的唤醒词前缀（如："老六，查看状态" -> "查看状态"）
-        val wakeWordPrefix = Regex("""^(?:$wakePattern)[，,、\s:：]*""", RegexOption.IGNORE_CASE)
+        val wakeWordPrefix = Regex("""^(?:(?:喂|嘿|嗨|呼叫|胡教|胡作|叫)\s*)*(?:$wakePattern)[，,、\s:：]*""", RegexOption.IGNORE_CASE)
         val cleanText = rawText.replace(wakeWordPrefix, "").trim().ifBlank { rawText }
 
         if (GreetingRegex.matches(cleanText)) {
@@ -142,7 +145,7 @@ class JarvisIntentRouter(
         // 1. Tier-1 本地 0-Token 拦截
         if (ConfirmRegex.matches(cleanText)) {
             Log.i(TAG, "Tier-1 matched: Confirm / Enter (0 Token)")
-            return@withContext JarvisAction.InjectKeystroke("\n", "好的，已确认执行。")
+            return@withContext JarvisAction.InjectKeystroke("\r", "好的，已确认执行。")
         }
 
         if (CancelRegex.matches(cleanText)) {

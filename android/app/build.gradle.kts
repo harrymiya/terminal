@@ -12,8 +12,11 @@ android {
         applicationId = "dev.remote.terminal"
         minSdk = 26
         targetSdk = 35
-        versionCode = 92
-        versionName = "1.1.80"
+        versionCode = 96
+        versionName = "1.1.84"
+        ndk {
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+        }
     }
 
     compileOptions {
@@ -22,10 +25,14 @@ android {
     }
     kotlinOptions { jvmTarget = "17" }
     buildFeatures { compose = true; buildConfig = true }
+    androidResources {
+        noCompress += "onnx"
+    }
     sourceSets.getByName("main").assets.srcDir(rootProject.projectDir.resolve("../assets"))
 }
 
 dependencies {
+    implementation(files("libs/sherpa-onnx.aar"))
     implementation(platform("androidx.compose:compose-bom:2025.06.01"))
     implementation("androidx.activity:activity-compose:1.10.1")
     implementation("androidx.core:core-ktx:1.16.0")

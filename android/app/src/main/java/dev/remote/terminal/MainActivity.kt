@@ -442,6 +442,13 @@ private fun RemoteTerminalApp(store: LocalStore) {
         AutoConfirmEngine.globalEnabled = autoEnterEnabled
         AutoConfirmEngine.globalDelaySeconds = autoEnterDelaySeconds
 
+        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.storeProvider = { store }
+        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.hostsProvider = { hosts.toList() }
+        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.agentsProvider = { agents.toList() }
+        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.selectedHostIdProvider = { selectedHostId }
+        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.selectedDirectoryProvider = {
+            hosts.firstOrNull { it.id == selectedHostId }?.directories?.firstOrNull()?.path
+        }
         dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.init(appContext)
         dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.enabled = store.loadJarvisEnabled()
         dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.wakeWord = store.loadJarvisWakeWord()
@@ -1354,14 +1361,16 @@ private fun RemoteTerminalApp(store: LocalStore) {
             }
 
             dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.openTerminalHandler = { hostId, wsPath, cmd, wsName ->
-                val targetHost = (if (hostId != null) hosts.firstOrNull { it.id == hostId } else null)
+                val targetHost = (if (hostId != null) hosts.firstOrNull { it.id == hostId || it.name.equals(hostId, true) } else null)
                     ?: hosts.firstOrNull { it.id == selectedHostId } ?: hosts.firstOrNull()
                 if (targetHost != null) {
                     val targetDir = targetHost.directories.firstOrNull {
-                        (wsPath != null && it.path == wsPath) || (wsName != null && it.name.equals(wsName, true))
+                        (wsPath != null && (it.path == wsPath || it.path.contains(wsPath, true))) ||
+                            (wsName != null && (it.name.equals(wsName, true) || it.name.contains(wsName, true)))
                     } ?: targetHost.directories.firstOrNull()
-                    val targetAgent = (if (cmd != null) agents.firstOrNull { it.command == cmd } else null)
-                        ?: agents.firstOrNull { it.id == selectedAgentId } ?: agents.firstOrNull()
+                    val targetAgent = (if (cmd != null) agents.firstOrNull {
+                        it.command.equals(cmd, true) || it.name.equals(cmd, true) || it.name.contains(cmd, true)
+                    } else null) ?: agents.firstOrNull { it.id == selectedAgentId } ?: agents.firstOrNull()
                     if (targetDir != null && targetAgent != null) {
                         openTask(targetHost, targetDir, targetAgent)
                         true
@@ -1413,7 +1422,16 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 val ctrl = target?.let { dev.remote.terminal.ssh.TerminalConnectionRegistry.get(it.task.id) }
                     ?: dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.activeTerminalController
                 if (ctrl != null) {
-                    ctrl.send(if (pressEnter && !text.endsWith("\n")) "$text\n" else text)
+                    val cleanText = text.trimEnd('\r', '\n')
+                    val outgoing = target?.buffer?.pasteSequence(cleanText) ?: cleanText
+                    if (outgoing.isNotEmpty()) {
+                        ctrl.send(outgoing)
+                    }
+                    if (pressEnter) {
+                        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                            ctrl.send("\r")
+                        }, 80L)
+                    }
                     true
                 } else false
             }
@@ -1496,6 +1514,22 @@ private fun RemoteTerminalApp(store: LocalStore) {
                     put("sessions_count", sessions.size)
                     put("tiled_mode", tiledMode)
                 }
+            }
+
+            dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.navigateScreenHandler = { screen ->
+                val nextRoute = when (screen.trim().lowercase()) {
+                    "home", "主页" -> AppRoute.HOME
+                    "terminal", "终端" -> if (sessions.isNotEmpty()) AppRoute.TERMINAL else null
+                    "settings", "设置" -> AppRoute.SETTINGS
+                    "manage", "管理", "工作区", "主机" -> AppRoute.MANAGE
+                    "agents", "开发者" -> AppRoute.AGENTS
+                    "logs", "history", "历史", "日志" -> AppRoute.LOGS
+                    else -> null
+                }
+                if (nextRoute != null) {
+                    route = nextRoute
+                    true
+                } else false
             }
         }
 

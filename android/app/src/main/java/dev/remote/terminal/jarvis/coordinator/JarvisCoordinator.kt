@@ -43,6 +43,7 @@ object JarvisCoordinator : VoicePerceptorCallback {
     private var intentRouter: JarvisIntentRouter? = null
     private var perceptor: VoicePerceptor? = null
     private var listeningTimeoutJob: kotlinx.coroutines.Job? = null
+    private var chatJob: kotlinx.coroutines.Job? = null
 
     @Volatile
     private var conversationAwakeUntilMs: Long = 0L
@@ -68,6 +69,11 @@ object JarvisCoordinator : VoicePerceptorCallback {
     var agentListProvider: () -> List<String> = { emptyList() }
     var lastTerminalOutputProvider: () -> String? = { null }
     var onWorkspaceSwitchRequested: ((String) -> Unit)? = null
+    var storeProvider: (() -> dev.remote.terminal.data.LocalStore)? = null
+    var hostsProvider: (() -> List<dev.remote.terminal.data.HostProfile>)? = null
+    var agentsProvider: (() -> List<dev.remote.terminal.data.AgentPreset>)? = null
+    var selectedHostIdProvider: () -> String? = { null }
+    var selectedDirectoryProvider: () -> String? = { null }
 
     private val stateListeners = CopyOnWriteArrayList<(JarvisState) -> Unit>()
 
@@ -110,6 +116,8 @@ object JarvisCoordinator : VoicePerceptorCallback {
 
         val p = JarvisPerceptorFactory.createPerceptor(ctx, config)
         if (p is OfflineJarvisPerceptor) {
+            p.scoManager = scoManager
+            p.preferBluetoothMicProvider = { config.bluetoothScoEnabled }
             p.wakeWordProvider = { config.wakeWord }
             p.onDiagnosticChanged = { status ->
                 _diagnosticStatus.value = status
@@ -284,7 +292,8 @@ object JarvisCoordinator : VoicePerceptorCallback {
             }
             is JarvisAction.ChatWithDeveloper -> {
                 updateState(JarvisState.EXECUTING)
-                scope.launch {
+                chatJob?.cancel()
+                chatJob = scope.launch {
                     handleChatWithDeveloper(action)
                 }
             }
@@ -308,13 +317,20 @@ object JarvisCoordinator : VoicePerceptorCallback {
             onFinished?.invoke()
             return
         }
-        currentSpeaker.speak(message) {
-            scope.launch {
-                updateState(if (config.enabled) JarvisState.STANDBY else JarvisState.DISABLED)
-                onFinished?.invoke()
-                kotlinx.coroutines.delay(2500)
-                if (_state.value == JarvisState.STANDBY) {
-                    _subtitle.value = ""
+        scope.launch {
+            val wasSco = scoManager?.isScoActive == true
+            scoManager?.stopChannel()
+            if (wasSco) {
+                kotlinx.coroutines.delay(180)
+            }
+            currentSpeaker.speak(message) {
+                scope.launch {
+                    updateState(if (config.enabled) JarvisState.STANDBY else JarvisState.DISABLED)
+                    onFinished?.invoke()
+                    kotlinx.coroutines.delay(2500)
+                    if (_state.value == JarvisState.STANDBY) {
+                        _subtitle.value = ""
+                    }
                 }
             }
         }
@@ -332,84 +348,77 @@ object JarvisCoordinator : VoicePerceptorCallback {
     }
 
     /**
-     * 借力开发者的智能：将用户的自然语言问题发送给终端运行的 AI 开发者 (如 Claude/Gemini/Codex)，
-     * 并异步监听开发者的输出，整理后通过蓝牙耳机耳语复命。
+     * 透明传话桥梁：优先直接在后台通过 SSH 静默连向目标主机 + 目标开发者，
+     * 不依赖前台是否已打开终端页；拿到回复后不加多余前缀，直接原文播报给用户并保持对话窗口。
      */
     private suspend fun handleChatWithDeveloper(action: JarvisAction.ChatWithDeveloper) {
-        val appState = dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.appStateProvider?.invoke()
-        val sessions = appState?.optJSONArray("sessions")
-        var targetSessionId: String? = null
-        var targetAgentName = action.agentName ?: "当前开发者"
+        val store = storeProvider?.invoke()
+        val hosts = hostsProvider?.invoke().orEmpty()
+        val agents = agentsProvider?.invoke().orEmpty()
 
-        if (action.agentName != null && sessions != null) {
-            val query = action.agentName.trim().lowercase()
-            for (i in 0 until sessions.length()) {
-                val s = sessions.getJSONObject(i)
-                val agentName = s.optString("agent_name", "").lowercase()
-                val dispName = s.optString("display_name", "").lowercase()
-                val dirName = s.optString("directory_name", "").lowercase()
-                if (agentName.contains(query) || dispName.contains(query) || dirName.contains(query)) {
-                    targetSessionId = s.optString("id")
-                    targetAgentName = s.optString("agent_name", action.agentName)
-                    dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.focusTerminalHandler?.invoke(targetSessionId, i)
-                    break
+        val targetHost = hosts.firstOrNull { config.targetHostId.isNotBlank() && it.id == config.targetHostId }
+            ?: hosts.firstOrNull { it.id == selectedHostIdProvider() }
+            ?: hosts.firstOrNull()
+
+        val targetAgent = when {
+            !action.agentName.isNullOrBlank() -> {
+                val q = action.agentName.trim().lowercase()
+                agents.firstOrNull {
+                    it.name.lowercase().contains(q) || it.command.lowercase().contains(q)
                 }
             }
-        } else if (sessions != null && (config.targetHostId.isNotBlank() || config.targetAgentCommand.isNotBlank())) {
-            val wantHost = config.targetHostId
-            val wantCmd = config.targetAgentCommand
-            // First try exact match on both host and agent command
-            var matchedIndex = -1
-            for (i in 0 until sessions.length()) {
-                val s = sessions.getJSONObject(i)
-                val hostMatch = wantHost.isBlank() || s.optString("host_id") == wantHost
-                val cmdMatch = wantCmd.isBlank() || s.optString("agent_command") == wantCmd
-                if (hostMatch && cmdMatch) {
-                    matchedIndex = i
-                    targetSessionId = s.optString("id")
-                    targetAgentName = s.optString("agent_name", targetAgentName)
-                    break
-                }
-            }
-            // Fallback to agent command match across hosts if exact host+agent session isn't open
-            if (matchedIndex < 0 && wantCmd.isNotBlank()) {
-                for (i in 0 until sessions.length()) {
-                    val s = sessions.getJSONObject(i)
-                    if (s.optString("agent_command") == wantCmd) {
-                        matchedIndex = i
-                        targetSessionId = s.optString("id")
-                        targetAgentName = s.optString("agent_name", targetAgentName)
-                        break
-                    }
-                }
-            }
-            if (matchedIndex >= 0 && targetSessionId != null) {
-                dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.focusTerminalHandler?.invoke(targetSessionId, matchedIndex)
-            }
-        }
+            else -> null
+        } ?: agents.firstOrNull { config.targetAgentCommand.isNotBlank() && it.command == config.targetAgentCommand }
+            ?: agents.firstOrNull()
 
-        val baseline = dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.readScreenHandler?.invoke(targetSessionId, 10).orEmpty()
-        val sent = dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.sendTextHandler?.invoke(action.message, targetSessionId, true)
-            ?: (activeTerminalController?.let { it.send("${action.message}\n"); true } ?: false)
+        val targetDirectory = currentWorkspacePath?.takeIf { it.isNotBlank() }
+            ?: selectedDirectoryProvider()?.takeIf { it.isNotBlank() }
+            ?: targetHost?.directories?.firstOrNull()?.path
 
-        if (!sent) {
-            earconManager.playAlertChime()
-            speakWithState("先生，当前暂无已连接的开发者终端，您可以先连接主机，或让我切换工作区。")
+        if (store != null && targetHost != null && targetAgent != null) {
+            _subtitle.value = "${targetAgent.name} 思考中..."
+            val result = BackgroundDeveloperBridge.askDeveloper(
+                host = targetHost,
+                agent = targetAgent,
+                directory = targetDirectory,
+                userPrompt = action.message,
+                store = store
+            )
+            result.onSuccess { reply ->
+                conversationAwakeUntilMs = SystemClock.elapsedRealtime() + CONVERSATION_WINDOW_MS
+                earconManager.playActionSuccessChime()
+                speakWithState(reply) {
+                    openFollowUpListeningWindow()
+                }
+            }.onFailure { err ->
+                earconManager.playAlertChime()
+                speakWithState(err.message ?: "开发者暂时无响应。")
+            }
             return
         }
 
-        val ack = action.voiceReply ?: "好的先生，正在与 $targetAgentName 沟通。"
-        speakWithState(ack)
-        earconManager.playThinkingChime()
+        // 兜底：若用户尚未在设置中配置可用主机/开发者，尝试透传到当前打开的终端会话
+        val baseline = dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.readScreenHandler?.invoke(null, 10).orEmpty()
+        val sent = dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.sendTextHandler?.invoke(action.message, null, true)
+            ?: (activeTerminalController?.let {
+                it.send(action.message.trimEnd('\r', '\n'))
+                kotlinx.coroutines.delay(80)
+                it.send("\r")
+                true
+            } ?: false)
+
+        if (!sent) {
+            earconManager.playAlertChime()
+            speakWithState("请先在主页添加主机与开发者，再开始对话。")
+            return
+        }
 
         var replyFound = false
         var lastRead = baseline
         var unchangedCount = 0
-        val maxWaitSeconds = 18
-
-        for (sec in 1..maxWaitSeconds) {
+        for (sec in 1..15) {
             kotlinx.coroutines.delay(1000)
-            val currentTail = dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.readScreenHandler?.invoke(targetSessionId, 10).orEmpty()
+            val currentTail = dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.readScreenHandler?.invoke(null, 10).orEmpty()
             if (currentTail != lastRead && currentTail.isNotBlank()) {
                 lastRead = currentTail
                 unchangedCount = 0
@@ -422,15 +431,14 @@ object JarvisCoordinator : VoicePerceptorCallback {
             }
         }
 
-        if (replyFound) {
+        if (replyFound || (lastRead != baseline && lastRead.isNotBlank())) {
+            conversationAwakeUntilMs = SystemClock.elapsedRealtime() + CONVERSATION_WINDOW_MS
             earconManager.playActionSuccessChime()
-            val cleanReply = cleanTerminalOutput(lastRead)
-            speakWithState("先生，$targetAgentName 回复：$cleanReply")
-        } else if (lastRead != baseline && lastRead.isNotBlank()) {
-            val cleanReply = cleanTerminalOutput(lastRead)
-            speakWithState("先生，$targetAgentName 最新输出：$cleanReply")
+            speakWithState(cleanTerminalOutput(lastRead)) {
+                openFollowUpListeningWindow()
+            }
         } else {
-            speakWithState("先生，$targetAgentName 仍在处理中。稍后有需要授权或任务完成时，我会向您汇报。")
+            speakWithState("终端仍在处理中。")
         }
     }
 
