@@ -125,7 +125,7 @@ class JarvisIntentRouter(
 
         val wakePattern = buildWakePattern()
         val pureWakeRegex = Regex(
-            """^(?:(?:喂|嘿|嗨|你好|请问|呼叫|胡教|胡作|叫一声|叫下|叫)\s*)*(?:$wakePattern)[，,、\s!！?？.。]*${'$'}""",
+            """^(?:(?:喂|嘿|嗨|你好|哈喽|请问|呼叫|胡教|胡作|网络|叫一声|叫下|叫)\s*)*(?:$wakePattern)[，,、\s!！?？.。]*${'$'}""",
             RegexOption.IGNORE_CASE
         )
         if (pureWakeRegex.matches(rawText)) {
@@ -134,7 +134,7 @@ class JarvisIntentRouter(
         }
 
         // 去除指令句首的唤醒词前缀（如："老六，查看状态" -> "查看状态"）
-        val wakeWordPrefix = Regex("""^(?:(?:喂|嘿|嗨|呼叫|胡教|胡作|叫)\s*)*(?:$wakePattern)[，,、\s:：]*""", RegexOption.IGNORE_CASE)
+        val wakeWordPrefix = Regex("""^(?:(?:喂|嘿|嗨|哈喽|呼叫|胡教|胡作|网络|叫)\s*)*(?:$wakePattern)[，,、\s:：]*""", RegexOption.IGNORE_CASE)
         val cleanText = rawText.replace(wakeWordPrefix, "").trim().ifBlank { rawText }
 
         if (GreetingRegex.matches(cleanText)) {

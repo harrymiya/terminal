@@ -268,8 +268,11 @@ ${stateLine}规则：直接用1到3句精简中文口语回答（不要输出思
         if (agyBin != null) {
             val inv = if (agyBin.matches(Regex("[A-Za-z0-9_]+"))) agyBin else shellQuote(agyBin)
             val resumeFlag = if (!existingConvId.isNullOrBlank()) "-r ${shellQuote(existingConvId)} " else ""
-            return "if type $inv >/dev/null 2>&1; then _cli=$inv; else _cli=agy; fi; " +
-                "\$_cli --effort low $resumeFlag-p $quotedPrompt --output-format json"
+            val agyArgs = "--effort low $resumeFlag-p $quotedPrompt --output-format json"
+            // 直接将 $inv 放在命令首位以保证 bash 原位展开 ~/.bashrc 中的 alias（不可存入 $_cli 变量）
+            return "if type $inv >/dev/null 2>&1; then $inv $agyArgs; " +
+                "elif [ -x \"\$HOME/.local/bin/$agyBin\" ]; then \"\$HOME/.local/bin/$agyBin\" $agyArgs; " +
+                "else agy $agyArgs; fi"
         }
 
         val codexBin = codexExecutable(command)
@@ -359,7 +362,8 @@ ${stateLine}规则：直接用1到3句精简中文口语回答（不要输出思
 
     private fun buildRemoteShellCommand(directory: String?, command: String): String {
         val cd = if (directory.isNullOrBlank()) "" else "cd -- ${shellQuote(directory)} && "
-        return cd + "\"${'$'}{SHELL:-/bin/bash}\" -l -i -c ${shellQuote(command)}"
+        val pathExport = "export PATH=\"\$HOME/.local/bin:\$HOME/.local/nodejs/bin:\$HOME/.npm-global/bin:\$HOME/bin:/usr/local/bin:\$PATH\"; "
+        return cd + "\"${'$'}{SHELL:-/bin/bash}\" -l -i -c ${shellQuote(pathExport + command)}"
     }
 
     private fun shellQuote(value: String): String = "'" + value.replace("'", "'\\''") + "'"
