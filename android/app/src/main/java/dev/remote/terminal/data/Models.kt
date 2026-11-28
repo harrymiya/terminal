@@ -605,6 +605,32 @@ class LocalStore(context: Context) {
 
     fun clearJarvisModelApiKey() = preferences.edit().remove("jarvis_model_api_key").apply()
 
+    fun loadJarvisCloudAsrEnabled(): Boolean = preferences.getBoolean("jarvis_cloud_asr_enabled", false)
+    fun saveJarvisCloudAsrEnabled(enabled: Boolean) = preferences.edit().putBoolean("jarvis_cloud_asr_enabled", enabled).apply()
+
+    fun loadJarvisCloudAsrUrl(): String =
+        preferences.getString("jarvis_cloud_asr_url", null) ?: "https://api.siliconflow.cn"
+
+    fun loadJarvisCloudAsrModel(): String =
+        preferences.getString("jarvis_cloud_asr_model", null) ?: "FunAudioLLM/SenseVoiceSmall"
+
+    fun hasJarvisCloudAsrKey(): Boolean = preferences.contains("jarvis_cloud_asr_key")
+
+    fun loadJarvisCloudAsrKey(): String =
+        vault.decrypt(preferences.getString("jarvis_cloud_asr_key", null))
+
+    fun saveJarvisCloudAsr(url: String, model: String, key: String) {
+        val editor = preferences.edit()
+            .putString("jarvis_cloud_asr_url", url.trim())
+            .putString("jarvis_cloud_asr_model", model.trim())
+        if (key.isNotBlank()) {
+            editor.putString("jarvis_cloud_asr_key", vault.encrypt(key.trim()))
+        }
+        check(editor.commit()) { "Could not persist cloud ASR settings" }
+    }
+
+    fun clearJarvisCloudAsrKey() = preferences.edit().remove("jarvis_cloud_asr_key").apply()
+
     fun saveTiledMode(tiled: Boolean) {
         preferences.edit().putBoolean("tiled_mode", tiled).apply()
     }

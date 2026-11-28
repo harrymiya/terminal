@@ -19,19 +19,19 @@ class JarvisIntentRouter(
 
         // 本地极速意图匹配正则 (Tier-1: 0 Token)
         private val ConfirmRegex = Regex(
-            """(?i)^\s*(?:允许|确认|同意|继续|执行|跑吧|回车|好的|可以|对|嗯|好|行|确定|approve|yes|confirm|proceed|ok|enter)\s*[:?？!！.。]*$"""
+            """(?i)^\s*(?:再)?(?:允许|确认|同意|继续|执行|跑吧|回车|好的|可以|对|嗯|好|行|确定|批准|就这么干|没问题|按回车|approve|yes|confirm|proceed|ok|enter)(?:一次|吧|啊)?\s*[:?？!！.。]*$"""
         )
 
         private val CancelRegex = Regex(
-            """(?i)^\s*(?:取消|停止|中止|算了|别动|停|住手|别执行|cancel|stop|abort|no|quit)\s*[:?？!！.。]*$"""
+            """(?i)^\s*(?:取消|停止|中止|算了|别动|停|住手|别执行|别跑了|停下来|cancel|stop|abort|no|quit)\s*[:?？!！.。]*$"""
         )
 
         private val SwitchWorkspaceRegex = Regex(
-            """(?i)^\s*(?:切换到|切到|换到|打开工作区|切到工作区)\s*([a-zA-Z0-9_\u4e00-\u9fa5\-\.]+)\s*[。！!]*$"""
+            """(?i)^\s*(?:请|帮我|麻烦)?\s*(?:切换到|切到|换到|打开|进入)\s*(?:工作区\s*)?([a-zA-Z0-9_\u4e00-\u9fa5\-\.]+)(?:\s*工作区)?(?:\s*一下|\s*吧)?\s*[。！!]*$"""
         )
 
         private val StatusQueryRegex = Regex(
-            """(?i)^\s*(?:现在|目前)?(?:什么情况|进度如何|进度怎么样|好了吗|完成了吗|当前状态|状态怎么样|status)[?？!！.。]*$"""
+            """(?i)^\s*(?:现在|目前)?(?:什么情况|进度如何|进度怎么样|好了吗|完成了吗|跑完了吗|跑完没有|干得怎么样|干得咋样|跑得咋样|跑得怎么样|还在跑吗|当前状态|状态怎么样|看看进展|status)[?？!！.。]*$"""
         )
 
         private val InstanceStatusQueryRegex = Regex(
@@ -39,11 +39,11 @@ class JarvisIntentRouter(
         )
 
         private val ReadScreenRegex = Regex(
-            """(?i)(?:读屏幕|看屏幕|念屏幕|屏幕内容|显示什么|输出什么)"""
+            """(?i)(?:读屏幕|看屏幕|念屏幕|屏幕内容|显示什么|输出什么|屏幕上写了啥|看看终端写了啥|读一下终端|念一下输出)"""
         )
 
         private val ReconnectRegex = Regex(
-            """(?i)(?:重连|重新连接|断线重连)"""
+            """(?i)(?:重连|重新连接|断线重连|重新连上)"""
         )
 
         private val CloseInstancePrefixRegex = Regex(
@@ -104,6 +104,31 @@ class JarvisIntentRouter(
 
         private val GreetingRegex = Regex(
             """(?i)^\s*(?:在吗|你在吗|在不在|你好|您好|听得到吗|听得见吗|能听见吗|能听到吗|早上好|晚上好|喂)[?？!！.。]*${'$'}"""
+        )
+
+        // 监工 / 看着干活相关正则 (Tier-1: 0 Token)
+        private val StartWatchRegex = Regex(
+            """(?i)(?:(?:帮我|给我|替我)?(?:看着|盯着|盯一下|盯着点|看着点|守着|看着干活|开始监工|帮我监工|盯紧|监工)|(?:看着|盯着|守着|监工).*(?:干活|工作|任务|代码|工作区))"""
+        )
+        private val StopWatchRegex = Regex(
+            """(?i)(?:(?:不用|别|停止|取消)(?:看着|盯着|守着|监工|观察|盯了|看了)|停止监工|结束监工|不用盯了|不用守着了)"""
+        )
+        private val WatchStatusRegex = Regex(
+            """(?i)(?:监工状态|看着怎么样|看的怎么样|盯得怎么样|盯得如何|监工进度)"""
+        )
+
+        // 开发者选择与工作区任务派发相关正则 (Tier-1: 0 Token)
+        private val DispatchWithDeveloperRegex = Regex(
+            """(?i)^\s*(?:请|帮我|麻烦)?\s*(?:选择开发者|选开发者|用开发者|让开发者|用|让)\s*([a-zA-Z0-9_\u4e00-\u9fa5\-\.]+)\s*(?:打开|切到|进入)?\s*(?:工作区)?\s*([a-zA-Z0-9_\u4e00-\u9fa5\-\./]+)?\s*(?:派发任务|执行任务|跑任务|执行|做|处理)\s*[:：]?\s*(.+)$"""
+        )
+        private val OpenWorkspaceWithDeveloperRegex = Regex(
+            """(?i)^\s*(?:请|帮我|麻烦)?\s*(?:选择开发者|选开发者|用开发者|让开发者|用|让)\s*([a-zA-Z0-9_\u4e00-\u9fa5\-\.]+)\s*(?:打开|切到|进入)\s*(?:工作区)?\s*([a-zA-Z0-9_\u4e00-\u9fa5\-\./]+)\s*[。！!]*$"""
+        )
+        private val WorkspaceDispatchRegex = Regex(
+            """(?i)^\s*(?:请|帮我|麻烦)?\s*(?:在|进入|打开)\s*(?:工作区)?\s*([a-zA-Z0-9_\u4e00-\u9fa5\-\./]+)\s*(?:用|让|选择开发者)?\s*([a-zA-Z0-9_\u4e00-\u9fa5\-\.]+)?\s*(?:派发任务|执行任务)\s*[:：]?\s*(.+)$"""
+        )
+        private val SelectDeveloperOnlyRegex = Regex(
+            """(?i)^\s*(?:请|帮我|麻烦)?\s*(?:选择开发者|选开发者|切换开发者|换开发者|设为开发者)\s*([a-zA-Z0-9_\u4e00-\u9fa5\-\.]+)\s*[。！!]*$"""
         )
 
         private val DIGIT_MAP = mapOf(
@@ -167,7 +192,7 @@ class JarvisIntentRouter(
     }
 
     override suspend fun resolveIntent(text: String, context: JarvisContext): JarvisAction = withContext(Dispatchers.Default) {
-        val rawText = text.trim()
+        val rawText = dev.remote.terminal.jarvis.perception.JarvisSpeechCorrector.correct(text, isFinal = true).correctedText
         if (rawText.isBlank()) return@withContext JarvisAction.None
 
         Log.d(TAG, "Resolving intent for input: \"$rawText\"")
@@ -209,6 +234,85 @@ class JarvisIntentRouter(
 
         resolveCloseInstance(cleanText)?.let { return@withContext it }
 
+        // 监工 / 看着干活 (0 Token)
+        if (StopWatchRegex.containsMatchIn(cleanText)) {
+            Log.i(TAG, "Tier-1 matched: MCP stop_watching_task (0 Token)")
+            return@withContext JarvisAction.ExecuteTool("stop_watching_task")
+        }
+
+        if (WatchStatusRegex.containsMatchIn(cleanText)) {
+            Log.i(TAG, "Tier-1 matched: MCP get_watch_status (0 Token)")
+            return@withContext JarvisAction.ExecuteTool("get_watch_status")
+        }
+
+        if (StartWatchRegex.containsMatchIn(cleanText)) {
+            val matchedWs = context.workspaces.firstOrNull { ws ->
+                cleanText.contains(ws, ignoreCase = true)
+            }
+            val args = JSONObject()
+            if (matchedWs != null) args.put("workspace_name", matchedWs)
+            Log.i(TAG, "Tier-1 matched: MCP start_watching_task [workspace=$matchedWs] (0 Token)")
+            return@withContext JarvisAction.ExecuteTool("start_watching_task", args)
+        }
+
+        // 开发者选择与工作区任务派发 (Tier-1: 0 Token)
+        val dispatchDevMatch = DispatchWithDeveloperRegex.find(cleanText)
+        if (dispatchDevMatch != null) {
+            val agent = dispatchDevMatch.groupValues[1].trim()
+            val rawWs = dispatchDevMatch.groupValues[2].trim()
+            val matchedWs = context.workspaces.firstOrNull { ws ->
+                ws.equals(rawWs, ignoreCase = true) || ws.contains(rawWs, ignoreCase = true)
+            } ?: rawWs.takeIf { it.isNotBlank() }
+            val prompt = dispatchDevMatch.groupValues[3].trim()
+            Log.i(TAG, "Tier-1 matched: dispatch_task with agent=$agent, workspace=$matchedWs")
+            val args = JSONObject().apply {
+                put("agent_name", agent)
+                if (matchedWs != null) put("workspace_name", matchedWs)
+                put("task_prompt", prompt)
+            }
+            return@withContext JarvisAction.ExecuteTool("dispatch_task", args)
+        }
+
+        val openWsDevMatch = OpenWorkspaceWithDeveloperRegex.find(cleanText)
+        if (openWsDevMatch != null) {
+            val agent = openWsDevMatch.groupValues[1].trim()
+            val rawWs = openWsDevMatch.groupValues[2].trim()
+            val matchedWs = context.workspaces.firstOrNull { ws ->
+                ws.equals(rawWs, ignoreCase = true) || ws.contains(rawWs, ignoreCase = true)
+            } ?: rawWs
+            Log.i(TAG, "Tier-1 matched: open_terminal with agent=$agent, workspace=$matchedWs")
+            val args = JSONObject().apply {
+                put("agent_name", agent)
+                put("workspace_name", matchedWs)
+                put("focus", true)
+            }
+            return@withContext JarvisAction.ExecuteTool("open_terminal", args)
+        }
+
+        val wsDispatchMatch = WorkspaceDispatchRegex.find(cleanText)
+        if (wsDispatchMatch != null) {
+            val rawWs = wsDispatchMatch.groupValues[1].trim()
+            val matchedWs = context.workspaces.firstOrNull { ws ->
+                ws.equals(rawWs, ignoreCase = true) || ws.contains(rawWs, ignoreCase = true)
+            } ?: rawWs
+            val agent = wsDispatchMatch.groupValues[2].trim().takeIf { it.isNotBlank() }
+            val prompt = wsDispatchMatch.groupValues[3].trim()
+            Log.i(TAG, "Tier-1 matched: dispatch_task from workspace=$matchedWs with agent=$agent")
+            val args = JSONObject().apply {
+                put("workspace_name", matchedWs)
+                if (agent != null) put("agent_name", agent)
+                put("task_prompt", prompt)
+            }
+            return@withContext JarvisAction.ExecuteTool("dispatch_task", args)
+        }
+
+        val selectDevMatch = SelectDeveloperOnlyRegex.find(cleanText)
+        if (selectDevMatch != null) {
+            val agent = selectDevMatch.groupValues[1].trim()
+            Log.i(TAG, "Tier-1 matched: select_agent=$agent")
+            return@withContext JarvisAction.ExecuteTool("select_agent", JSONObject().put("agent_name", agent))
+        }
+
         val switchMatch = SwitchWorkspaceRegex.find(cleanText)
         if (switchMatch != null) {
             val targetRaw = switchMatch.groupValues[1].trim()
@@ -217,7 +321,7 @@ class JarvisIntentRouter(
             }
             if (matchedWorkspace != null) {
                 Log.i(TAG, "Tier-1 matched: Switch Workspace to $matchedWorkspace (0 Token)")
-                val tool = if (cleanText.startsWith("打开工作区")) "open_terminal" else "focus_terminal"
+                val tool = if (cleanText.contains("打开")) "open_terminal" else "focus_terminal"
                 return@withContext JarvisAction.ExecuteTool(tool, JSONObject().put("workspace_name", matchedWorkspace))
             }
         }

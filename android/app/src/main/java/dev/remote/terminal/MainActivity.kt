@@ -6884,6 +6884,66 @@ private fun SettingsScreen(
                                     })
                                 }
 
+                                var cloudAsrEnabled by remember(store) { mutableStateOf(store.loadJarvisCloudAsrEnabled()) }
+                                var cloudAsrUrl by remember(store) { mutableStateOf(store.loadJarvisCloudAsrUrl()) }
+                                var cloudAsrModel by remember(store) { mutableStateOf(store.loadJarvisCloudAsrModel()) }
+                                var cloudAsrHasKey by remember(store) { mutableStateOf(store.hasJarvisCloudAsrKey()) }
+                                var cloudAsrKeyInput by remember { mutableStateOf("") }
+                                var cloudAsrStatus by remember { mutableStateOf("") }
+
+                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                    Column(Modifier.weight(1f)) {
+                                        Text("混合云端高精度对话识别 (Whisper / SenseVoice)", color = White, fontSize = 13.sp)
+                                        Text("唤醒继续使用端侧极速模型；唤醒后对话优先走云端热词识别，断网自动回退本地", color = Muted, fontSize = 11.sp)
+                                    }
+                                    Switch(checked = cloudAsrEnabled, onCheckedChange = {
+                                        cloudAsrEnabled = it
+                                        store.saveJarvisCloudAsrEnabled(it)
+                                    })
+                                }
+                                if (cloudAsrEnabled) {
+                                    OutlinedTextField(
+                                        value = cloudAsrUrl,
+                                        onValueChange = { cloudAsrUrl = it; cloudAsrStatus = "" },
+                                        label = { Text("ASR API Base URL (如 SiliconFlow / Groq / OpenAI)") },
+                                        singleLine = true,
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                    OutlinedTextField(
+                                        value = cloudAsrModel,
+                                        onValueChange = { cloudAsrModel = it; cloudAsrStatus = "" },
+                                        label = { Text("ASR 模型 (如 FunAudioLLM/SenseVoiceSmall / whisper-1)") },
+                                        singleLine = true,
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                    OutlinedTextField(
+                                        value = cloudAsrKeyInput,
+                                        onValueChange = { cloudAsrKeyInput = it; cloudAsrStatus = "" },
+                                        label = { Text(if (cloudAsrHasKey) "ASR API Key (已加密保存，留空不修改)" else "ASR API Key") },
+                                        singleLine = true,
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        FilledTonalButton(onClick = {
+                                            store.saveJarvisCloudAsr(cloudAsrUrl, cloudAsrModel, cloudAsrKeyInput)
+                                            if (cloudAsrKeyInput.isNotBlank()) cloudAsrHasKey = true
+                                            cloudAsrKeyInput = ""
+                                            cloudAsrStatus = "混合云端 ASR 配置已保存"
+                                        }) { Text("保存 ASR 配置") }
+                                        if (cloudAsrHasKey) {
+                                            TextButton(onClick = {
+                                                store.clearJarvisCloudAsrKey()
+                                                cloudAsrHasKey = false
+                                                cloudAsrKeyInput = ""
+                                                cloudAsrStatus = "已清除 ASR API Key"
+                                            }) { Text("清除 Key") }
+                                        }
+                                    }
+                                    if (cloudAsrStatus.isNotBlank()) {
+                                        Text(cloudAsrStatus, color = Mint, fontSize = 11.sp)
+                                    }
+                                }
+
                                 FilledTonalButton(
                                     onClick = {
                                         dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.triggerManualWake(speakTestPhrase = true)

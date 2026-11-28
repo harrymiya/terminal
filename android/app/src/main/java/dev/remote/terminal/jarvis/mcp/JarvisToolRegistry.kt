@@ -1110,6 +1110,90 @@ object JarvisToolRegistry {
                 return McpToolResult(isError = !res.ok, content = res.detail, voiceSummary = res.voiceSummary)
             }
         })
+
+        // 35. start_watching_task
+        register(object : JarvisMcpTool {
+            override val definition = McpToolDefinition(
+                name = "start_watching_task",
+                description = "启动业界最科学的低功耗、0 Token 后台任务监工机制，持续看着指定工作区/开发者干活。自动自适应休眠，任务完成或报错时主动语音提醒。",
+                inputSchema = JSONObject().apply {
+                    put("type", "object")
+                    put("properties", sessionSelectorProperties().apply {
+                        put("notify_on_completion", JSONObject().put("type", "boolean").put("description", "任务完成时是否语音通知，默认 true"))
+                        put("notify_on_error", JSONObject().put("type", "boolean").put("description", "任务出错时是否语音通知，默认 true"))
+                    })
+                }
+            )
+            override suspend fun execute(arguments: JSONObject): McpToolResult {
+                val selector = SessionSelector.fromJson(arguments)
+                val notifyComplete = arguments.optBoolean("notify_on_completion", true)
+                val notifyErr = arguments.optBoolean("notify_on_error", true)
+                val res = dev.remote.terminal.jarvis.watcher.JarvisWatchOverseer.startWatching(
+                    selector = selector,
+                    notifyOnCompletion = notifyComplete,
+                    notifyOnError = notifyErr
+                )
+                return McpToolResult(
+                    isError = !res.first,
+                    content = res.second,
+                    voiceSummary = if (res.first) "好的先生，我来看着它干活，有结果会及时向您汇报。" else res.second
+                )
+            }
+        })
+
+        // 36. stop_watching_task
+        register(object : JarvisMcpTool {
+            override val definition = McpToolDefinition(
+                name = "stop_watching_task",
+                description = "停止看着工作区干活，退出后台监工状态并释放监工资源。",
+                inputSchema = JSONObject().apply {
+                    put("type", "object")
+                    put("properties", JSONObject())
+                }
+            )
+            override suspend fun execute(arguments: JSONObject): McpToolResult {
+                val res = dev.remote.terminal.jarvis.watcher.JarvisWatchOverseer.stopWatching()
+                return McpToolResult(
+                    isError = !res.first,
+                    content = res.second,
+                    voiceSummary = "已停止监工。"
+                )
+            }
+        })
+
+        // 37. get_watch_status
+        register(object : JarvisMcpTool {
+            override val definition = McpToolDefinition(
+                name = "get_watch_status",
+                description = "获取当前后台监工状态（正在看护的工作区、已监工时长、最新终端状态、Token消耗=0）。",
+                inputSchema = JSONObject().apply {
+                    put("type", "object")
+                    put("properties", JSONObject())
+                }
+            )
+            override suspend fun execute(arguments: JSONObject): McpToolResult {
+                val status = dev.remote.terminal.jarvis.watcher.JarvisWatchOverseer.getStatus()
+                return if (status.isWatching) {
+                    val summary = "正在看着工作区【${status.workspace}】，已监工 ${status.durationSeconds} 秒，Token消耗为0。当前输出状态：${status.lastObservedSummary}"
+                    McpToolResult(
+                        content = JSONObject().apply {
+                            put("is_watching", true)
+                            put("workspace", status.workspace)
+                            put("duration_seconds", status.durationSeconds)
+                            put("check_count", status.checkCount)
+                            put("token_used", status.tokenUsed)
+                            put("last_status", status.lastObservedSummary)
+                        }.toString(),
+                        voiceSummary = summary
+                    )
+                } else {
+                    McpToolResult(
+                        content = JSONObject().put("is_watching", false).toString(),
+                        voiceSummary = "当前未在监工任何任务。"
+                    )
+                }
+            }
+        })
     }
 
     fun register(tool: JarvisMcpTool) {
@@ -1138,7 +1222,8 @@ object JarvisToolRegistry {
             setOf("manage_host", "manage_workspace", "manage_agent") to "管理主机、工作区和开发者",
             setOf("manage_logs") to "查询历史并恢复会话",
             setOf("navigate_screen", "manage_session_window", "update_settings", "trigger_sync") to "切换页面、调整窗口和设置、同步数据",
-            setOf("dispatch_task", "get_task_status") to "分配开发任务并查看进度",
+            setOf("dispatch_task", "get_task_status") to "选择开发者打开工作区并派发任务、查看进度",
+            setOf("start_watching_task", "stop_watching_task", "get_watch_status") to "看着干活（0 Token 科学低功耗监工）",
             setOf("close_awake") to "退出唤醒态"
         )
         val actions = groups.filter { (names, _) -> names.all(::isManagerTool) }.map { it.second }
@@ -1164,7 +1249,7 @@ object JarvisToolRegistry {
         [[RDT_MCP:{"tool":"工具名","arguments":{}}]]
         实例管理：用 get_app_state 查看 sessions 和 shared_tasks，按首页标题找到唯一记录，将其 id 传作 session_id。
         接入已有实例用 focus_terminal，关闭用 close_terminal，改名用 rename_terminal。打开尚未启动的工作区用 open_terminal，传主机和工作区，不发送命令。目标有歧义时请用户明确目标。
-        派发和监工：从 get_app_state 选主机、工作区和开发者，向 dispatch_task 提交 task_prompt。已有实例可指定 session_id，没有实例时工具会在所选工作区启动开发者。随后将返回的 session_id 传给 get_task_status 核验接收或进度。
+        开发者派发与监工：从 get_app_state 选主机、工作区和开发者，向 dispatch_task 提交 task_prompt（可传 agent_name、workspace_name、task_prompt）。已有实例可指定 session_id，没有实例时工具会在所选工作区启动开发者。随后将返回的 session_id 传给 get_task_status 核验接收或进度。需要看着干活时，调用 start_watching_task 开启 0 Token 低功耗自适应后台监工，stop_watching_task 结束监工。
         配置管理：用 get_app_state 读取当前资源和设置，从 manage_host、manage_workspace、manage_agent 选择对应的 action 并传入目标。用 update_settings 写入用户要求修改的字段，再读取状态核验。
         历史和界面：用 manage_logs 的 list 查询历史，用 restore 和会话 ID 恢复会话；用 navigate_screen 切换页面，用 manage_session_window 管理会话窗口；用 close_awake 退出唤醒态。
         调用示例：[[RDT_MCP:{"tool":"get_task_status","arguments":{}}]]

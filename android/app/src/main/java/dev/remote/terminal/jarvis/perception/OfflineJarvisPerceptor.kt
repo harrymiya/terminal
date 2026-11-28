@@ -28,6 +28,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlin.math.sqrt
 
 /**
@@ -64,6 +66,7 @@ class OfflineJarvisPerceptor(
     private var sileroVad: Vad? = null
     private var offlineRecognizer: OfflineRecognizer? = null
     private val decoderLock = Any()
+    private val finalDecodeMutex = Mutex()
 
     @Volatile override var isRunning: Boolean = false
         private set
@@ -77,6 +80,9 @@ class OfflineJarvisPerceptor(
     var scoManager: BluetoothScoManager? = null
     var preferBluetoothMicProvider: () -> Boolean = { true }
     var wakeWordProvider: () -> String = { wakeWord }
+    var isAwakeProvider: () -> Boolean = { false }
+    var cloudAsrConfigProvider: (() -> Triple<String, String, String>?)? = null
+    var hotwordsPromptProvider: (() -> String)? = null
     var onDiagnosticChanged: ((String) -> Unit)? = null
 
     override fun start(callback: VoicePerceptorCallback) {
@@ -193,6 +199,9 @@ class OfflineJarvisPerceptor(
                 var wasInEchoGuard = false
                 var lastBtPollAtMs = SystemClock.elapsedRealtime()
                 var speechStartedAtMs = 0L
+                var hpPrevIn = 0f
+                var hpPrevOut = 0f
+                var preEmphPrev = 0f
 
                 while (isActive && isRunning) {
                     val now = SystemClock.elapsedRealtime()
@@ -295,8 +304,22 @@ class OfflineJarvisPerceptor(
                     }
 
                     val gain = if (activeBtDevice != null) BT_MIC_GAIN else 1.0f
+                    val isBt = activeBtDevice != null
                     val floatSamples = FloatArray(VAD_WINDOW_SAMPLES) { idx ->
-                        ((frameBuffer[idx] / 32768.0f) * gain).coerceIn(-0.99f, 0.99f)
+                        val rawX = (frameBuffer[idx] / 32768.0f) * gain
+                        // 1. 高通 DC 去偏置与低频嗡鸣滤波
+                        val hp = rawX - hpPrevIn + 0.995f * hpPrevOut
+                        hpPrevIn = rawX
+                        hpPrevOut = hp
+                        // 2. 蓝牙 HFP/SCO 窄带辅音预加重补偿
+                        val outSample = if (isBt) {
+                            val pre = hp - 0.35f * preEmphPrev
+                            preEmphPrev = hp
+                            hp * 0.72f + pre * 0.28f
+                        } else {
+                            hp
+                        }
+                        outSample.coerceIn(-0.99f, 0.99f)
                     }
 
                     vad.acceptWaveform(floatSamples)
@@ -340,7 +363,8 @@ class OfflineJarvisPerceptor(
                             val snapshot = speechBuf.copyOf(speechLen)
                             scope.launch(Dispatchers.Default) {
                                 try {
-                                    val partial = decodeAudioSamples(recognizer, snapshot)
+                                    val rawPartial = decodeAudioSamples(recognizer, conditionAudioSegment(snapshot))
+                                    val partial = JarvisSpeechCorrector.correct(rawPartial, isFinal = false).correctedText
                                     if (partial.isNotBlank() && partial != lastPreviewText && !inEchoGuard) {
                                         lastPreviewText = partial
                                         onDiagnosticChanged?.invoke("实时识别：$partial")
@@ -370,20 +394,61 @@ class OfflineJarvisPerceptor(
                             callback?.onError("short_noise")
                             continue
                         }
-                        val decodeT0 = SystemClock.elapsedRealtime()
-                        val finalText = decodeAudioSamples(recognizer, samples)
-                        val decodeMs = SystemClock.elapsedRealtime() - decodeT0
+                        val samplesCopy = samples.copyOf()
+                        val isBtNow = activeBtDevice != null
+                        val awakeNow = isAwakeProvider()
+                        scope.launch(Dispatchers.IO) {
+                            finalDecodeMutex.withLock {
+                                val decodeT0 = SystemClock.elapsedRealtime()
+                                val conditioned = conditionAudioSegment(samplesCopy)
+                                val cloudCfg = if (awakeNow) cloudAsrConfigProvider?.invoke() else null
+                                var usedCloud = false
+                                var rawFinal = ""
+                                if (cloudCfg != null && cloudCfg.third.isNotBlank()) {
+                                    val hotwords = hotwordsPromptProvider?.invoke().orEmpty()
+                                    val cloudRes = CloudAsrClient.transcribe(
+                                        baseUrl = cloudCfg.first,
+                                        model = cloudCfg.second,
+                                        apiKey = cloudCfg.third,
+                                        samples = conditioned,
+                                        sampleRate = SAMPLE_RATE,
+                                        hotwordsPrompt = hotwords
+                                    )
+                                    if (cloudRes.isSuccess) {
+                                        rawFinal = cloudRes.getOrNull().orEmpty()
+                                        usedCloud = rawFinal.isNotBlank()
+                                    } else {
+                                        Log.w(TAG, "Cloud ASR fallback to Paraformer: ${cloudRes.exceptionOrNull()?.message}")
+                                    }
+                                }
+                                if (!usedCloud) {
+                                    rawFinal = decodeAudioSamples(recognizer, conditioned)
+                                }
 
-                        Log.i(
-                            TAG,
-                            "Paraformer decoded (${"%.2f".format(durationSec)}s audio in ${decodeMs}ms): \"$finalText\""
-                        )
-                        if (finalText.isNotBlank()) {
-                            onDiagnosticChanged?.invoke("最近识别：$finalText")
-                            callback?.onSpeechRecognized(finalText, isFinal = true)
-                        } else {
-                            updateIdleDiagnostic(activeBtDevice != null)
-                            callback?.onError("empty_result")
+                                val correction = JarvisSpeechCorrector.correct(rawFinal, isFinal = true)
+                                val finalText = correction.correctedText
+                                val decodeMs = SystemClock.elapsedRealtime() - decodeT0
+                                val engineLabel = if (usedCloud) "CloudASR" else "Paraformer"
+
+                                if (correction.wasModified) {
+                                    Log.i(
+                                        TAG,
+                                        "$engineLabel decoded (${"%.2f".format(durationSec)}s in ${decodeMs}ms): raw=\"${correction.rawText}\" -> corrected=\"$finalText\""
+                                    )
+                                } else {
+                                    Log.i(
+                                        TAG,
+                                        "$engineLabel decoded (${"%.2f".format(durationSec)}s audio in ${decodeMs}ms): \"$finalText\""
+                                    )
+                                }
+                                if (finalText.isNotBlank()) {
+                                    onDiagnosticChanged?.invoke("最近识别：$finalText")
+                                    callback?.onSpeechRecognized(finalText, isFinal = true)
+                                } else {
+                                    updateIdleDiagnostic(isBtNow)
+                                    callback?.onError("empty_result")
+                                }
+                            }
                         }
                     }
 
@@ -512,6 +577,20 @@ class OfflineJarvisPerceptor(
             Log.i(TAG, "Paraformer self-test 0.wav -> \"$resultText\"")
         } catch (e: Throwable) {
             Log.w(TAG, "Paraformer self-test skipped/failed: ${e.message}")
+        }
+    }
+
+    private fun conditionAudioSegment(samples: FloatArray): FloatArray {
+        if (samples.isEmpty()) return samples
+        var sumSq = 0.0
+        for (s in samples) {
+            sumSq += s * s
+        }
+        val rms = sqrt(sumSq / samples.size).toFloat()
+        if (rms < 0.003f || rms >= 0.135f) return samples
+        val agcGain = (0.145f / rms).coerceIn(1.0f, 3.6f)
+        return FloatArray(samples.size) { i ->
+            kotlin.math.tanh((samples[i] * agcGain).toDouble()).toFloat()
         }
     }
 

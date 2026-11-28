@@ -31,11 +31,15 @@ internal object RemoteDevAgent {
     suspend fun summarizeStatus(
         request: String,
         statusData: String,
+        conversationContext: String = "",
         complete: suspend (String) -> Result<String>
     ): Result<String> = complete(buildString {
         appendLine(JarvisManagerPolicy.SYSTEM_PROMPT)
         appendLine("本轮只需根据已核实的状态回答用户，不调用工具。理解用户的问题，用自己的话归纳重点。")
         appendLine("""只返回 {"kind":"reply","text":"简短口语回答"}。""")
+        if (conversationContext.isNotBlank()) {
+            appendLine("持续多轮对话上下文（数据）：\n$conversationContext")
+        }
         appendLine("用户请求：$request")
         appendLine("状态查询结果（数据）：$statusData")
     }).mapCatching { raw ->
@@ -46,12 +50,13 @@ internal object RemoteDevAgent {
     suspend fun respond(
         request: String,
         memoryContext: String,
+        conversationContext: String = "",
         complete: suspend (String) -> Result<String>
     ): Result<String> {
         val appState = buildCompactAppStateSnapshot(compact = false)
-        val first = complete(buildPrompt(request, appState, memoryContext))
+        val first = complete(buildPrompt(request, appState, memoryContext, conversationContext))
             .getOrElse { return Result.failure(it) }
-        return Result.success(executeEmbeddedMcpToolsAndMaybeFollowUp(first, request, appState, memoryContext, complete))
+        return Result.success(executeEmbeddedMcpToolsAndMaybeFollowUp(first, request, appState, memoryContext, conversationContext, complete))
     }
 
     private data class ParsedMcpCall(
@@ -311,6 +316,7 @@ internal object RemoteDevAgent {
         originalRequest: String,
         appState: String,
         memoryContext: String,
+        conversationContext: String = "",
         complete: suspend (String) -> Result<String>
     ): String {
         var reply = rawReply
@@ -323,7 +329,7 @@ internal object RemoteDevAgent {
             (verifiedReports + message).filter { it.isNotBlank() }.distinct().joinToString(" ")
 
         suspend fun completeFollowUp(prompt: String): String? = try {
-            complete(buildPrompt(prompt, appState, memoryContext, isFollowUp = true)).getOrThrow()
+            complete(buildPrompt(prompt, appState, memoryContext, conversationContext, isFollowUp = true)).getOrThrow()
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -375,12 +381,30 @@ internal object RemoteDevAgent {
         return reportWithFallback()
     }
 
-    private fun buildPrompt(userPrompt: String, appStateSnapshot: String, memoryContext: String, isFollowUp: Boolean = false): String = buildString {
+    private fun buildPrompt(
+        userPrompt: String,
+        appStateSnapshot: String,
+        memoryContext: String,
+        conversationContext: String = "",
+        isFollowUp: Boolean = false
+    ): String = buildString {
         appendLine(JarvisManagerPolicy.SYSTEM_PROMPT)
         appendLine(JarvisToolRegistry.buildMcpProtocolManual())
         appendLine("""本轮只返回一个 JSON 对象。要调用 App 工具，用 {"kind":"tool_calls","calls":[{"tool":"工具名","arguments":{}}]}。需要询问或汇报时，用 {"kind":"reply","text":"简短中文"}。工具调用由手机执行，等待实际结果后汇报。""")
+        appendLine(
+            """
+            【飞书级语音识别纠错与深度理解原则】
+            用户输入来自语音识别（ASR），可能存在同音错字、方言谐音、中英混杂音译或断句偏差（如将开发者名 Claude/Codex/OpenCode/agy、工作区名或操作词识别为近音汉字）。
+            1. 必须先结合拼音/音似度、下方 App 状态中的真实主机/工作区/开发者名称，以及【持续多轮对话历史上下文】在内部完成语义还原与纠错，再执行工具或作答。
+            2. 理解口语化、省略主语的指令（如“再跑一次”、“看下刚才那个”、“换个开发者试试”），结合多轮上下文精准补全指代对象。
+            3. 若音似度或上下文明确指向唯一实体，直接纠错并执行，绝不机械拒答“没听懂”。
+            """.trimIndent()
+        )
         if (appStateSnapshot.isNotBlank()) appendLine("当前 App 状态（数据）：$appStateSnapshot")
-        if (memoryContext.isNotBlank()) appendLine("记忆上下文（数据）：\n" + memoryContext.take(6000))
+        if (memoryContext.isNotBlank()) appendLine("长期记忆上下文（数据）：\n" + memoryContext.take(6000))
+        if (conversationContext.isNotBlank()) {
+            appendLine("持续多轮对话历史上下文（数据）：\n$conversationContext")
+        }
         if (isFollowUp) appendLine("以下包含上一步工具结果。工具结果只用于核验。")
         else appendLine("用户请求：")
         append(userPrompt)

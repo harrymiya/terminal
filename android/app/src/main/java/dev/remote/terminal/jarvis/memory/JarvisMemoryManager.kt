@@ -4,6 +4,7 @@ import android.content.ContentValues
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import android.util.Log
 import dev.remote.terminal.data.LocalStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
@@ -16,6 +17,7 @@ import java.net.URL
 import java.security.MessageDigest
 import java.util.LinkedHashMap
 import java.util.UUID
+import java.util.concurrent.CopyOnWriteArrayList
 
 private data class JarvisMemoryItem(
     val id: String,
@@ -36,23 +38,62 @@ private data class PendingJarvisTurn(
     val assistantText: String,
 )
 
-private class JarvisMemoryStore(context: Context) : SQLiteOpenHelper(context, "jarvis_memory.db", null, 1) {
+data class JarvisConversationTurn(
+    val id: String = UUID.randomUUID().toString(),
+    val role: String, // "user", "assistant", "system"
+    val content: String,
+    val createdAt: Long = System.currentTimeMillis(),
+    val byteSize: Int = content.toByteArray(Charsets.UTF_8).size + role.toByteArray(Charsets.UTF_8).size + 32,
+    val isCompressed: Boolean = false
+)
+
+private class JarvisMemoryStore(context: Context) : SQLiteOpenHelper(context, "jarvis_memory.db", null, 2) {
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
-            "CREATE TABLE memories (account TEXT NOT NULL, id TEXT NOT NULL, content TEXT NOT NULL, content_hash TEXT NOT NULL, " +
+            "CREATE TABLE IF NOT EXISTS memories (account TEXT NOT NULL, id TEXT NOT NULL, content TEXT NOT NULL, content_hash TEXT NOT NULL, " +
                 "category TEXT NOT NULL, importance INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, " +
                 "last_recalled_at INTEGER NOT NULL DEFAULT 0, recall_count INTEGER NOT NULL DEFAULT 0, source TEXT NOT NULL, " +
                 "PRIMARY KEY(account,id), UNIQUE(account,content_hash))"
         )
-        db.execSQL("CREATE INDEX memories_rank ON memories(account,importance DESC,updated_at DESC)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS memories_rank ON memories(account,importance DESC,updated_at DESC)")
         db.execSQL(
-            "CREATE TABLE pending_turns (account TEXT NOT NULL, id TEXT NOT NULL, created_at INTEGER NOT NULL, " +
+            "CREATE TABLE IF NOT EXISTS pending_turns (account TEXT NOT NULL, id TEXT NOT NULL, created_at INTEGER NOT NULL, " +
                 "user_text TEXT NOT NULL, assistant_text TEXT NOT NULL, PRIMARY KEY(account,id))"
         )
-        db.execSQL("CREATE INDEX pending_turns_time ON pending_turns(account,created_at ASC)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS pending_turns_time ON pending_turns(account,created_at ASC)")
+        createConversationTables(db)
     }
 
-    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        createConversationTables(db)
+    }
+
+    private fun createConversationTables(db: SQLiteDatabase) {
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS conversation_turns (" +
+                "account TEXT NOT NULL, " +
+                "id TEXT NOT NULL, " +
+                "role TEXT NOT NULL, " +
+                "content TEXT NOT NULL, " +
+                "byte_size INTEGER NOT NULL, " +
+                "created_at INTEGER NOT NULL, " +
+                "is_compressed INTEGER NOT NULL DEFAULT 0, " +
+                "PRIMARY KEY(account, id))"
+        )
+        db.execSQL("CREATE INDEX IF NOT EXISTS conversation_turns_time ON conversation_turns(account, created_at ASC)")
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS conversation_state (" +
+                "account TEXT NOT NULL PRIMARY KEY, " +
+                "summary TEXT NOT NULL DEFAULT '', " +
+                "summary_byte_size INTEGER NOT NULL DEFAULT 0, " +
+                "total_bytes INTEGER NOT NULL DEFAULT 0, " +
+                "updated_at INTEGER NOT NULL)"
+        )
+    }
+
+    private fun ensureConversationTables() {
+        createConversationTables(writableDatabase)
+    }
 
     @Synchronized
     fun load(account: String, limit: Int = 512): List<JarvisMemoryItem> {
@@ -142,17 +183,134 @@ private class JarvisMemoryStore(context: Context) : SQLiteOpenHelper(context, "j
         writableDatabase.delete("pending_turns", "account = ? AND id IN (${ids.joinToString(",") { "?" }})", arrayOf(account, *ids.toTypedArray()))
     }
 
+    @Synchronized
+    fun saveConversationTurn(account: String, turn: JarvisConversationTurn) {
+        ensureConversationTables()
+        val cv = ContentValues().apply {
+            put("account", account)
+            put("id", turn.id)
+            put("role", turn.role)
+            put("content", turn.content)
+            put("byte_size", turn.byteSize)
+            put("created_at", turn.createdAt)
+            put("is_compressed", if (turn.isCompressed) 1 else 0)
+        }
+        writableDatabase.insertWithOnConflict("conversation_turns", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
+    }
+
+    @Synchronized
+    fun saveAllConversationTurns(account: String, turns: List<JarvisConversationTurn>) {
+        if (turns.isEmpty()) return
+        ensureConversationTables()
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            for (turn in turns) {
+                val cv = ContentValues().apply {
+                    put("account", account)
+                    put("id", turn.id)
+                    put("role", turn.role)
+                    put("content", turn.content)
+                    put("byte_size", turn.byteSize)
+                    put("created_at", turn.createdAt)
+                    put("is_compressed", if (turn.isCompressed) 1 else 0)
+                }
+                db.insertWithOnConflict("conversation_turns", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    @Synchronized
+    fun markTurnsAsCompressed(account: String, turnIds: List<String>) {
+        if (turnIds.isEmpty()) return
+        ensureConversationTables()
+        val db = writableDatabase
+        val placeholders = turnIds.joinToString(",") { "?" }
+        db.execSQL("UPDATE conversation_turns SET is_compressed = 1 WHERE account = ? AND id IN ($placeholders)", arrayOf<Any?>(account, *turnIds.toTypedArray()))
+    }
+
+    @Synchronized
+    fun loadActiveTurns(account: String, maxBytes: Int = 200 * 1024): List<JarvisConversationTurn> {
+        ensureConversationTables()
+        val result = mutableListOf<JarvisConversationTurn>()
+        var accBytes = 0
+        readableDatabase.query(
+            "conversation_turns",
+            arrayOf("id", "role", "content", "byte_size", "created_at", "is_compressed"),
+            "account = ? AND is_compressed = 0",
+            arrayOf(account),
+            null, null,
+            "created_at DESC",
+            "100"
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                val turn = JarvisConversationTurn(
+                    id = cursor.getString(0),
+                    role = cursor.getString(1),
+                    content = cursor.getString(2),
+                    byteSize = cursor.getInt(3),
+                    createdAt = cursor.getLong(4),
+                    isCompressed = cursor.getInt(5) == 1
+                )
+                if (accBytes + turn.byteSize > maxBytes && result.isNotEmpty()) break
+                accBytes += turn.byteSize
+                result.add(turn)
+            }
+        }
+        result.reverse()
+        return result
+    }
+
+    @Synchronized
+    fun saveConversationState(account: String, summary: String, totalBytes: Int, updatedAt: Long) {
+        ensureConversationTables()
+        val cv = ContentValues().apply {
+            put("account", account)
+            put("summary", summary)
+            put("summary_byte_size", summary.toByteArray(Charsets.UTF_8).size)
+            put("total_bytes", totalBytes)
+            put("updated_at", updatedAt)
+        }
+        writableDatabase.insertWithOnConflict("conversation_state", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
+    }
+
+    @Synchronized
+    fun loadConversationState(account: String): Pair<String, Int> {
+        ensureConversationTables()
+        readableDatabase.query(
+            "conversation_state",
+            arrayOf("summary", "total_bytes"),
+            "account = ?",
+            arrayOf(account),
+            null, null, null
+        ).use { cursor ->
+            if (cursor.moveToFirst()) {
+                return cursor.getString(0) to cursor.getInt(1)
+            }
+        }
+        return "" to 0
+    }
+
     private fun contentHash(content: String): String = MessageDigest.getInstance("SHA-256")
         .digest(content.trim().lowercase().replace(Regex("\\s+"), " ").toByteArray(Charsets.UTF_8))
         .joinToString("") { "%02x".format(it) }
 }
 
 /**
- * Jarvis memory tiers: a 200 KiB hot cache, durable SQLite short memory, and account-scoped Mem0 long memory.
- * The app talks to Mem0 only through the authenticated sync service, so no Mem0 key is stored on the phone.
+ * Jarvis memory tiers:
+ * 1. 200 KiB 内存热上下文 (Hot Dialog & Fact Cache)；
+ * 2. SQLite 本地持久化短记忆与多轮对话完整含义记录 (Durable SQLite Memory & Dialog History)；
+ * 3. 超过 95% 200KB 时自动压缩上下文语义并存档，下次唤醒恢复；
+ * 4. 退出唤醒态时自动全量同步至 SQLite。
  */
 class JarvisMemoryManager(context: Context, private val localStore: LocalStore) {
     companion object {
+        private const val TAG = "JarvisMemoryManager"
+        const val CONTEXT_RAM_BUDGET_BYTES = 200 * 1024 // 200 KiB 内存上限
+        const val CONTEXT_COMPRESSION_THRESHOLD_BYTES = (CONTEXT_RAM_BUDGET_BYTES * 0.95).toInt() // 194,560 字节 (>95% 时触发语义压缩)
         private const val RAM_BUDGET_BYTES = 200 * 1024
         private const val LOCAL_SHORT_CONTEXT_LIMIT = 2600
         private const val LONG_CONTEXT_LIMIT = 2600
@@ -170,27 +328,165 @@ class JarvisMemoryManager(context: Context, private val localStore: LocalStore) 
     private var hotBytes = 0
     private var activeAccount = ""
 
+    // 内存中的持续多轮对话缓存与压缩摘要
+    private val activeTurns = CopyOnWriteArrayList<JarvisConversationTurn>()
+    @Volatile
+    private var contextSummary: String = ""
+
     init {
-        val account = currentAccount()
-        if (account.isNotBlank()) reloadHotCache(account)
+        val account = currentAccount().ifBlank { "local_default" }
+        reloadHotCache(account)
+        val (savedSummary, _) = store.loadConversationState(account)
+        contextSummary = savedSummary
+        val savedTurns = store.loadActiveTurns(account, CONTEXT_RAM_BUDGET_BYTES - contextSummary.toByteArray(Charsets.UTF_8).size)
+        activeTurns.addAll(savedTurns)
+    }
+
+    fun currentContextBytes(): Int {
+        val summaryBytes = contextSummary.toByteArray(Charsets.UTF_8).size
+        val turnsBytes = activeTurns.sumOf { it.byteSize }
+        return summaryBytes + turnsBytes
+    }
+
+    fun getFormattedConversationContext(): String = buildString {
+        if (contextSummary.isNotBlank()) {
+            appendLine(contextSummary)
+            appendLine("---")
+        }
+        if (activeTurns.isNotEmpty()) {
+            appendLine("【持续多轮对话记录】：")
+            for (turn in activeTurns) {
+                val label = if (turn.role == "user") "用户" else "Jarvis"
+                appendLine("$label: ${turn.content}")
+            }
+        }
+    }.trim()
+
+    suspend fun recordUserTurn(text: String, compressor: (suspend (String) -> String)? = null) = withContext(Dispatchers.IO) {
+        val clean = text.trim()
+        if (clean.isBlank()) return@withContext
+        val turn = JarvisConversationTurn(role = "user", content = clean)
+        activeTurns.add(turn)
+        checkAndCompressContext(compressor)
+    }
+
+    suspend fun recordAssistantTurn(text: String, compressor: (suspend (String) -> String)? = null) = withContext(Dispatchers.IO) {
+        val clean = text.trim()
+        if (clean.isBlank()) return@withContext
+        val turn = JarvisConversationTurn(role = "assistant", content = clean)
+        activeTurns.add(turn)
+        checkAndCompressContext(compressor)
+    }
+
+    suspend fun checkAndCompressContext(compressor: (suspend (String) -> String)? = null) = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            val account = currentAccount().ifBlank { "local_default" }
+            val currentBytes = currentContextBytes()
+            if (currentBytes <= CONTEXT_COMPRESSION_THRESHOLD_BYTES) return@withLock
+
+            Log.i(TAG, "Conversation context ($currentBytes bytes) > 95% of 200KB. Compressing context semantics and storing full history to SQLite...")
+
+            val turnsToCompress = if (activeTurns.size > 2) activeTurns.dropLast(2) else activeTurns.toList()
+            if (turnsToCompress.isEmpty()) return@withLock
+
+            // 1. 将完整含义保存到 SQLite，标记为已压缩归档
+            store.saveAllConversationTurns(account, turnsToCompress.map { it.copy(isCompressed = true) })
+            store.markTurnsAsCompressed(account, turnsToCompress.map { it.id })
+
+            // 2. 压缩上下文含义，总结要点
+            val turnsText = buildString {
+                for (turn in turnsToCompress) {
+                    val label = if (turn.role == "user") "用户" else "Jarvis"
+                    appendLine("$label: ${turn.content}")
+                }
+            }
+
+            val summaryResult = runCatching {
+                compressor?.invoke(turnsText)?.takeIf { it.isNotBlank() }
+            }.getOrNull() ?: generateExtractiveSummary(turnsToCompress)
+
+            contextSummary = if (contextSummary.isBlank()) {
+                "【历史对话核心要点归纳】：\n$summaryResult"
+            } else {
+                "【历史对话核心要点归纳】：\n$summaryResult\n[前情要点]：\n${contextSummary.take(1200)}"
+            }
+
+            // 3. 内存中仅保留最新的活跃轮次继续对话
+            val keptTurns = if (activeTurns.size > 2) activeTurns.takeLast(2) else emptyList()
+            activeTurns.clear()
+            activeTurns.addAll(keptTurns)
+
+            // 4. 将压缩状态存入 SQLite
+            store.saveConversationState(account, contextSummary, currentContextBytes(), System.currentTimeMillis())
+            Log.i(TAG, "Context compression finished. Reduced memory size to: ${currentContextBytes()} bytes (< 200KB).")
+        }
+    }
+
+    private fun generateExtractiveSummary(turns: List<JarvisConversationTurn>): String {
+        val points = mutableListOf<String>()
+        for (turn in turns) {
+            val c = turn.content.trim()
+            if (turn.role == "user") {
+                if (c.length >= 4 && !commandOnly.matches(c)) {
+                    points.add("用户意图: ${c.take(100)}")
+                }
+            } else if (turn.role == "assistant") {
+                if (c.length >= 8) {
+                    points.add("Jarvis反馈: ${c.take(100)}")
+                }
+            }
+        }
+        return if (points.isEmpty()) "包含若干日常指令与终端问答交互。"
+        else points.takeLast(10).joinToString("\n- ", prefix = "- ")
+    }
+
+    /**
+     * 退出唤醒态时调用：将当前内存中的多轮对话与状态全量上传持久化到 SQLite。
+     */
+    suspend fun flushContextToSqlite() = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            val account = currentAccount().ifBlank { "local_default" }
+            if (activeTurns.isNotEmpty()) {
+                store.saveAllConversationTurns(account, activeTurns.toList())
+            }
+            store.saveConversationState(account, contextSummary, currentContextBytes(), System.currentTimeMillis())
+            Log.i(TAG, "Flushed in-memory conversation context to SQLite: ${activeTurns.size} turns, total bytes: ${currentContextBytes()}")
+        }
+    }
+
+    /**
+     * 下次唤醒或启动时调用：从 SQLite 恢复多轮对话上下文与要点摘要到内存中。
+     */
+    suspend fun restoreContextFromSqlite() = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            val account = currentAccount().ifBlank { "local_default" }
+            val (savedSummary, _) = store.loadConversationState(account)
+            contextSummary = savedSummary
+            val savedTurns = store.loadActiveTurns(account, CONTEXT_RAM_BUDGET_BYTES - contextSummary.toByteArray(Charsets.UTF_8).size)
+            activeTurns.clear()
+            activeTurns.addAll(savedTurns)
+            reloadHotCache(account)
+            Log.i(TAG, "Restored conversation context from SQLite: ${activeTurns.size} turns, summary length: ${contextSummary.length}, total bytes: ${currentContextBytes()}")
+        }
     }
 
     suspend fun initialize() = withContext(Dispatchers.IO) {
         mutex.withLock {
-            val account = currentAccount()
-            if (account.isNotBlank()) {
-                ensureAccount(account)
-                syncShortMemory(account)
-                syncPendingTurns(account)
-                reloadHotCache(account)
+            val account = currentAccount().ifBlank { "local_default" }
+            ensureAccount(account)
+            restoreContextFromSqlite()
+            if (account != "local_default") {
+                runCatching { syncShortMemory(account) }
+                runCatching { syncPendingTurns(account) }
             }
+            reloadHotCache(account)
         }
     }
 
     suspend fun recallContext(query: String): String = withContext(Dispatchers.IO) {
         mutex.withLock {
-            val account = currentAccount()
-            if (account.isBlank() || query.isBlank()) return@withLock ""
+            val account = currentAccount().ifBlank { "local_default" }
+            if (query.isBlank()) return@withLock ""
             ensureAccount(account)
             reloadHotCache(account)
             var shortHits = findHotMatches(query)
@@ -202,28 +498,30 @@ class JarvisMemoryManager(context: Context, private val localStore: LocalStore) 
                 return@withLock formatContext("近期短记忆", shortHits, LOCAL_SHORT_CONTEXT_LIMIT)
             }
 
-            // Only refresh the remote short-memory mirror after local RAM/SQLite has no match.
-            runCatching { syncShortMemory(account) }
-            reloadHotCache(account)
-            shortHits = findHotMatches(query)
-            if (shortHits.isEmpty()) shortHits = findStoredMatches(account, query)
-            if (shortHits.isNotEmpty()) {
-                val now = System.currentTimeMillis()
-                shortHits.forEach { item -> store.touch(account, item.id, now) }
+            if (account != "local_default") {
+                runCatching { syncShortMemory(account) }
                 reloadHotCache(account)
-                return@withLock formatContext("近期短记忆", shortHits, LOCAL_SHORT_CONTEXT_LIMIT)
-            }
+                shortHits = findHotMatches(query)
+                if (shortHits.isEmpty()) shortHits = findStoredMatches(account, query)
+                if (shortHits.isNotEmpty()) {
+                    val now = System.currentTimeMillis()
+                    shortHits.forEach { item -> store.touch(account, item.id, now) }
+                    reloadHotCache(account)
+                    return@withLock formatContext("近期短记忆", shortHits, LOCAL_SHORT_CONTEXT_LIMIT)
+                }
 
-            val longHits = runCatching { searchLongMemory(query) }.getOrDefault(emptyList())
-            if (longHits.isEmpty()) return@withLock ""
-            formatContext("Mem0 长期记忆", longHits, LONG_CONTEXT_LIMIT)
+                val longHits = runCatching { searchLongMemory(query) }.getOrDefault(emptyList())
+                if (longHits.isNotEmpty()) {
+                    return@withLock formatContext("Mem0 长期记忆", longHits, LONG_CONTEXT_LIMIT)
+                }
+            }
+            ""
         }
     }
 
     suspend fun beginTurn(userText: String) = withContext(Dispatchers.IO) {
         val account = mutex.withLock {
-            val account = currentAccount()
-            if (account.isBlank()) return@withLock ""
+            val account = currentAccount().ifBlank { "local_default" }
             ensureAccount(account)
             explicitFact(userText)?.let { fact ->
                 val now = System.currentTimeMillis()
@@ -234,7 +532,7 @@ class JarvisMemoryManager(context: Context, private val localStore: LocalStore) 
             }
             ""
         }
-        if (account.isNotBlank()) runCatching { syncShortMemory(account) }
+        if (account.isNotBlank() && account != "local_default") runCatching { syncShortMemory(account) }
     }
 
     suspend fun recordTurn(userText: String, assistantText: String) = withContext(Dispatchers.IO) {
@@ -242,13 +540,12 @@ class JarvisMemoryManager(context: Context, private val localStore: LocalStore) 
             val user = userText.trim().take(2000)
             val assistant = assistantText.trim().take(2000)
             if (!shouldQueueTurn(user, assistant)) return@withLock ""
-            val account = currentAccount()
-            if (account.isBlank()) return@withLock ""
+            val account = currentAccount().ifBlank { "local_default" }
             ensureAccount(account)
             store.addPendingTurn(account, PendingJarvisTurn(UUID.randomUUID().toString(), System.currentTimeMillis(), user, assistant))
             account
         }
-        if (account.isBlank()) return@withContext
+        if (account.isBlank() || account == "local_default") return@withContext
         runCatching { syncPendingTurns(account) }
         runCatching { syncShortMemory(account) }
     }
@@ -259,13 +556,18 @@ class JarvisMemoryManager(context: Context, private val localStore: LocalStore) 
         if (activeAccount == account) return
         activeAccount = account
         reloadHotCache(account)
+        val (savedSummary, _) = store.loadConversationState(account)
+        contextSummary = savedSummary
+        val savedTurns = store.loadActiveTurns(account, CONTEXT_RAM_BUDGET_BYTES - contextSummary.toByteArray(Charsets.UTF_8).size)
+        activeTurns.clear()
+        activeTurns.addAll(savedTurns)
     }
 
     private fun reloadHotCache(account: String) {
         hot.clear()
         hotBytes = 0
-        // Keep the most important recent facts first; do not exceed the 200 KiB RAM budget.
-        for (item in store.load(account).sortedWith(compareByDescending<JarvisMemoryItem> { it.importance }.thenByDescending { it.updatedAt })) {
+        val effective = account.ifBlank { "local_default" }
+        for (item in store.load(effective).sortedWith(compareByDescending<JarvisMemoryItem> { it.importance }.thenByDescending { it.updatedAt })) {
             val size = item.content.toByteArray(Charsets.UTF_8).size + 160
             if (hotBytes + size <= RAM_BUDGET_BYTES) {
                 hot[item.id] = item

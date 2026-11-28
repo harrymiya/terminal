@@ -104,6 +104,10 @@ object JarvisCoordinator : VoicePerceptorCallback {
         intentRouter = JarvisIntentRouter(
             wakeWordProvider = { config.wakeWord }
         )
+        dev.remote.terminal.jarvis.perception.JarvisSpeechCorrector.wakeWordProvider = { config.wakeWord }
+        dev.remote.terminal.jarvis.perception.JarvisSpeechCorrector.workspacesProvider = { workspaceListProvider() }
+        dev.remote.terminal.jarvis.perception.JarvisSpeechCorrector.hostsProvider = { hostsProvider?.invoke().orEmpty() }
+        dev.remote.terminal.jarvis.perception.JarvisSpeechCorrector.agentsProvider = { agentsProvider?.invoke().orEmpty() }
         dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.closeAwakeHandler = { farewell ->
             closeAwakeState(farewell)
         }
@@ -138,6 +142,21 @@ object JarvisCoordinator : VoicePerceptorCallback {
             p.scoManager = scoManager
             p.preferBluetoothMicProvider = { config.bluetoothScoEnabled }
             p.wakeWordProvider = { config.wakeWord }
+            p.isAwakeProvider = { _conversationActive.value }
+            p.cloudAsrConfigProvider = {
+                val st = storeProvider?.invoke()
+                if (st != null && st.loadJarvisCloudAsrEnabled()) {
+                    val key = st.loadJarvisCloudAsrKey()
+                    if (key.isNotBlank()) {
+                        Triple(st.loadJarvisCloudAsrUrl(), st.loadJarvisCloudAsrModel(), key)
+                    } else null
+                } else null
+            }
+            p.hotwordsPromptProvider = {
+                val ws = workspaceListProvider().take(12).joinToString(", ")
+                val ag = agentsProvider?.invoke().orEmpty().map { it.name }.distinct().take(8).joinToString(", ")
+                "${config.wakeWord}, Codex, Claude, OpenCode, agy, 看着干活, 派发任务, 工作区, 退出唤醒态, $ws, $ag"
+            }
             p.onDiagnosticChanged = { status ->
                 _diagnosticStatus.value = status
             }
@@ -151,6 +170,7 @@ object JarvisCoordinator : VoicePerceptorCallback {
 
     fun stop() {
         config.enabled = false
+        runCatching { dev.remote.terminal.jarvis.watcher.JarvisWatchOverseer.stopWatching() }
         endConversationSession(resetToDisabled = true, forceCancelWork = true)
         _diagnosticStatus.value = "已关闭"
         chatJob?.cancel()
@@ -206,6 +226,10 @@ object JarvisCoordinator : VoicePerceptorCallback {
     private fun enterConversationMode() {
         _conversationActive.value = true
         conversationAwakeUntilMs = SystemClock.elapsedRealtime() + CONVERSATION_WINDOW_MS
+        scope.launch(Dispatchers.IO) {
+            runCatching { memoryManager?.restoreContextFromSqlite() }
+                .onFailure { Log.w(TAG, "Failed to restore context from SQLite: ${it.message}") }
+        }
     }
 
     private fun resetConversationIdleTimer() {
@@ -243,6 +267,10 @@ object JarvisCoordinator : VoicePerceptorCallback {
         if (forceCancelWork) {
             chatJob?.cancel()
             chatJob = null
+        }
+        scope.launch(Dispatchers.IO) {
+            runCatching { memoryManager?.flushContextToSqlite() }
+                .onFailure { Log.w(TAG, "Failed to flush context to SQLite on awake exit: ${it.message}") }
         }
         _conversationActive.value = false
         _idleRemainingSeconds.value = 0
@@ -376,6 +404,12 @@ object JarvisCoordinator : VoicePerceptorCallback {
             _subtitle.value = text
             updateState(JarvisState.PROCESSING)
 
+            memoryManager?.let { mgr ->
+                scope.launch(Dispatchers.IO) {
+                    mgr.recordUserTurn(text) { prompt -> summarizeTextWithModel(prompt) }
+                }
+            }
+
             runCatching { memoryManager?.beginTurn(text) }
                 .onFailure { Log.w(TAG, "Jarvis memory initialization failed: ${it.message}") }
             val context = JarvisContext(workspaces = workspaceListProvider())
@@ -413,8 +447,9 @@ object JarvisCoordinator : VoicePerceptorCallback {
                         val fallback = result.voiceSummary ?: "操作已完成。"
                         val reply = if (summarize) {
                             _subtitle.value = "Jarvis 正在整理状态…"
+                            val convContext = memoryManager?.getFormattedConversationContext().orEmpty()
                             runModel { complete ->
-                                RemoteDevAgent.summarizeStatus(userText, result.content, complete)
+                                RemoteDevAgent.summarizeStatus(userText, result.content, convContext, complete)
                             }.getOrDefault(fallback)
                         } else fallback
                         if (!_conversationActive.value) return@launch
@@ -503,8 +538,9 @@ object JarvisCoordinator : VoicePerceptorCallback {
             Log.w(TAG, "Jarvis memory recall failed: ${e.message}")
             ""
         }
+        val conversationContext = memoryManager?.getFormattedConversationContext().orEmpty()
         val result = runModel { complete ->
-            RemoteDevAgent.respond(action.message, memoryContext, complete)
+            RemoteDevAgent.respond(action.message, memoryContext, conversationContext, complete)
         }
         result.onSuccess { reply ->
             if (reply.isBlank() || !_conversationActive.value) return
@@ -563,9 +599,21 @@ object JarvisCoordinator : VoicePerceptorCallback {
         if (assistantText.isNullOrBlank()) return
         val manager = memoryManager ?: return
         scope.launch(Dispatchers.IO) {
-            runCatching { manager.recordTurn(userText, assistantText) }
-                .onFailure { Log.w(TAG, "Jarvis memory write failed: ${it.message}") }
+            runCatching {
+                manager.recordAssistantTurn(assistantText) { prompt ->
+                    summarizeTextWithModel(prompt)
+                }
+                manager.recordTurn(userText, assistantText)
+            }.onFailure { Log.w(TAG, "Jarvis memory write failed: ${it.message}") }
         }
+    }
+
+    private suspend fun summarizeTextWithModel(prompt: String): String {
+        return runCatching {
+            runModel { complete ->
+                complete("请将以下多轮对话内容压缩总结出核心要点，提炼用户意图、关键技术决策、工作区与任务进度，用精简中文输出要点：\n$prompt")
+            }.getOrNull()
+        }.getOrNull().orEmpty()
     }
 
     /**
