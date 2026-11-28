@@ -26,12 +26,15 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -44,6 +47,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -63,7 +67,6 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -174,6 +177,17 @@ private fun JarvisHudCard(
     onCloseClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val subtitleScrollState = rememberScrollState()
+    LaunchedEffect(subtitle) {
+        if (subtitle.isNotBlank()) {
+            val wasFollowingOutput = subtitleScrollState.maxValue - subtitleScrollState.value <= 24
+            withFrameNanos { }
+            if (wasFollowingOutput) {
+                subtitleScrollState.animateScrollTo(subtitleScrollState.maxValue)
+            }
+        }
+    }
+
     val cardBackground = Brush.verticalGradient(
         listOf(
             Color(0xEB08101E),
@@ -265,10 +279,10 @@ private fun JarvisHudCard(
                     lineHeight = 18.sp,
                     fontWeight = FontWeight.Medium,
                     textAlign = TextAlign.Center,
-                    maxLines = 6,
-                    overflow = TextOverflow.Ellipsis,
                     modifier = Modifier
                         .fillMaxWidth()
+                        .heightIn(max = 120.dp)
+                        .verticalScroll(subtitleScrollState)
                         .padding(horizontal = 4.dp, vertical = 2.dp)
                 )
             } else if (conversationActive) {
@@ -466,7 +480,9 @@ private fun NeonWaveformCanvas(
         for (x in 0..width.toInt() step 3) {
             val progress = x / width
             val envelope = sin(progress * PI).pow(1.75).toFloat()
-            val angle = (progress * freq3 * 2 * PI + phase * 1.4f + phaseOffset3).toFloat()
+            // Use an integer phase multiplier so the waveform returns to the same
+            // position when the animation restarts at 0 after reaching 2π.
+            val angle = (progress * freq3 * 2 * PI + phase * 2f + phaseOffset3).toFloat()
             val y = centerY + sin(angle) * baseAmp3 * envelope
 
             if (x == 0) pathPurple.moveTo(x.toFloat(), y) else pathPurple.lineTo(x.toFloat(), y)
