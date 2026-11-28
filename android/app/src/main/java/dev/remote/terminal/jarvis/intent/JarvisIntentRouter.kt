@@ -14,6 +14,8 @@ class JarvisIntentRouter(
     private val wakeWordProvider: () -> String = { "贾维斯" }
 ) : IntentRouter {
 
+    var tacitHabitMatcher: ((String) -> JarvisAction?)? = null
+
     companion object {
         private const val TAG = "JarvisIntentRouter"
 
@@ -118,6 +120,12 @@ class JarvisIntentRouter(
         )
         private val MemoryStatsRegex = Regex(
             """(?i)(?:记忆统计|长记忆库|记住了多少|沉淀了多少记忆|查看长记忆)"""
+        )
+        private val WebSearchRegex = Regex(
+            """(?i)^\s*(?:请|帮我|麻烦)?\s*(?:上网|网上|联网|去网上|去互联网|百度|谷歌|google)\s*(?:搜一下|搜索一下|查一下|搜一搜|查一查|检索一下|检索|搜索|查|搜)\s*[:：]?\s*(.+)$"""
+        )
+        private val DirectSearchRegex = Regex(
+            """(?i)^\s*(?:请|帮我|麻烦)?\s*(?:搜一下|搜索一下|上网查|网上搜|联网查|百度一下)\s*[:：]?\s*(.+)$"""
         )
 
         // 开发者选择与工作区任务派发相关正则 (Tier-1: 0 Token)
@@ -401,6 +409,21 @@ class JarvisIntentRouter(
 
         if (HelpRegex.containsMatchIn(cleanText)) {
             return@withContext JarvisAction.ExecuteTool("get_capabilities")
+        }
+
+        val webMatch = WebSearchRegex.find(cleanText) ?: DirectSearchRegex.find(cleanText)
+        if (webMatch != null) {
+            val query = webMatch.groupValues[1].trim().trimEnd('。', '！', '!', '？', '?', ' ')
+            if (query.isNotBlank()) {
+                Log.i(TAG, "Tier-1 matched: MCP web_search [$query]")
+                return@withContext JarvisAction.ExecuteTool("web_search", JSONObject().put("query", query))
+            }
+        }
+
+        // Tier-1.5 零 Token 个性化默契匹配（由历史高频习惯学习生成）
+        tacitHabitMatcher?.invoke(cleanText)?.let { tacitAction ->
+            Log.i(TAG, "Tier-1.5 matched tacit user habit for \"$cleanText\" (0 Token)")
+            return@withContext tacitAction
         }
 
         JarvisAction.AskAgent(cleanText)

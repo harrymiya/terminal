@@ -59,6 +59,9 @@ object JarvisCoordinator : VoicePerceptorCallback {
     @Volatile
     private var userCurrentlySpeaking: Boolean = false
 
+    @Volatile
+    private var lastUserUtterance: String = ""
+
     private val _state = MutableStateFlow(JarvisState.DISABLED)
     val state: StateFlow<JarvisState> = _state.asStateFlow()
 
@@ -103,7 +106,14 @@ object JarvisCoordinator : VoicePerceptorCallback {
         speaker = JarvisSpeaker(app, sco, earconManager, config)
         intentRouter = JarvisIntentRouter(
             wakeWordProvider = { config.wakeWord }
-        )
+        ).apply {
+            tacitHabitMatcher = { utterance ->
+                resolveTacitHabitAction(utterance)
+            }
+        }
+        RemoteDevAgent.onToolExecutedListener = { toolName, args ->
+            recordLearnedHabitFromTool(lastUserUtterance, toolName, args)
+        }
         dev.remote.terminal.jarvis.perception.JarvisSpeechCorrector.wakeWordProvider = { config.wakeWord }
         dev.remote.terminal.jarvis.perception.JarvisSpeechCorrector.workspacesProvider = { workspaceListProvider() }
         dev.remote.terminal.jarvis.perception.JarvisSpeechCorrector.hostsProvider = { hostsProvider?.invoke().orEmpty() }
@@ -406,11 +416,18 @@ object JarvisCoordinator : VoicePerceptorCallback {
                 earconManager.playWakeChime()
             }
             Log.i(TAG, "Final speech recognized: \"$text\"")
+            lastUserUtterance = text
             _subtitle.value = text
             updateState(JarvisState.PROCESSING)
 
             memoryManager?.let { mgr ->
                 scope.launch(Dispatchers.IO) {
+                    val trimmed = text.trim()
+                    if (Regex("""^(?:对|没错|就是这个|干得好|不错|很好|太棒了)[。！!]*$""").matches(trimmed)) {
+                        mgr.applyFeedback(isPositive = true)
+                    } else if (Regex("""(?:不对|错了|记错了|搞错了|不是这个|不是那样)""").containsMatchIn(trimmed)) {
+                        mgr.applyFeedback(isPositive = false)
+                    }
                     mgr.recordUserTurn(text) { prompt -> summarizeTextWithModel(prompt) }
                 }
             }
@@ -458,6 +475,7 @@ object JarvisCoordinator : VoicePerceptorCallback {
                             }.getOrDefault(fallback)
                         } else fallback
                         if (!_conversationActive.value) return@launch
+                        recordLearnedHabitFromTool(userText, action.toolName, action.arguments)
                         if (action.toolName == "dispatch_task" || action.toolName == "open_terminal") {
                             val ag = action.arguments.optString("agent_name").ifBlank { action.arguments.optString("agent_command") }
                             val ws = action.arguments.optString("workspace_name").ifBlank { action.arguments.optString("workspace_path") }
@@ -641,6 +659,46 @@ object JarvisCoordinator : VoicePerceptorCallback {
                 complete(prompt)
             }.getOrNull()
         }.getOrNull().orEmpty()
+    }
+
+    private fun resolveTacitHabitAction(utterance: String): JarvisAction? {
+        val mgr = memoryManager ?: return null
+        val habit = mgr.matchTacitHabit(utterance) ?: return null
+        val args = org.json.JSONObject()
+        if (habit.targetWorkspace.isNotBlank()) args.put("workspace_name", habit.targetWorkspace)
+        if (habit.targetAgent.isNotBlank()) args.put("agent_name", habit.targetAgent)
+        if (habit.targetHost.isNotBlank()) args.put("host_name", habit.targetHost)
+        if (habit.extraPrompt.isNotBlank() && habit.actionType == "dispatch_task") {
+            args.put("task_prompt", habit.extraPrompt)
+        }
+        return JarvisAction.ExecuteTool(habit.actionType, args)
+    }
+
+    private fun recordLearnedHabitFromTool(
+        utterance: String,
+        toolName: String,
+        args: org.json.JSONObject
+    ) {
+        if (toolName !in setOf("dispatch_task", "open_terminal", "focus_terminal", "start_watching_task", "select_agent")) {
+            return
+        }
+        val mgr = memoryManager ?: return
+        val ws = args.optString("workspace_name").ifBlank { args.optString("workspace") }.trim()
+        val ag = args.optString("agent_name").ifBlank { args.optString("agent_command") }.trim()
+        val host = args.optString("host_name").trim()
+        val prompt = args.optString("task_prompt").trim()
+        scope.launch(Dispatchers.IO) {
+            runCatching {
+                mgr.learnIntentHabit(
+                    phrase = utterance,
+                    actionType = toolName,
+                    workspace = ws,
+                    agent = ag,
+                    host = host,
+                    extraPrompt = prompt.take(120)
+                )
+            }
+        }
     }
 
     private suspend fun handleMemoryTool(

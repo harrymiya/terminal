@@ -18,15 +18,20 @@ internal object RemoteDevAgent {
         "list_open_workspaces",
         "get_device_state",
         "read_terminal_screen",
-        "get_ssh_public_key"
+        "get_ssh_public_key",
+        "web_search",
+        "web_fetch"
     )
+
+    var onToolExecutedListener: ((toolName: String, arguments: JSONObject) -> Unit)? = null
 
     suspend fun executeTool(name: String, arguments: JSONObject) = withContext(Dispatchers.Main.immediate) {
         JarvisToolRegistry.executeManagerTool(name, arguments)
     }
 
     fun isWorkspaceStatusTool(name: String): Boolean =
-        name == "get_app_state" || name == "get_task_status" || name == "list_open_workspaces"
+        name == "get_app_state" || name == "get_task_status" || name == "list_open_workspaces" ||
+            name == "web_search" || name == "web_fetch"
 
     suspend fun summarizeStatus(
         request: String,
@@ -289,6 +294,7 @@ internal object RemoteDevAgent {
                 closedAwake = true
                 break
             }
+            onToolExecutedListener?.invoke(call.toolName, call.arguments)
 
             val triggerFollowUp = allowReadFollowUp && (result.expectsFollowUp || call.toolName in READ_TOOLS)
             needsFollowUp = needsFollowUp || triggerFollowUp

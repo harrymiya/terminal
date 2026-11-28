@@ -1215,13 +1215,93 @@ object JarvisToolRegistry {
             )
             override suspend fun execute(arguments: JSONObject): McpToolResult {
                 val action = arguments.optString("action", "").trim().lowercase()
-                val res = memoryHandler?.invoke(action, arguments)
+                    val res = memoryHandler?.invoke(action, arguments)
                     ?: ToolOpResult(false, "memoryHandler unavailable", "长记忆服务暂不可用。")
                 return McpToolResult(
                     isError = !res.ok,
                     content = res.detail,
                     voiceSummary = res.voiceSummary,
                     expectsFollowUp = res.expectsFollowUp
+                )
+            }
+        })
+
+        // 39. web_search (低 Token 互联网实时检索)
+        register(object : JarvisMcpTool {
+            override val definition = McpToolDefinition(
+                name = "web_search",
+                description = "访问互联网检索实时信息（自动剥离网页噪音、去重并严格限流在 1400 字符内返回 Top 5 精简摘要，极省 Token）。",
+                inputSchema = JSONObject().apply {
+                    put("type", "object")
+                    put("properties", JSONObject().apply {
+                        put("query", JSONObject().put("type", "string").put("description", "精炼的搜索关键词"))
+                        put("max_results", JSONObject().put("type", "integer").put("description", "返回条数 1~5，默认 4"))
+                    })
+                    put("required", JSONArray().put("query"))
+                }
+            )
+            override suspend fun execute(arguments: JSONObject): McpToolResult {
+                val query = arguments.optString("query").trim()
+                if (query.isBlank()) {
+                    return McpToolResult(isError = true, content = "Missing query", voiceSummary = "请告诉我您想在网上查什么。")
+                }
+                val limit = arguments.optInt("max_results", 4).coerceIn(1, 5)
+                val res = dev.remote.terminal.jarvis.search.JarvisWebSearchClient.search(query, limit)
+                return res.fold(
+                    onSuccess = { summary ->
+                        McpToolResult(
+                            content = summary,
+                            voiceSummary = "已为您在网上检索到相关结果。",
+                            expectsFollowUp = true
+                        )
+                    },
+                    onFailure = { err ->
+                        McpToolResult(
+                            isError = true,
+                            content = err.message ?: "联网检索失败",
+                            voiceSummary = err.message ?: "暂时无法访问互联网检索。"
+                        )
+                    }
+                )
+            }
+        })
+
+        // 40. web_fetch (按问题向量相关性精准提取网页核心段落，极省 Token)
+        register(object : JarvisMcpTool {
+            override val definition = McpToolDefinition(
+                name = "web_fetch",
+                description = "读取指定 URL 网页正文，并在手机端本地按问题向量相关性过滤，仅返回最相关的 Top 4 段落（<= 1500 字符，极省 Token）。",
+                inputSchema = JSONObject().apply {
+                    put("type", "object")
+                    put("properties", JSONObject().apply {
+                        put("url", JSONObject().put("type", "string").put("description", "目标网页 http/https 地址"))
+                        put("query", JSONObject().put("type", "string").put("description", "可选：希望从网页提取的核心问题"))
+                    })
+                    put("required", JSONArray().put("url"))
+                }
+            )
+            override suspend fun execute(arguments: JSONObject): McpToolResult {
+                val url = arguments.optString("url").trim()
+                val query = arguments.optString("query").trim()
+                if (url.isBlank()) {
+                    return McpToolResult(isError = true, content = "Missing url", voiceSummary = "缺少要读取的网页地址。")
+                }
+                val res = dev.remote.terminal.jarvis.search.JarvisWebSearchClient.fetchRelevantPassages(url, query)
+                return res.fold(
+                    onSuccess = { passage ->
+                        McpToolResult(
+                            content = passage,
+                            voiceSummary = "已提取网页核心内容。",
+                            expectsFollowUp = true
+                        )
+                    },
+                    onFailure = { err ->
+                        McpToolResult(
+                            isError = true,
+                            content = err.message ?: "网页读取失败",
+                            voiceSummary = err.message ?: "无法读取该网页内容。"
+                        )
+                    }
                 )
             }
         })
@@ -1256,6 +1336,7 @@ object JarvisToolRegistry {
             setOf("dispatch_task", "get_task_status") to "选择开发者打开工作区并派发任务、查看进度",
             setOf("start_watching_task", "stop_watching_task", "get_watch_status") to "看着干活（0 Token 科学低功耗监工）",
             setOf("manage_memory") to "通过 SQLite 向量长记忆库自进化学习偏好与经验",
+            setOf("web_search", "web_fetch") to "访问互联网低 Token 检索信息与网页摘要",
             setOf("close_awake") to "退出唤醒态"
         )
         val actions = groups.filter { (names, _) -> names.all(::isManagerTool) }.map { it.second }
@@ -1282,6 +1363,7 @@ object JarvisToolRegistry {
         实例管理：用 get_app_state 查看 sessions 和 shared_tasks，按首页标题找到唯一记录，将其 id 传作 session_id。
         接入已有实例用 focus_terminal，关闭用 close_terminal，改名用 rename_terminal。打开尚未启动的工作区用 open_terminal，传主机和工作区，不发送命令。目标有歧义时请用户明确目标。
         开发者派发与监工：从 get_app_state 选主机、工作区和开发者，向 dispatch_task 提交 task_prompt（可传 agent_name、workspace_name、task_prompt）。已有实例可指定 session_id，没有实例时工具会在所选工作区启动开发者。随后将返回的 session_id 传给 get_task_status 核验接收或进度。需要看着干活时，调用 start_watching_task 开启 0 Token 低功耗自适应后台监工，stop_watching_task 结束监工。
+        互联网检索：需要查询外部实时知识、报错或最新资料时，用 web_search（传入简练关键词 query）或 web_fetch（传入 url 和 query），返回结果已做本地降噪精简，不浪费 Token。
         自进化长记忆：系统每次对话会自动从 SQLite 向量长记忆库召回相关经验；遇到用户新偏好、纠错或重要知识时，可用 manage_memory（action=save/search/forget/stats）主动沉淀或检索。
         配置管理：用 get_app_state 读取当前资源和设置，从 manage_host、manage_workspace、manage_agent 选择对应的 action 并传入目标。用 update_settings 写入用户要求修改的字段，再读取状态核验。
         历史和界面：用 manage_logs 的 list 查询历史，用 restore 和会话 ID 恢复会话；用 navigate_screen 切换页面，用 manage_session_window 管理会话窗口；用 close_awake 退出唤醒态。

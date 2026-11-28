@@ -64,7 +64,22 @@ data class JarvisConversationTurn(
     val isCompressed: Boolean = false
 )
 
-private class JarvisMemoryStore(context: Context) : SQLiteOpenHelper(context, "jarvis_memory.db", null, 3) {
+data class JarvisIntentHabit(
+    val id: String,
+    val phrase: String,
+    val phraseNorm: String,
+    val vector: FloatArray,
+    val actionType: String,
+    val targetWorkspace: String = "",
+    val targetAgent: String = "",
+    val targetHost: String = "",
+    val extraPrompt: String = "",
+    val hitCount: Int = 1,
+    val confidence: Float = 0.72f,
+    val lastUsedAt: Long = System.currentTimeMillis()
+)
+
+private class JarvisMemoryStore(context: Context) : SQLiteOpenHelper(context, "jarvis_memory.db", null, 4) {
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
             "CREATE TABLE IF NOT EXISTS memories (account TEXT NOT NULL, id TEXT NOT NULL, content TEXT NOT NULL, content_hash TEXT NOT NULL, " +
@@ -80,11 +95,13 @@ private class JarvisMemoryStore(context: Context) : SQLiteOpenHelper(context, "j
         db.execSQL("CREATE INDEX IF NOT EXISTS pending_turns_time ON pending_turns(account,created_at ASC)")
         createConversationTables(db)
         createLongMemoryTable(db)
+        createHabitTable(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         createConversationTables(db)
         createLongMemoryTable(db)
+        createHabitTable(db)
     }
 
     private fun createConversationTables(db: SQLiteDatabase) {
@@ -139,6 +156,113 @@ private class JarvisMemoryStore(context: Context) : SQLiteOpenHelper(context, "j
 
     private fun ensureLongMemoryTable() {
         createLongMemoryTable(writableDatabase)
+    }
+
+    private fun createHabitTable(db: SQLiteDatabase) {
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS intent_habits (" +
+                "account TEXT NOT NULL, " +
+                "id TEXT NOT NULL, " +
+                "phrase TEXT NOT NULL, " +
+                "phrase_norm TEXT NOT NULL, " +
+                "vector_blob BLOB NOT NULL, " +
+                "action_type TEXT NOT NULL, " +
+                "target_workspace TEXT NOT NULL DEFAULT '', " +
+                "target_agent TEXT NOT NULL DEFAULT '', " +
+                "target_host TEXT NOT NULL DEFAULT '', " +
+                "extra_prompt TEXT NOT NULL DEFAULT '', " +
+                "hit_count INTEGER NOT NULL DEFAULT 1, " +
+                "confidence REAL NOT NULL DEFAULT 0.72, " +
+                "last_used_at INTEGER NOT NULL, " +
+                "PRIMARY KEY(account, id))"
+        )
+        db.execSQL("CREATE INDEX IF NOT EXISTS intent_habits_rank ON intent_habits(account, hit_count DESC, last_used_at DESC)")
+    }
+
+    private fun ensureHabitTable() {
+        createHabitTable(writableDatabase)
+    }
+
+    @Synchronized
+    fun loadIntentHabits(account: String, limit: Int = 256): List<JarvisIntentHabit> {
+        ensureHabitTable()
+        val result = mutableListOf<JarvisIntentHabit>()
+        readableDatabase.query(
+            "intent_habits",
+            arrayOf("id", "phrase", "phrase_norm", "vector_blob", "action_type", "target_workspace", "target_agent", "target_host", "extra_prompt", "hit_count", "confidence", "last_used_at"),
+            "account = ?",
+            arrayOf(account),
+            null, null,
+            "hit_count DESC, last_used_at DESC",
+            limit.coerceIn(1, 256).toString()
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                result.add(
+                    JarvisIntentHabit(
+                        id = cursor.getString(0),
+                        phrase = cursor.getString(1),
+                        phraseNorm = cursor.getString(2),
+                        vector = JarvisVectorEmbedder.fromBlob(cursor.getBlob(3)),
+                        actionType = cursor.getString(4),
+                        targetWorkspace = cursor.getString(5),
+                        targetAgent = cursor.getString(6),
+                        targetHost = cursor.getString(7),
+                        extraPrompt = cursor.getString(8),
+                        hitCount = cursor.getInt(9),
+                        confidence = cursor.getFloat(10),
+                        lastUsedAt = cursor.getLong(11)
+                    )
+                )
+            }
+        }
+        return result
+    }
+
+    @Synchronized
+    fun upsertIntentHabit(account: String, habit: JarvisIntentHabit): JarvisIntentHabit {
+        ensureHabitTable()
+        writableDatabase.insertWithOnConflict(
+            "intent_habits", null,
+            ContentValues().apply {
+                put("account", account)
+                put("id", habit.id)
+                put("phrase", habit.phrase)
+                put("phrase_norm", habit.phraseNorm)
+                put("vector_blob", JarvisVectorEmbedder.toBlob(habit.vector))
+                put("action_type", habit.actionType)
+                put("target_workspace", habit.targetWorkspace)
+                put("target_agent", habit.targetAgent)
+                put("target_host", habit.targetHost)
+                put("extra_prompt", habit.extraPrompt)
+                put("hit_count", habit.hitCount.coerceAtLeast(1))
+                put("confidence", habit.confidence.coerceIn(0.1f, 1.0f))
+                put("last_used_at", habit.lastUsedAt)
+            },
+            SQLiteDatabase.CONFLICT_REPLACE
+        )
+        writableDatabase.execSQL(
+            "DELETE FROM intent_habits WHERE account = ? AND id NOT IN (SELECT id FROM intent_habits WHERE account = ? ORDER BY hit_count DESC, last_used_at DESC LIMIT 256)",
+            arrayOf(account, account)
+        )
+        return habit
+    }
+
+    @Synchronized
+    fun adjustHabitConfidence(account: String, id: String, delta: Float, at: Long) {
+        ensureHabitTable()
+        writableDatabase.execSQL(
+            "UPDATE intent_habits SET confidence = MAX(0.1, MIN(1.0, confidence + ?)), hit_count = CASE WHEN ? > 0 THEN hit_count + 1 ELSE hit_count END, last_used_at = ? WHERE account = ? AND id = ?",
+            arrayOf<Any?>(delta, delta, at, account, id)
+        )
+    }
+
+    @Synchronized
+    fun adjustLongMemoryConfidence(account: String, id: String, delta: Float, at: Long) {
+        ensureLongMemoryTable()
+        writableDatabase.execSQL(
+            "UPDATE long_memories SET confidence = MAX(0.1, MIN(1.0, confidence + ?)), updated_at = ? WHERE account = ? AND id = ?",
+            arrayOf<Any?>(delta, at, account, id)
+        )
     }
 
     @Synchronized
@@ -472,6 +596,10 @@ class JarvisMemoryManager(context: Context, private val localStore: LocalStore) 
     private val activeTurns = CopyOnWriteArrayList<JarvisConversationTurn>()
     @Volatile
     private var contextSummary: String = ""
+    @Volatile
+    private var lastRecalledMemoryIds: List<String> = emptyList()
+    @Volatile
+    private var lastMatchedHabitId: String? = null
 
     init {
         val account = currentAccount().ifBlank { "local_default" }
@@ -940,6 +1068,151 @@ class JarvisMemoryManager(context: Context, private val localStore: LocalStore) 
     }
 
     /**
+     * 学习用户的专属口头习惯与隐含意图映射（越用越懂用户，形成默契）。
+     */
+    suspend fun learnIntentHabit(
+        phrase: String,
+        actionType: String,
+        workspace: String = "",
+        agent: String = "",
+        host: String = "",
+        extraPrompt: String = ""
+    ) = withContext(Dispatchers.IO) {
+        val clean = phrase.trim().take(120)
+        if (clean.length < 2 || actionType.isBlank() || commandOnly.matches(clean)) return@withContext
+        val norm = normalizeHabitPhrase(clean)
+        if (norm.length < 2) return@withContext
+        val vec = JarvisVectorEmbedder.embed(norm)
+        val now = System.currentTimeMillis()
+        mutex.withLock {
+            val account = currentAccount().ifBlank { "local_default" }
+            val existing = store.loadIntentHabits(account, 256)
+            var matched: JarvisIntentHabit? = null
+            for (h in existing) {
+                val sim = JarvisVectorEmbedder.cosineSimilarity(vec, h.vector)
+                if ((h.phraseNorm == norm || sim >= 0.88f) && h.actionType == actionType) {
+                    matched = h
+                    break
+                }
+            }
+            if (matched != null) {
+                val updated = matched.copy(
+                    targetWorkspace = workspace.ifBlank { matched.targetWorkspace },
+                    targetAgent = agent.ifBlank { matched.targetAgent },
+                    targetHost = host.ifBlank { matched.targetHost },
+                    extraPrompt = extraPrompt.ifBlank { matched.extraPrompt },
+                    hitCount = matched.hitCount + 1,
+                    confidence = (matched.confidence + 0.08f).coerceAtMost(1.0f),
+                    lastUsedAt = now
+                )
+                store.upsertIntentHabit(account, updated)
+                lastMatchedHabitId = updated.id
+            } else {
+                val id = shaId("$actionType:$norm:$workspace:$agent")
+                val habit = JarvisIntentHabit(
+                    id = id,
+                    phrase = clean,
+                    phraseNorm = norm,
+                    vector = vec,
+                    actionType = actionType,
+                    targetWorkspace = workspace,
+                    targetAgent = agent,
+                    targetHost = host,
+                    extraPrompt = extraPrompt,
+                    hitCount = 1,
+                    confidence = 0.72f,
+                    lastUsedAt = now
+                )
+                store.upsertIntentHabit(account, habit)
+                lastMatchedHabitId = id
+            }
+        }
+    }
+
+    /**
+     * Tier-1.5 零 Token 默契匹配：当某句口头习惯已被多次验证且置信度高时，无需询问模型即可心领神会。
+     */
+    fun matchTacitHabit(utterance: String): JarvisIntentHabit? {
+        val norm = normalizeHabitPhrase(utterance)
+        if (norm.length < 2) return null
+        val account = currentAccount().ifBlank { "local_default" }
+        val habits = store.loadIntentHabits(account, 256)
+        if (habits.isEmpty()) return null
+
+        val uVec = JarvisVectorEmbedder.embed(norm)
+        var best: JarvisIntentHabit? = null
+        var bestScore = 0f
+        for (h in habits) {
+            if (h.hitCount < 2 || h.confidence < 0.84f) continue
+            val exact = h.phraseNorm == norm
+            val sim = JarvisVectorEmbedder.cosineSimilarity(uVec, h.vector)
+            val score = if (exact) 1.0f else sim
+            if (score >= 0.88f && score > bestScore) {
+                bestScore = score
+                best = h
+            }
+        }
+        if (best != null) {
+            lastMatchedHabitId = best.id
+            store.adjustHabitConfidence(account, best.id, 0.02f, System.currentTimeMillis())
+        }
+        return best
+    }
+
+    /**
+     * 默契正负反馈闭环：用户肯定时强化刚使用的记忆与意图习惯，否定/纠错时降权并反思。
+     */
+    suspend fun applyFeedback(isPositive: Boolean) = withContext(Dispatchers.IO) {
+        val account = currentAccount().ifBlank { "local_default" }
+        val now = System.currentTimeMillis()
+        val delta = if (isPositive) 0.06f else -0.22f
+        mutex.withLock {
+            lastMatchedHabitId?.let { hid ->
+                store.adjustHabitConfidence(account, hid, delta, now)
+            }
+            lastRecalledMemoryIds.forEach { mid ->
+                store.adjustLongMemoryConfidence(account, mid, if (isPositive) 0.04f else -0.15f, now)
+            }
+        }
+    }
+
+    /**
+     * 生成紧凑型【用户默契画像】（<= 450 字符），每次对话注入上下文，让大模型越用越懂用户。
+     */
+    fun buildUserTacitProfile(): String {
+        val account = currentAccount().ifBlank { "local_default" }
+        val longMemories = store.loadLongMemories(account, 200)
+        val habits = store.loadIntentHabits(account, 32)
+        if (longMemories.isEmpty() && habits.isEmpty()) return ""
+
+        return buildString {
+            appendLine("【用户默契画像（系统长期沉淀，请心领神会地顺应用户习惯）】：")
+            val topPrefs = longMemories
+                .filter { it.category in setOf("habit", "preference", "correction", "profile") && it.confidence >= 0.72f }
+                .sortedByDescending { it.importance * it.confidence + it.recallCount * 0.2f }
+                .take(4)
+            for (m in topPrefs) {
+                val line = "- ${m.content.take(90)}\n"
+                if (length + line.length > 360) break
+                append(line)
+            }
+            val topHabits = habits.filter { it.hitCount >= 2 && it.confidence >= 0.8f }.take(3)
+            if (topHabits.isNotEmpty() && length < 410) {
+                val habitSummary = topHabits.joinToString("；") { h ->
+                    val target = listOf(h.targetWorkspace, h.targetAgent).filter { it.isNotBlank() }.joinToString("/")
+                    "“${h.phrase.take(16)}”→${h.actionType}${if (target.isNotBlank()) "($target)" else ""}"
+                }
+                append("- 高频默契：$habitSummary")
+            }
+        }.trim()
+    }
+
+    private fun normalizeHabitPhrase(text: String): String = text.trim().lowercase()
+        .replace(Regex("""^(?:贾维斯|jarvis)[，,:：\s]*"""), "")
+        .replace(Regex("""[。！!？?，,\s]+"""), " ")
+        .trim()
+
+    /**
      * 每次对话前自动调用：从 SQLite 向量长记忆库 + 近期短记忆（+ 云端 Mem0 若登录）中召回最相关联的长记忆注入大模型上下文。
      */
     suspend fun recallContext(query: String): String = withContext(Dispatchers.IO) {
@@ -954,17 +1227,25 @@ class JarvisMemoryManager(context: Context, private val localStore: LocalStore) 
             val vectorHits = recallLongMemoriesInternal(account, query, limit = 8)
             val sections = mutableListOf<String>()
 
+            val profile = buildUserTacitProfile()
+            if (profile.isNotBlank()) {
+                sections.add(profile)
+            }
+
             if (vectorHits.isNotEmpty()) {
+                lastRecalledMemoryIds = vectorHits.map { it.first.id }
                 vectorHits.forEach { (entry, _) -> store.touchLongMemory(account, entry.id, now) }
                 sections.add(buildString {
                     appendLine("【Jarvis SQLite 向量长记忆召回（过往习惯、偏好、纠错与经验，请优先尊重用户习惯避免重犯错误）】：")
-                    for ((entry, score) in vectorHits) {
+                    for ((entry, _) in vectorHits) {
                         val confPct = (entry.confidence * 100).toInt()
                         val line = "- [${entry.category}/重要度${entry.importance}/置信${confPct}%/召回${entry.recallCount + 1}次] ${entry.content}\n"
                         if (length + line.length > LONG_CONTEXT_LIMIT) break
                         append(line)
                     }
                 }.trim())
+            } else {
+                lastRecalledMemoryIds = emptyList()
             }
 
             // 2. 匹配热缓存/短记忆补充
