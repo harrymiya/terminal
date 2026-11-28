@@ -1016,8 +1016,12 @@ class JarvisMemoryManager(context: Context, private val localStore: LocalStore) 
                 (0.16f * importanceScore) +
                 (0.12f * (recencyDecay * 0.5f + reinforcementBoost))
 
-            // 纠错经验与核心偏好额外加权
-            val priorityBonus = if (entry.category == "correction" || (entry.category == "preference" && entry.importance >= 5)) 0.08f else 0f
+            val priorityBonus = when {
+                entry.category == "correction" -> 0.14f
+                entry.category == "preference" && entry.importance >= 5 -> 0.08f
+                entry.category == "habit" && entry.confidence >= 0.85f -> 0.05f
+                else -> 0f
+            }
             val finalScore = totalScore + priorityBonus
 
             if (finalScore < 0.22f && cosSim < 0.20f) null else entry to finalScore
@@ -1234,11 +1238,11 @@ class JarvisMemoryManager(context: Context, private val localStore: LocalStore) 
         var best: JarvisIntentHabit? = null
         var bestScore = 0f
         for (h in habits) {
-            if (h.hitCount < 2 || h.confidence < 0.84f) continue
+            if (h.hitCount < 2 || h.confidence < 0.78f) continue
             val exact = h.phraseNorm == norm
             val sim = JarvisVectorEmbedder.cosineSimilarity(uVec, h.vector)
             val score = if (exact) 1.0f else sim
-            if (score >= 0.88f && score > bestScore) {
+            if (score >= 0.86f && score > bestScore) {
                 bestScore = score
                 best = h
             }

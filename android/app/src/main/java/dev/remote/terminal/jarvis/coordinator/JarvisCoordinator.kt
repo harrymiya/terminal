@@ -6,7 +6,9 @@ import android.util.Log
 import dev.remote.terminal.jarvis.api.JarvisAction
 import dev.remote.terminal.jarvis.api.JarvisConfig
 import dev.remote.terminal.jarvis.api.JarvisContext
+import dev.remote.terminal.jarvis.api.JarvisSessionBrief
 import dev.remote.terminal.jarvis.api.JarvisState
+import dev.remote.terminal.jarvis.intent.JarvisEntityResolver
 import dev.remote.terminal.jarvis.api.VoicePerceptor
 import dev.remote.terminal.jarvis.api.VoicePerceptorCallback
 import dev.remote.terminal.jarvis.audio.BluetoothScoManager
@@ -62,6 +64,22 @@ object JarvisCoordinator : VoicePerceptorCallback {
     @Volatile
     private var lastUserUtterance: String = ""
 
+    private data class WorkingFocus(
+        val workspace: String = "",
+        val agent: String = "",
+        val host: String = "",
+        val sessionId: String = "",
+        val taskPrompt: String = "",
+        val toolName: String = "",
+        val updatedAtMs: Long = 0L
+    )
+
+    @Volatile
+    private var workingFocus = WorkingFocus()
+
+    @Volatile
+    private var lastMatchedHabitThisTurn: Boolean = false
+
     private val _state = MutableStateFlow(JarvisState.DISABLED)
     val state: StateFlow<JarvisState> = _state.asStateFlow()
 
@@ -111,7 +129,8 @@ object JarvisCoordinator : VoicePerceptorCallback {
                 resolveTacitHabitAction(utterance)
             }
         }
-        RemoteDevAgent.onToolExecutedListener = { toolName, args ->
+        RemoteDevAgent.onToolExecutedListener = { toolName, args, resultContent ->
+            updateWorkingFocusFromTool(toolName, args, resultContent)
             recordLearnedHabitFromTool(lastUserUtterance, toolName, args)
         }
         dev.remote.terminal.jarvis.perception.JarvisSpeechCorrector.wakeWordProvider = { config.wakeWord }
@@ -437,15 +456,21 @@ object JarvisCoordinator : VoicePerceptorCallback {
             }
             Log.i(TAG, "Final speech recognized: \"$text\"")
             lastUserUtterance = text
+            lastMatchedHabitThisTurn = false
             _subtitle.value = text
             updateState(JarvisState.PROCESSING)
+
+            val context = buildJarvisContext()
+            val anyPendingConfirm = context.openSessions.any { it.needsAction || it.pendingHostKey }
 
             memoryManager?.let { mgr ->
                 scope.launch(Dispatchers.IO) {
                     val trimmed = text.trim()
-                    if (Regex("""^(?:对|没错|就是这个|干得好|不错|很好|太棒了)[。！!]*$""").matches(trimmed)) {
+                    val isPurePraise = Regex("""^(?:没错|就是这个|干得好|不错|很好|太棒了|挺好)[。！!]*$""").matches(trimmed) ||
+                        (Regex("""^对[。！!]*$""").matches(trimmed) && !anyPendingConfirm)
+                    if (isPurePraise) {
                         mgr.applyFeedback(isPositive = true)
-                    } else if (Regex("""(?:不对|错了|记错了|搞错了|不是这个|不是那样)""").containsMatchIn(trimmed)) {
+                    } else if (Regex("""^(?:不对|错了|记错了|搞错了|不是这个|不是那个|不是那样|别用)""").containsMatchIn(trimmed)) {
                         mgr.applyFeedback(isPositive = false)
                     }
                     runCatching { mgr.beginTurn(text) }
@@ -453,7 +478,6 @@ object JarvisCoordinator : VoicePerceptorCallback {
                 }
             }
 
-            val context = JarvisContext(workspaces = workspaceListProvider())
             val action = intentRouter?.resolveIntent(text, context) ?: JarvisAction.None
             if (action !is JarvisAction.DirectReply && action != JarvisAction.None) {
                 earconManager.playThinkingChime()
@@ -479,17 +503,50 @@ object JarvisCoordinator : VoicePerceptorCallback {
                         return@launch
                     }
                     if (result.isError) {
+                        if (lastMatchedHabitThisTurn) {
+                            scope.launch(Dispatchers.IO) {
+                                runCatching { memoryManager?.applyFeedback(isPositive = false) }
+                            }
+                        }
+                        if (action.toolName != "close_awake" && hasConfiguredModel()) {
+                            _subtitle.value = "Jarvis 正在自动纠偏…"
+                            val convContext = memoryManager?.getFormattedConversationContext().orEmpty()
+                            val memContext = runCatching { memoryManager?.recallContext(userText).orEmpty() }.getOrDefault("")
+                            val focusText = formatWorkingFocusPrompt()
+                            val recovered = runModel { complete ->
+                                RemoteDevAgent.recoverFromToolError(
+                                    originalRequest = userText,
+                                    failedTool = action.toolName,
+                                    failedArgs = action.arguments.toString(),
+                                    errorDetail = result.content,
+                                    memoryContext = memContext,
+                                    conversationContext = convContext,
+                                    workingFocus = focusText,
+                                    complete = complete
+                                )
+                            }
+                            if (!_conversationActive.value) return@launch
+                            recovered.onSuccess { reply ->
+                                if (reply.isNotBlank()) {
+                                    earconManager.playActionSuccessChime()
+                                    recordMemoryTurn(userText, reply)
+                                    speakWithState(reply) { openFollowUpListeningWindow() }
+                                    return@launch
+                                }
+                            }
+                        }
                         earconManager.playAlertChime()
-                        speakWithState(result.voiceSummary ?: "执行工具失败。") {
+                        speakWithState(result.voiceSummary ?: "这件事暂时没办成。") {
                             openFollowUpListeningWindow()
                         }
                     } else {
+                        updateWorkingFocusFromTool(action.toolName, action.arguments, result.content)
                         val fallback = result.voiceSummary ?: "操作已完成。"
                         val reply = if (summarize) {
                             _subtitle.value = "Jarvis 正在整理状态…"
                             val convContext = memoryManager?.getFormattedConversationContext().orEmpty()
                             runModel { complete ->
-                                RemoteDevAgent.summarizeStatus(userText, result.content, convContext, complete)
+                                RemoteDevAgent.summarizeStatus(userText, result.content, convContext, formatWorkingFocusPrompt(), complete)
                             }.getOrDefault(fallback)
                         } else fallback
                         if (!_conversationActive.value) return@launch
@@ -510,7 +567,9 @@ object JarvisCoordinator : VoicePerceptorCallback {
                         }
                     }
                 }
-                if (summarize) chatJob = job
+                if (summarize || action.toolName in setOf("focus_terminal", "open_terminal", "dispatch_task", "close_terminal")) {
+                    chatJob = job
+                }
             }
             is JarvisAction.AskAgent -> {
                 if (chatJob?.isActive == true) {
@@ -596,7 +655,7 @@ object JarvisCoordinator : VoicePerceptorCallback {
             ""
         }
         val result = runModel { complete ->
-            RemoteDevAgent.respond(action.message, memoryContext, conversationContext, complete)
+            RemoteDevAgent.respond(action.message, memoryContext, conversationContext, formatWorkingFocusPrompt(), complete)
         }
         Log.i(TAG, "Agent turn completed in ${SystemClock.elapsedRealtime() - t0}ms (success=${result.isSuccess})")
         result.onSuccess { reply ->
@@ -681,12 +740,140 @@ object JarvisCoordinator : VoicePerceptorCallback {
         }.getOrNull().orEmpty()
     }
 
+    private fun buildJarvisContext(): JarvisContext {
+        val hosts = hostsProvider?.invoke().orEmpty()
+        val agents = agentsProvider?.invoke().orEmpty()
+        val state = runCatching { dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.appStateProvider?.invoke() }.getOrNull()
+
+        fun parseBriefs(arr: org.json.JSONArray?, isShared: Boolean): List<JarvisSessionBrief> {
+            if (arr == null) return emptyList()
+            val list = mutableListOf<JarvisSessionBrief>()
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                list.add(
+                    JarvisSessionBrief(
+                        id = obj.optString("id"),
+                        title = obj.optString("title").ifBlank { obj.optString("display_name") },
+                        workspace = obj.optString("workspace"),
+                        host = obj.optString("host"),
+                        agent = obj.optString("agent"),
+                        connected = obj.optBoolean("connected", false),
+                        focused = obj.optBoolean("focused", false),
+                        isStreaming = obj.optBoolean("is_streaming", false),
+                        needsAction = obj.optBoolean("needs_action", false),
+                        pendingHostKey = obj.optBoolean("pending_host_key", false),
+                        isShared = isShared
+                    )
+                )
+            }
+            return list
+        }
+
+        val openSessions = parseBriefs(state?.optJSONArray("sessions"), isShared = false)
+        val sharedTasks = parseBriefs(state?.optJSONArray("shared_tasks"), isShared = true)
+        val allWorkspaces = (workspaceListProvider() +
+            hosts.flatMap { h -> h.directories.map { it.name } } +
+            openSessions.map { it.workspace } +
+            sharedTasks.map { it.workspace })
+            .filter { it.isNotBlank() }
+            .distinct()
+        val allHosts = hosts.map { it.name }.filter { it.isNotBlank() }.distinct()
+        val allAgents = agents.flatMap { listOf(it.name, it.command) }.filter { it.isNotBlank() }.distinct()
+        val focus = workingFocus
+        return JarvisContext(
+            workspaces = allWorkspaces,
+            hosts = allHosts,
+            agents = allAgents,
+            openSessions = openSessions,
+            sharedTasks = sharedTasks,
+            lastWorkspace = focus.workspace,
+            lastAgent = focus.agent,
+            lastHost = focus.host,
+            lastSessionId = focus.sessionId,
+            lastTaskPrompt = focus.taskPrompt,
+            lastToolName = focus.toolName,
+            lastActionTimeMs = focus.updatedAtMs
+        )
+    }
+
+    private fun hasConfiguredModel(): Boolean {
+        val store = storeProvider?.invoke() ?: return false
+        if (store.loadJarvisUsesModelApi()) {
+            return store.loadJarvisModelApiSettings().key.isNotBlank()
+        }
+        val hosts = hostsProvider?.invoke().orEmpty()
+        val targetHost = hosts.firstOrNull { config.targetHostId.isNotBlank() && it.id == config.targetHostId }
+            ?: hosts.firstOrNull { it.id == selectedHostIdProvider() }
+            ?: hosts.firstOrNull() ?: return false
+        val hostPresets = dev.remote.terminal.data.hostAgents(targetHost, agentsProvider?.invoke().orEmpty())
+        val model = config.targetModel
+        return hostPresets.any {
+            (config.targetAgentCommand.isBlank() || it.command == config.targetAgentCommand) &&
+                RemoteCliModel.supports(it.command, model)
+        }
+    }
+
+    private fun updateWorkingFocusFromTool(toolName: String, args: org.json.JSONObject, resultContent: String) {
+        if (toolName !in setOf("dispatch_task", "open_terminal", "focus_terminal", "run_in_workspace", "run_terminal_command", "start_watching_task", "select_agent", "select_host", "get_task_status")) {
+            return
+        }
+        val json = if (resultContent.trim().startsWith("{")) {
+            runCatching { org.json.JSONObject(resultContent) }.getOrNull()
+        } else null
+        val ws = json?.optString("workspace")?.takeIf { it.isNotBlank() }
+            ?: args.optString("workspace_name").ifBlank { args.optString("workspace") }.trim()
+        val ag = json?.optString("agent")?.takeIf { it.isNotBlank() }
+            ?: args.optString("agent_name").ifBlank { args.optString("agent_command") }.trim()
+        val host = json?.optString("host")?.takeIf { it.isNotBlank() }
+            ?: args.optString("host_name").trim()
+        val sid = json?.optString("session_id")?.takeIf { it.isNotBlank() }
+            ?: args.optString("session_id").trim()
+        val prompt = args.optString("task_prompt").ifBlank { args.optString("prompt") }.trim()
+
+        val prev = workingFocus
+        workingFocus = prev.copy(
+            workspace = ws.ifBlank { prev.workspace },
+            agent = ag.ifBlank { prev.agent },
+            host = host.ifBlank { prev.host },
+            sessionId = sid.ifBlank { prev.sessionId },
+            taskPrompt = prompt.ifBlank { prev.taskPrompt },
+            toolName = toolName,
+            updatedAtMs = System.currentTimeMillis()
+        )
+    }
+
+    private fun formatWorkingFocusPrompt(): String {
+        val f = workingFocus
+        val parts = listOfNotNull(
+            f.workspace.takeIf { it.isNotBlank() }?.let { "工作区=$it" },
+            f.agent.takeIf { it.isNotBlank() }?.let { "开发者=$it" },
+            f.host.takeIf { it.isNotBlank() }?.let { "主机=$it" },
+            f.sessionId.takeIf { it.isNotBlank() }?.let { "会话=$it" },
+            f.toolName.takeIf { it.isNotBlank() }?.let { "刚执行=$it" },
+            f.taskPrompt.takeIf { it.isNotBlank() }?.let { "最近任务=${it.take(80)}" }
+        )
+        return if (parts.isEmpty()) "" else "【当前焦点】：${parts.joinToString("，")}"
+    }
+
     private fun resolveTacitHabitAction(utterance: String): JarvisAction? {
         val mgr = memoryManager ?: return null
         val habit = mgr.matchTacitHabit(utterance) ?: return null
+        val hosts = hostsProvider?.invoke().orEmpty()
+        val allDirs = hosts.flatMap { it.directories.map { d -> d.name } }
+        val agents = agentsProvider?.invoke().orEmpty()
+
+        val resolvedWs = if (habit.targetWorkspace.isNotBlank()) {
+            JarvisEntityResolver.resolveWorkspaceName(habit.targetWorkspace, allDirs)
+                ?: return null // 目标工作区已不存在，避免误执行过期习惯
+        } else ""
+        val resolvedAgent = if (habit.targetAgent.isNotBlank()) {
+            JarvisEntityResolver.resolveAgent(habit.targetAgent, agents)?.name ?: habit.targetAgent
+        } else ""
+
+        lastMatchedHabitThisTurn = true
         val args = org.json.JSONObject()
-        if (habit.targetWorkspace.isNotBlank()) args.put("workspace_name", habit.targetWorkspace)
-        if (habit.targetAgent.isNotBlank()) args.put("agent_name", habit.targetAgent)
+        if (resolvedWs.isNotBlank()) args.put("workspace_name", resolvedWs)
+        if (resolvedAgent.isNotBlank()) args.put("agent_name", resolvedAgent)
         if (habit.targetHost.isNotBlank()) args.put("host_name", habit.targetHost)
         if (habit.extraPrompt.isNotBlank() && habit.actionType == "dispatch_task") {
             args.put("task_prompt", habit.extraPrompt)
@@ -707,6 +894,7 @@ object JarvisCoordinator : VoicePerceptorCallback {
         val ag = args.optString("agent_name").ifBlank { args.optString("agent_command") }.trim()
         val host = args.optString("host_name").trim()
         val prompt = args.optString("task_prompt").trim()
+        if (toolName == "dispatch_task" && prompt == "继续") return
         scope.launch(Dispatchers.IO) {
             runCatching {
                 mgr.learnIntentHabit(

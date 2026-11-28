@@ -535,7 +535,9 @@ private fun RemoteTerminalApp(store: LocalStore) {
             dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.agentsProvider = { agents.toList() }
             dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.selectedHostIdProvider = { selectedHostId }
             dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.workspaceListProvider = {
-                hosts.firstOrNull { it.id == selectedHostId }?.directories?.map { it.name }.orEmpty()
+                val primary = hosts.firstOrNull { it.id == selectedHostId }?.directories?.map { it.name }.orEmpty()
+                val others = hosts.filterNot { it.id == selectedHostId }.flatMap { it.directories.map { d -> d.name } }
+                (primary + others).distinct()
             }
             dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.init(appContext)
             dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.config.enabled = store.loadJarvisEnabled()
@@ -1395,25 +1397,28 @@ private fun RemoteTerminalApp(store: LocalStore) {
                         else score -= 40
                     }
                     if (wsKey.isNotEmpty()) {
-                        when {
-                            dirName.equals(wsKey, true) || disp.equals(wsKey, true) || labelTitle.equals(wsKey, true) -> score += 90
-                            dirName.contains(wsKey, true) || disp.contains(wsKey, true) || labelTitle.contains(wsKey, true) || dirPath.contains(wsKey, true) -> score += 45
-                            else -> score -= 25
-                        }
+                        val wsScore = dev.remote.terminal.jarvis.intent.JarvisEntityResolver.scoreCandidate(
+                            wsKey,
+                            listOf(dirName, disp, labelTitle, dirPath)
+                        )
+                        if (wsScore != null) score += wsScore
+                        else score -= 25
                     }
                     if (hostKey.isNotEmpty()) {
-                        when {
-                            hId.equals(hostKey, true) || hName.equals(hostKey, true) -> score += 60
-                            hName.contains(hostKey, true) -> score += 30
-                            else -> score -= 35
-                        }
+                        val hScore = dev.remote.terminal.jarvis.intent.JarvisEntityResolver.scoreCandidate(
+                            hostKey,
+                            listOf(hId, hName)
+                        )
+                        if (hScore != null) score += (hScore * 0.65).toInt()
+                        else score -= 35
                     }
                     if (agentKey.isNotEmpty()) {
-                        when {
-                            aName.equals(agentKey, true) || aCmd.equals(agentKey, true) -> score += 55
-                            aName.contains(agentKey, true) || aCmd.contains(agentKey, true) -> score += 28
-                            else -> score -= 30
-                        }
+                        val matchedAgent = dev.remote.terminal.jarvis.intent.JarvisEntityResolver.resolveAgent(
+                            agentKey,
+                            listOf(s.task.agent)
+                        )
+                        if (matchedAgent != null) score += 60
+                        else score -= 30
                     }
                     if (s.isSessionConnected) score += 8
                     if (idx == activePage) score += 5
@@ -1515,12 +1520,41 @@ private fun RemoteTerminalApp(store: LocalStore) {
 
             fun resolveHostBy(hostId: String?, hostName: String?): HostProfile? {
                 if (!hostId.isNullOrBlank()) {
-                    hosts.firstOrNull { it.id == hostId || it.name.equals(hostId, true) || it.name.contains(hostId, true) }?.let { return it }
+                    hosts.firstOrNull { it.id == hostId }?.let { return it }
+                    dev.remote.terminal.jarvis.intent.JarvisEntityResolver.resolveHost(hostId, hosts)?.let { return it }
                 }
                 if (!hostName.isNullOrBlank()) {
-                    hosts.firstOrNull { it.name.equals(hostName, true) || it.name.contains(hostName, true) }?.let { return it }
+                    dev.remote.terminal.jarvis.intent.JarvisEntityResolver.resolveHost(hostName, hosts)?.let { return it }
                 }
                 return hosts.firstOrNull { it.id == selectedHostId } ?: hosts.firstOrNull()
+            }
+
+            fun resolveDirectoryAcrossHosts(
+                hostId: String?,
+                hostName: String?,
+                wsPath: String?,
+                wsName: String?
+            ): Pair<HostProfile, ProjectDirectory>? {
+                if (!hostId.isNullOrBlank() || !hostName.isNullOrBlank()) {
+                    val host = resolveHostBy(hostId, hostName) ?: return null
+                    val dir = dev.remote.terminal.jarvis.intent.JarvisEntityResolver.resolveDirectory(wsName, wsPath, host.directories)
+                        ?: if (wsName.isNullOrBlank() && wsPath.isNullOrBlank()) host.directories.firstOrNull() else null
+                    return dir?.let { host to it }
+                }
+                val prioritizedHosts = buildList {
+                    hosts.firstOrNull { it.id == selectedHostId }?.let { add(it) }
+                    hosts.filterNot { it.id == selectedHostId }.forEach { add(it) }
+                }
+                for (host in prioritizedHosts) {
+                    val dir = dev.remote.terminal.jarvis.intent.JarvisEntityResolver.resolveDirectory(wsName, wsPath, host.directories)
+                    if (dir != null) return host to dir
+                }
+                if (wsName.isNullOrBlank() && wsPath.isNullOrBlank()) {
+                    val fallbackHost = prioritizedHosts.firstOrNull() ?: return null
+                    val fallbackDir = fallbackHost.directories.firstOrNull() ?: return null
+                    return fallbackHost to fallbackDir
+                }
+                return null
             }
 
             dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.appStateProvider = {
@@ -1652,8 +1686,9 @@ private fun RemoteTerminalApp(store: LocalStore) {
             dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.selectHostHandler = { id, index, name ->
                 val target = when {
                     id != null -> hosts.firstOrNull { it.id == id }
+                        ?: dev.remote.terminal.jarvis.intent.JarvisEntityResolver.resolveHost(id, hosts)
                     index != null -> hosts.getOrNull(index)
-                    name != null -> hosts.firstOrNull { it.name.equals(name, true) || it.name.contains(name, true) }
+                    name != null -> dev.remote.terminal.jarvis.intent.JarvisEntityResolver.resolveHost(name, hosts)
                     else -> null
                 }
                 if (target != null) {
@@ -1666,8 +1701,8 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 val activeAgents = hostAgents(hosts.firstOrNull { it.id == selectedHostId }, agents)
                 val target = when {
                     id != null -> activeAgents.firstOrNull { it.id == id } ?: agents.firstOrNull { it.id == id }
-                    name != null -> activeAgents.firstOrNull { it.name.equals(name, true) || it.name.contains(name, true) || it.command.contains(name, true) }
-                        ?: agents.firstOrNull { it.name.equals(name, true) || it.name.contains(name, true) || it.command.contains(name, true) }
+                    name != null -> dev.remote.terminal.jarvis.intent.JarvisEntityResolver.resolveAgent(name, activeAgents)
+                        ?: dev.remote.terminal.jarvis.intent.JarvisEntityResolver.resolveAgent(name, agents)
                     else -> null
                 }
                 if (target != null) {
@@ -1677,20 +1712,20 @@ private fun RemoteTerminalApp(store: LocalStore) {
             }
 
             dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.openTerminalHandler = { hostId, hostName, wsPath, wsName, cmd, agentName, reuseExisting, initialCommand, focus ->
-                val targetHost = resolveHostBy(hostId, hostName)
+                val resolvedPair = resolveDirectoryAcrossHosts(hostId, hostName, wsPath, wsName)
+                val targetHost = resolvedPair?.first ?: resolveHostBy(hostId, hostName)
                 if (targetHost == null) {
                     dev.remote.terminal.jarvis.mcp.ToolOpResult(false, "No host found", "未找到可用主机。")
                 } else {
-                    val targetDir = targetHost.directories.firstOrNull { d ->
-                        (wsPath != null && (d.path.equals(wsPath, true) || d.path.contains(wsPath, true))) ||
-                            (wsName != null && (d.name.equals(wsName, true) || d.name.contains(wsName, true)))
-                    } ?: if (wsName == null && wsPath == null) targetHost.directories.firstOrNull() else null
-
+                    val targetDir = resolvedPair?.second
+                    val hostScopedAgents = dev.remote.terminal.data.hostAgents(targetHost, agents)
                     val targetAgent = when {
-                        cmd != null -> agents.firstOrNull { it.command.equals(cmd, true) || it.name.equals(cmd, true) || it.name.contains(cmd, true) }
-                        agentName != null -> agents.firstOrNull { it.name.equals(agentName, true) || it.name.contains(agentName, true) || it.command.contains(agentName, true) }
+                        cmd != null -> dev.remote.terminal.jarvis.intent.JarvisEntityResolver.resolveAgent(cmd, hostScopedAgents)
+                            ?: dev.remote.terminal.jarvis.intent.JarvisEntityResolver.resolveAgent(cmd, agents)
+                        agentName != null -> dev.remote.terminal.jarvis.intent.JarvisEntityResolver.resolveAgent(agentName, hostScopedAgents)
+                            ?: dev.remote.terminal.jarvis.intent.JarvisEntityResolver.resolveAgent(agentName, agents)
                         else -> null
-                    } ?: agents.firstOrNull { it.id == selectedAgentId } ?: agents.firstOrNull()
+                    } ?: dev.remote.terminal.data.hostSelectedAgent(targetHost, hostScopedAgents, store) ?: agents.firstOrNull()
 
                     if (targetDir == null) {
                         dev.remote.terminal.jarvis.mcp.ToolOpResult(false, "Workspace not found on ${targetHost.name}", "在主机 ${targetHost.name} 上未找到工作区 ${wsName ?: wsPath}。")
@@ -1807,7 +1842,8 @@ private fun RemoteTerminalApp(store: LocalStore) {
                         requestedHostId != null -> hosts.filter { it.id.equals(requestedHostId, true) }
                         requestedHostName != null -> {
                             val exact = hosts.filter { it.name.equals(requestedHostName, true) }
-                            if (exact.isNotEmpty()) exact else hosts.filter { it.name.contains(requestedHostName, true) }
+                            if (exact.isNotEmpty()) exact
+                            else listOfNotNull(dev.remote.terminal.jarvis.intent.JarvisEntityResolver.resolveHost(requestedHostName, hosts))
                         }
                         hasWorkspaceTarget -> hosts
                         activeSession != null -> listOf(activeSession.task.host)
@@ -1824,18 +1860,34 @@ private fun RemoteTerminalApp(store: LocalStore) {
                     }
 
                     val directoryCandidates = hostCandidates.flatMap { host -> host.directories.map { host to it } }
+                    fun disambiguateDir(matches: List<Pair<dev.remote.terminal.data.HostProfile, dev.remote.terminal.data.ProjectDirectory>>): Pair<dev.remote.terminal.data.HostProfile, dev.remote.terminal.data.ProjectDirectory>? {
+                        if (matches.size <= 1) return matches.singleOrNull()
+                        matches.firstOrNull { (h, d) ->
+                            sessions.any { s -> s.task.host.id == h.id && s.task.directory.path.equals(d.path, true) }
+                        }?.let { return it }
+                        matches.firstOrNull { (h, _) -> h.id == activeSession?.task?.host?.id }?.let { return it }
+                        matches.firstOrNull { (h, _) -> h.id == selectedHostId }?.let { return it }
+                        return null
+                    }
                     val matchedDirectory: Pair<dev.remote.terminal.data.HostProfile, dev.remote.terminal.data.ProjectDirectory>? = when {
                         requestedWorkspacePath != null -> {
                             val exact = directoryCandidates.filter { (_, dir) -> dir.path.equals(requestedWorkspacePath, true) }
                             val partial = if (exact.isEmpty()) directoryCandidates.filter { (_, dir) -> dir.path.contains(requestedWorkspacePath, true) } else exact
-                            partial.singleOrNull()
+                            disambiguateDir(partial)
                         }
                         requestedWorkspaceName != null -> {
-                            val exact = directoryCandidates.filter { (_, dir) -> dir.name.equals(requestedWorkspaceName, true) }
-                            val partial = if (exact.isEmpty()) directoryCandidates.filter { (_, dir) ->
-                                dir.name.contains(requestedWorkspaceName, true) || dir.path.contains(requestedWorkspaceName, true)
-                            } else exact
-                            partial.singleOrNull()
+                            val scored = directoryCandidates.mapNotNull { pair ->
+                                val dir = pair.second
+                                val dirBase = dir.path.trimEnd('/', '\\').substringAfterLast('/').substringAfterLast('\\')
+                                val sc = dev.remote.terminal.jarvis.intent.JarvisEntityResolver.scoreCandidate(
+                                    requestedWorkspaceName,
+                                    listOf(dir.name, dirBase, dir.path)
+                                )
+                                sc?.let { pair to it }
+                            }.sortedByDescending { it.second }
+                            val topScore = scored.firstOrNull()?.second
+                            val topMatches = if (topScore != null) scored.filter { it.second == topScore }.map { it.first } else emptyList()
+                            disambiguateDir(topMatches)
                         }
                         activeSession != null && hostCandidates.any { it.id == activeSession.task.host.id } ->
                             activeSession.task.host to activeSession.task.directory
@@ -1865,22 +1917,9 @@ private fun RemoteTerminalApp(store: LocalStore) {
                     if (targetHost == null) return@withContext failure("Workspace host could not be resolved", "无法确定目标工作区所属主机。")
 
                     val availableAgents = dev.remote.terminal.data.hostAgents(targetHost, agents)
-                    val agentMatches = when {
-                        requestedAgentId != null -> availableAgents.filter { it.id == requestedAgentId }
-                        requestedAgentName != null -> {
-                            val exact = availableAgents.filter {
-                                it.name.equals(requestedAgentName, true) || it.command.equals(requestedAgentName, true)
-                            }
-                            if (exact.isNotEmpty()) exact else availableAgents.filter {
-                                it.name.contains(requestedAgentName, true) || it.command.contains(requestedAgentName, true)
-                            }
-                        }
-                        else -> emptyList()
-                    }
                     val targetAgent = when {
-                        requestedAgentId != null || requestedAgentName != null -> {
-                            if (agentMatches.size == 1) agentMatches.first() else null
-                        }
+                        requestedAgentId != null -> availableAgents.firstOrNull { it.id == requestedAgentId }
+                        requestedAgentName != null -> dev.remote.terminal.jarvis.intent.JarvisEntityResolver.resolveAgent(requestedAgentName, availableAgents)
                         else -> {
                             val existingForWorkspace = sessions.filter {
                                 it.task.host.id == targetHost.id && it.task.directory.path.equals(effectiveDirectory.path, true)
@@ -1895,8 +1934,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
                     }
                     if ((requestedAgentId != null || requestedAgentName != null) && targetAgent == null) {
                         val options = availableAgents.joinToString("、") { "${it.name}(${it.command})" }
-                        val voice = if (agentMatches.size > 1) "开发者名称有多个匹配项，请指定开发者 ID。" else "目标主机上没有找到指定开发者。"
-                        return@withContext failure("Developer not found or ambiguous. Available: $options", voice)
+                        return@withContext failure("Developer not found or ambiguous. Available: $options", "目标主机上没有找到指定开发者。")
                     }
                     if (targetAgent == null) return@withContext failure("No developer configured for ${targetHost.name}", "目标主机没有配置可用开发者。")
 
@@ -2014,12 +2052,9 @@ private fun RemoteTerminalApp(store: LocalStore) {
                     if (existing != null) {
                         Triple(existing, existing.task.host, workingDir ?: existing.task.directory.path)
                     } else {
-                        val host = resolveHostBy(selector.hostName, selector.hostName)
-                        val wsQuery = selector.workspacePath ?: selector.workspaceName ?: selector.query ?: selector.sessionId
-                        val dir = host?.directories?.firstOrNull { d ->
-                            wsQuery != null && (d.path.equals(wsQuery, true) || d.path.contains(wsQuery, true) || d.name.equals(wsQuery, true) || d.name.contains(wsQuery, true))
-                        } ?: if (wsQuery == null) host?.directories?.firstOrNull() else null
-                        Triple(null, host, workingDir ?: dir?.path)
+                        val wsQuery = selector.workspaceName ?: selector.query ?: selector.sessionId
+                        val dirPair = resolveDirectoryAcrossHosts(selector.hostName, selector.hostName, selector.workspacePath, wsQuery)
+                        Triple(null, dirPair?.first, workingDir ?: dirPair?.second?.path)
                     }
                 }
                 val session = resolved.first
@@ -2067,12 +2102,15 @@ private fun RemoteTerminalApp(store: LocalStore) {
                         }
                         existing to null
                     } else {
-                        val targetHost = resolveHostBy(selector.hostName, selector.hostName)
-                        val wsQuery = selector.workspacePath ?: selector.workspaceName ?: selector.query ?: selector.sessionId
-                        val targetDir = targetHost?.directories?.firstOrNull { d ->
-                            wsQuery != null && (d.path.equals(wsQuery, true) || d.path.contains(wsQuery, true) || d.name.equals(wsQuery, true) || d.name.contains(wsQuery, true))
-                        } ?: if (wsQuery == null) targetHost?.directories?.firstOrNull() else null
-                        val targetAgent = (if (agentName != null) agents.firstOrNull { it.name.contains(agentName, true) || it.command.contains(agentName, true) } else null)
+                        val wsQuery = selector.workspaceName ?: selector.query ?: selector.sessionId
+                        val dirPair = resolveDirectoryAcrossHosts(selector.hostName, selector.hostName, selector.workspacePath, wsQuery)
+                        val targetHost = dirPair?.first
+                        val targetDir = dirPair?.second
+                        val hostScopedAgents = targetHost?.let { dev.remote.terminal.data.hostAgents(it, agents) }.orEmpty()
+                        val targetAgent = (if (agentName != null) {
+                            dev.remote.terminal.jarvis.intent.JarvisEntityResolver.resolveAgent(agentName, hostScopedAgents)
+                                ?: dev.remote.terminal.jarvis.intent.JarvisEntityResolver.resolveAgent(agentName, agents)
+                        } else null) ?: targetHost?.let { dev.remote.terminal.data.hostSelectedAgent(it, hostScopedAgents, store) }
                             ?: agents.firstOrNull { it.id == selectedAgentId } ?: agents.firstOrNull()
                         if (targetHost != null && targetDir != null && targetAgent != null) {
                             openTask(targetHost, targetDir, targetAgent, navigateToTerminal = focus)
@@ -2299,7 +2337,30 @@ private fun RemoteTerminalApp(store: LocalStore) {
             }
 
             dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.confirmTerminalHandler = confirm@{ selector, approve ->
-                val pending = if (selector.hasAnyFilter()) emptyList() else sessions.filter { it.needsAction }
+                val pendingFingerprint = if (!selector.hasAnyFilter()) sessions.firstOrNull { it.hostFingerprint != null } else null
+                if (pendingFingerprint != null && pendingFingerprint.hostFingerprint != null) {
+                    val fp = pendingFingerprint.hostFingerprint!!
+                    val addr = pendingFingerprint.hostKeyAddress
+                    val port = pendingFingerprint.hostKeyPort
+                    if (approve) {
+                        store.trustHostKey(addr, port, fp)
+                        val trustedHost = pendingFingerprint.task.host.copy(syncFingerprint = fp)
+                        saveHosts(hosts.map { if (it.id == trustedHost.id) trustedHost else it })
+                        sessions.filter { it.hostKeyAddress == addr && it.hostKeyPort == port }.forEach {
+                            it.task = it.task.copy(host = trustedHost)
+                            it.resolveHostKey?.invoke(true)
+                            it.hostFingerprint = null
+                        }
+                        return@confirm dev.remote.terminal.jarvis.mcp.ToolOpResult(true, "Trusted host key $addr:$port", "已信任主机并继续连接。")
+                    } else {
+                        sessions.filter { it.hostKeyAddress == addr && it.hostKeyPort == port }.forEach {
+                            it.resolveHostKey?.invoke(false)
+                            it.hostFingerprint = null
+                        }
+                        return@confirm dev.remote.terminal.jarvis.mcp.ToolOpResult(true, "Rejected host key $addr:$port", "已取消连接该主机。")
+                    }
+                }
+                val pending = if (selector.hasAnyFilter()) emptyList() else sessions.filter { it.needsAction || it.autoEnterDeadline != null }
                 if (pending.size > 1) {
                     return@confirm dev.remote.terminal.jarvis.mcp.ToolOpResult(
                         false, "Multiple sessions are awaiting confirmation", "有多个实例等待确认，请指定实例名称。"
@@ -2317,7 +2378,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
                         "已在 $label ${if (approve) "确认继续执行" else "发送中止"}。"
                     )
                 } else {
-                    dev.remote.terminal.jarvis.mcp.ToolOpResult(false, "Session not found", "未找到目标终端会话。")
+                    dev.remote.terminal.jarvis.mcp.ToolOpResult(false, "Session not found", "当前没有等待确认的工作区。")
                 }
             }
 

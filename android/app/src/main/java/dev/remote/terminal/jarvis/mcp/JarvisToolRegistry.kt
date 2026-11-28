@@ -1370,7 +1370,7 @@ object JarvisToolRegistry {
             }
         }.trim()
 
-        val coreNames = setOf("dispatch_task", "open_terminal", "web_search", "manage_memory")
+        val coreNames = setOf("dispatch_task", "open_terminal", "focus_terminal", "run_in_workspace", "get_task_status", "start_watching_task", "select_agent", "web_search", "manage_memory")
         val coreSchemas = JSONArray().apply {
             defs.filter { it.name in coreNames }.forEach { def ->
                 put(JSONObject().apply {

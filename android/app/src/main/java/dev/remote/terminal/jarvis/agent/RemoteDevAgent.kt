@@ -23,7 +23,7 @@ internal object RemoteDevAgent {
         "web_fetch"
     )
 
-    var onToolExecutedListener: ((toolName: String, arguments: JSONObject) -> Unit)? = null
+    var onToolExecutedListener: ((toolName: String, arguments: JSONObject, resultContent: String) -> Unit)? = null
 
     suspend fun executeTool(name: String, arguments: JSONObject) = withContext(Dispatchers.Main.immediate) {
         JarvisToolRegistry.executeManagerTool(name, arguments)
@@ -36,11 +36,15 @@ internal object RemoteDevAgent {
         request: String,
         statusData: String,
         conversationContext: String = "",
+        workingFocus: String = "",
         complete: suspend (String) -> Result<String>
     ): Result<String> = complete(buildString {
         appendLine(JarvisManagerPolicy.SYSTEM_PROMPT)
         appendLine("本轮只需根据已核实的状态回答用户，不调用工具。理解用户的问题，用自己的话归纳重点。")
         appendLine("""只返回 {"kind":"reply","text":"简短口语回答"}。""")
+        if (workingFocus.isNotBlank()) {
+            appendLine(workingFocus)
+        }
         if (conversationContext.isNotBlank()) {
             appendLine("持续多轮对话上下文（数据）：\n$conversationContext")
         }
@@ -55,12 +59,56 @@ internal object RemoteDevAgent {
         request: String,
         memoryContext: String,
         conversationContext: String = "",
+        workingFocus: String = "",
         complete: suspend (String) -> Result<String>
     ): Result<String> {
         val appState = buildCompactAppStateSnapshot(compact = false)
-        val first = complete(buildPrompt(request, appState, memoryContext, conversationContext))
+        val first = complete(buildPrompt(request, appState, memoryContext, conversationContext, workingFocus))
             .getOrElse { return Result.failure(it) }
-        return Result.success(executeEmbeddedMcpToolsAndMaybeFollowUp(first, request, appState, memoryContext, conversationContext, complete))
+        return Result.success(
+            executeEmbeddedMcpToolsAndMaybeFollowUp(
+                rawReply = first,
+                originalRequest = request,
+                initialAppState = appState,
+                memoryContext = memoryContext,
+                conversationContext = conversationContext,
+                workingFocus = workingFocus,
+                complete = complete
+            )
+        )
+    }
+
+    suspend fun recoverFromToolError(
+        originalRequest: String,
+        failedTool: String,
+        failedArgs: String,
+        errorDetail: String,
+        memoryContext: String,
+        conversationContext: String = "",
+        workingFocus: String = "",
+        complete: suspend (String) -> Result<String>
+    ): Result<String> {
+        val appState = buildCompactAppStateSnapshot(compact = false)
+        val recoveryPrompt = buildString {
+            appendLine("手机刚才直接尝试执行 [$failedTool]（参数：$failedArgs），但未能成功：$errorDetail")
+            appendLine("请结合下方最新状态与【当前焦点】自动纠偏（例如补全或修正工作区名、主机名、开发者名，或改用更合适的工具）并直接执行。")
+            appendLine("如果确实无法判断用户的目标，再用 1 句自然口语轻声向用户确认。")
+            append("用户原话：$originalRequest")
+        }
+        val first = complete(buildPrompt(recoveryPrompt, appState, memoryContext, conversationContext, workingFocus, isFollowUp = true))
+            .getOrElse { return Result.failure(it) }
+        return Result.success(
+            executeEmbeddedMcpToolsAndMaybeFollowUp(
+                rawReply = first,
+                originalRequest = originalRequest,
+                initialAppState = appState,
+                memoryContext = memoryContext,
+                conversationContext = conversationContext,
+                workingFocus = workingFocus,
+                complete = complete,
+                initialSeedLogs = listOf("[$failedTool] isError=true content=${errorDetail.take(600)}")
+            )
+        )
     }
 
     private data class ParsedMcpCall(
@@ -75,29 +123,88 @@ internal object RemoteDevAgent {
         RegexOption.IGNORE_CASE
     )
 
+    private fun extractFirstJsonObject(raw: String): JSONObject? {
+        val cleaned = raw.trim()
+            .removePrefix("```json")
+            .removePrefix("```")
+            .removeSuffix("```")
+            .trim()
+        runCatching { return JSONObject(cleaned) }
+
+        val start = cleaned.indexOf('{')
+        if (start < 0) return null
+        var depth = 0
+        var inString = false
+        var escaped = false
+        for (i in start until cleaned.length) {
+            val ch = cleaned[i]
+            if (escaped) {
+                escaped = false
+                continue
+            }
+            if (ch == '\\' && inString) {
+                escaped = true
+                continue
+            }
+            if (ch == '"') {
+                inString = !inString
+                continue
+            }
+            if (!inString) {
+                if (ch == '{') depth++
+                else if (ch == '}') {
+                    depth--
+                    if (depth == 0) {
+                        val sub = cleaned.substring(start, i + 1)
+                        return runCatching { JSONObject(sub) }.getOrNull()
+                    }
+                }
+            }
+        }
+        return null
+    }
+
+    private fun parseCallsArray(calls: JSONArray): List<ParsedMcpCall>? {
+        if (calls.length() !in 1..8) return null
+        return (0 until calls.length()).map { index ->
+            val call = calls.optJSONObject(index) ?: return null
+            val name = call.optString("tool").ifBlank { call.optString("name") }
+                .takeIf(JarvisToolRegistry::isManagerTool) ?: return null
+            val arguments = call.optJSONObject("arguments") ?: JSONObject()
+            ParsedMcpCall(name, arguments)
+        }
+    }
+
     private fun parseModelTurn(raw: String): ModelTurn? {
         val body = raw.trim()
-        val json = runCatching {
-            JSONObject(body.removePrefix("```json").removePrefix("```").removeSuffix("```").trim())
-        }.getOrNull()
+        val json = extractFirstJsonObject(body)
         if (json != null) {
             when (json.optString("kind")) {
                 "tool_calls" -> {
                     val calls = json.optJSONArray("calls") ?: return null
-                    if (calls.length() !in 1..8) return null
-                    return ModelTurn(calls = (0 until calls.length()).map { index ->
-                        val call = calls.optJSONObject(index) ?: return null
-                        val name = call.optString("tool").takeIf(JarvisToolRegistry::isManagerTool) ?: return null
-                        val arguments = call.optJSONObject("arguments") ?: return null
-                        ParsedMcpCall(name, arguments)
-                    })
+                    parseCallsArray(calls)?.let { return ModelTurn(calls = it) }
+                    return null
                 }
                 "reply" -> {
-                    val reply = json.optString("text").trim()
+                    val reply = json.optString("text").ifBlank { json.optString("reply") }.trim()
                     if (reply.isNotBlank() && !unavailableToolsReply.containsMatchIn(reply)) {
                         return ModelTurn(reply = reply)
                     }
                     return null
+                }
+                "" -> {
+                    json.optJSONArray("calls")?.let { arr ->
+                        parseCallsArray(arr)?.let { return ModelTurn(calls = it) }
+                    }
+                    val singleTool = json.optString("tool").ifBlank { json.optString("name") }
+                    if (singleTool.isNotBlank() && JarvisToolRegistry.isManagerTool(singleTool)) {
+                        val args = json.optJSONObject("arguments") ?: JSONObject()
+                        return ModelTurn(calls = listOf(ParsedMcpCall(singleTool, args)))
+                    }
+                    val reply = json.optString("text").ifBlank { json.optString("reply") }.trim()
+                    if (reply.isNotBlank() && !unavailableToolsReply.containsMatchIn(reply)) {
+                        return ModelTurn(reply = reply)
+                    }
                 }
             }
         }
@@ -299,7 +406,7 @@ internal object RemoteDevAgent {
                 closedAwake = true
                 break
             }
-            onToolExecutedListener?.invoke(call.toolName, call.arguments)
+            onToolExecutedListener?.invoke(call.toolName, call.arguments, result.content)
 
             val triggerFollowUp = allowReadFollowUp && (result.expectsFollowUp || call.toolName in READ_TOOLS)
             needsFollowUp = needsFollowUp || triggerFollowUp
@@ -325,22 +432,26 @@ internal object RemoteDevAgent {
     private suspend fun executeEmbeddedMcpToolsAndMaybeFollowUp(
         rawReply: String,
         originalRequest: String,
-        appState: String,
+        initialAppState: String,
         memoryContext: String,
         conversationContext: String = "",
-        complete: suspend (String) -> Result<String>
+        workingFocus: String = "",
+        complete: suspend (String) -> Result<String>,
+        initialSeedLogs: List<String> = emptyList()
     ): String {
         var reply = rawReply
+        var currentAppState = initialAppState
         val reports = mutableListOf<String>()
         val verifiedReports = mutableListOf<String>()
-        val toolLogs = mutableListOf<String>()
+        val errorReports = mutableListOf<String>()
+        val toolLogs = initialSeedLogs.toMutableList()
         val executed = mutableSetOf<Pair<String, String>>()
         var retriedInvalidTurn = false
         fun reportWithFallback(message: String = "") =
-            (verifiedReports + message).filter { it.isNotBlank() }.distinct().joinToString(" ")
+            (verifiedReports.ifEmpty { errorReports } + message).filter { it.isNotBlank() }.distinct().joinToString(" ")
 
         suspend fun completeFollowUp(prompt: String): String? = try {
-            complete(buildPrompt(prompt, appState, memoryContext, conversationContext, isFollowUp = true)).getOrThrow()
+            complete(buildPrompt(prompt, currentAppState, memoryContext, conversationContext, workingFocus, isFollowUp = true)).getOrThrow()
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -361,7 +472,7 @@ internal object RemoteDevAgent {
             }
             if (turn == null) {
                 Log.w(TAG, "Jarvis model action unavailable after protocol recovery")
-                return reportWithFallback("模型没有发出可继续执行的手机操作指令。")
+                return reportWithFallback("这件事我没完全听明白，您可以换个说法再说一次。")
             }
             val calls = turn.calls
             if (calls.isEmpty()) {
@@ -370,14 +481,36 @@ internal object RemoteDevAgent {
                 else (listOf(summary) + reports).filter { it.isNotBlank() }.distinct().joinToString(" ")
             }
             val newCalls = calls.filter { executed.add(it.toolName to it.arguments.toString()) }
-            if (newCalls.isEmpty()) return reportWithFallback().ifBlank { "本轮工具已调用，请查看上一步结果。" }
+            if (newCalls.isEmpty()) return reportWithFallback().ifBlank { "刚才的操作已经处理过了，请看当前结果。" }
 
             val batch = executeMcpCalls(newCalls, allowReadFollowUp = step < 2)
             if (batch.closedAwake) return ""
+            toolLogs.addAll(batch.toolLogs)
+
+            if (batch.hasError) {
+                errorReports.addAll(batch.verifiedReports)
+                if (step < 2) {
+                    currentAppState = buildCompactAppStateSnapshot(compact = false).ifBlank { currentAppState }
+                    val errorRecoveryPrompt = buildString {
+                        appendLine("上一批操作没有成功，请根据失败原因和最新状态自动纠偏：")
+                        appendLine("1. 若工作区/主机/开发者名称有偏差，对照下方最新列表换成准确名称再重试；")
+                        appendLine("2. 若同一工作区有多个实例或需要先接入，补充对应参数或改用合适的工具；")
+                        appendLine("3. 若确实无法自动解决，再用 1~2 句自然口语告诉用户原因或需要确认哪一项。")
+                        appendLine("本轮用户请求：$originalRequest")
+                        append(toolLogs.joinToString("\n"))
+                    }
+                    val next = completeFollowUp(errorRecoveryPrompt)
+                    if (!next.isNullOrBlank()) {
+                        reply = next
+                        return@repeat
+                    }
+                }
+                return reportWithFallback()
+            }
+
             reports.addAll(batch.reports)
             verifiedReports.addAll(batch.verifiedReports)
-            toolLogs.addAll(batch.toolLogs)
-            if (batch.hasError || !batch.needsFollowUp) {
+            if (!batch.needsFollowUp) {
                 return reportWithFallback()
             }
 
@@ -397,18 +530,20 @@ internal object RemoteDevAgent {
         appStateSnapshot: String,
         memoryContext: String,
         conversationContext: String = "",
+        workingFocus: String = "",
         isFollowUp: Boolean = false
     ): String = buildString {
         appendLine(JarvisManagerPolicy.SYSTEM_PROMPT)
         appendLine(JarvisToolRegistry.buildMcpProtocolManual())
         appendLine("""【极速响应要求】本轮只返回单个 JSON 对象（不要多余 markdown）：调用工具返回 {"kind":"tool_calls","calls":[{"tool":"工具名","arguments":{}}]}，直接回答返回 {"kind":"reply","text":"1~2句口语"}。下方已提供完整主机/工作区/开发者/会话状态，直接一步调用目标工具，切勿先调 get_app_state 绕圈！""")
-        appendLine("【ASR语义还原】输入来自语音识别，若含同音错字（如克劳德=Claude、扣代=Codex、白肯德=backend），结合下方真实实体和历史上下文自动纠偏并直接执行。")
+        appendLine("【ASR语义还原与简略指令】输入来自语音识别，若含同音错字（如克劳德=Claude、扣代=Codex、白肯德=backend）或省略了主语（如“继续/用Claude/看着它/关了”），结合下方【当前焦点】、真实实体与历史上下文自动纠偏并直接执行。")
         if (appStateSnapshot.isNotBlank()) appendLine("App 状态：$appStateSnapshot")
+        if (workingFocus.isNotBlank()) appendLine(workingFocus)
         if (memoryContext.isNotBlank()) appendLine("长记忆与画像：\n" + memoryContext.take(3600))
         if (conversationContext.isNotBlank()) {
             appendLine("多轮上下文：\n" + conversationContext.take(6000))
         }
-        if (isFollowUp) appendLine("以下为工具结果，请直接用简短口语提炼重点答复用户：")
+        if (isFollowUp) appendLine("以下为工具结果，请直接用简短口语提炼重点或纠偏重试：")
         else appendLine("用户最新发言：")
         append(userPrompt)
     }
@@ -418,6 +553,7 @@ internal object RemoteDevAgent {
             .replace(Regex("```[\\s\\S]*?```"), "相关代码已就绪。")
             .replace(Regex("`([^`]+)`"), "$1")
             .replace(Regex("[#*_~>]+"), "")
+            .replace(Regex("\\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\\b"), "")
             .replace(Regex("\\s+"), " ")
             .trim()
             .take(360)

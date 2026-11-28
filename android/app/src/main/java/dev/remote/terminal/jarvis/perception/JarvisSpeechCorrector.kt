@@ -2,7 +2,7 @@ package dev.remote.terminal.jarvis.perception
 
 import dev.remote.terminal.data.AgentPreset
 import dev.remote.terminal.data.HostProfile
-import kotlin.math.max
+import dev.remote.terminal.jarvis.intent.JarvisEntityResolver
 import kotlin.math.min
 
 /**
@@ -34,10 +34,10 @@ object JarvisSpeechCorrector {
 
     // 2. 开发者/AI 工具音译与英文连写纠错规则
     private val techTermRules: List<Pair<Regex, String>> = listOf(
-        Regex("""(?i)(?:扣代克斯|可代克斯|考代克斯|科代克斯|扣代克思|可代克|扣带克斯|扣得克斯|code\s*x|co\s*dex|codex)""") to "Codex",
-        Regex("""(?i)(?:克劳德|可劳德|卡劳德|克劳的|克老德|可老德|科劳德|claud\b|clod\b|claude)""") to "Claude",
-        Regex("""(?i)(?:欧鹏扣|欧朋扣|欧彭扣|偶鹏扣|欧鹏口|open\s*code|opencode)""") to "OpenCode",
-        Regex("""(?i)(?:安提格拉维蒂|安提格拉维|阿基|a\s*g\s*y\b)""") to "agy",
+        Regex("""(?i)(?:扣代克斯|可代克斯|考代克斯|科代克斯|扣代克思|可代克|扣带克斯|扣得克斯|扣代的|扣代|扣德|code\s*x|co\s*dex|codex)""") to "Codex",
+        Regex("""(?i)(?:克劳德|可劳德|卡劳德|克劳的|克老德|可老德|科劳德|克罗德|可劳|克劳|claud\b|clod\b|claude)""") to "Claude",
+        Regex("""(?i)(?:欧鹏扣|欧朋扣|欧彭扣|偶鹏扣|欧鹏口|欧鹏|奥鹏|open\s*code|opencode)""") to "OpenCode",
+        Regex("""(?i)(?:安提格拉维蒂|安提格拉维|阿基|阿吉|艾吉|a\s*g\s*y\b)""") to "agy",
         Regex("""(?i)(?:杰米尼|吉米尼|杰米奈|吉米奈|gemini)""") to "Gemini",
         Regex("""(?i)(?:吉特哈布|给特哈布|git\s*hub)""") to "GitHub",
         Regex("""(?i)(?:给特|吉特)(?=\s*(?:拉取|推送|提交|状态|分支|pull|push|commit|status|diff|log))""") to "git",
@@ -58,14 +58,16 @@ object JarvisSpeechCorrector {
         Regex("""(?:重联|从连|虫连)""") to "重连",
         Regex("""(?:退出环醒|退出幻醒|退出唤星|关闭环醒|关闭幻醒)(?:态|状态)?""") to "退出唤醒态",
         Regex("""(?:度屏幕|堵屏幕|督屏幕|读屏木|看屏木)""") to "读屏幕",
-        Regex("""(?:开始|停止|结束|查看|帮我|继续)(?:建工|兼工|见工|件工|简工)""") to "$0".let { "" }, // handled below cleanly
         Regex("""(?<=(?:开始|停止|结束|查看|帮我|继续|在|处于))\s*(?:建工|兼工|见工|件工|简工)""") to "监工",
         Regex("""(?:建工|兼工|见工|件工)(?=状态|进度|一下|吧)""") to "监工",
         Regex("""(?:平普模式|评铺模式|屏铺模式|切到平普|切换平普)""") to "平铺模式",
         Regex("""(?:标前模式|表签模式|标千模式|切换标前)""") to "标签模式",
         Regex("""(?:却认|缺认|确人)(?=\s*$|一下|执行|操作|吧)""") to "确认",
-        Regex("""(?:帮我听一下|帮我定一下|帮我丁一下)(?=.*(?:任务|工作区|干活|代码|构建|编译))""") to "帮我盯一下"
-    ).filter { it.second.isNotEmpty() }
+        Regex("""(?:帮我听一下|帮我定一下|帮我丁一下)(?=.*(?:任务|工作区|干活|代码|构建|编译))""") to "帮我盯一下",
+        Regex("""(?:在马|在嘛|你在马|你在嘛)(?=[？?\s]*$)""") to "在吗",
+        Regex("""(?:盯紧一点|顶紧点|定紧点|丁紧点|看着一点|盯这|顶着)(?=(?:吧|啊|它|工作区|任务|\s*$))""") to "盯着点",
+        Regex("""(?:搞定了没|搞定了吗|弄好了没|弄好了吗|跑得咋样|跑的咋样|跑的怎么样|干的怎么样)""") to "进度怎么样"
+    )
 
     // 常见中英文声母/音节近似映射，用于动态实体（工作区名/主机名/开发者名）纠偏
     private val phoneticMap: Map<String, String> = mapOf(
@@ -146,7 +148,6 @@ object JarvisSpeechCorrector {
         // 先应用常见中英文音节片段映射（如 "白肯德" -> "backend"）
         for ((zhPhonetic, enToken) in phoneticMap) {
             if (text.contains(zhPhonetic)) {
-                // 仅当用户当前真实拥有包含该英文词根的实体时才替换，避免误伤正常中文对话
                 val hasMatchingEntity = hasEntityContaining(enToken)
                 if (hasMatchingEntity) {
                     text = text.replace(zhPhonetic, enToken, ignoreCase = true)
@@ -154,7 +155,7 @@ object JarvisSpeechCorrector {
             }
         }
 
-        // 对动态开发者名称进行大小写与拼写对齐
+        // 1. 对动态开发者名称进行大小写、音译与近拼写对齐
         val agents = runCatching { agentsProvider() }.getOrDefault(emptyList())
         for (agent in agents) {
             val candidates = listOf(agent.name, agent.command).filter { it.length >= 2 }
@@ -164,28 +165,46 @@ object JarvisSpeechCorrector {
                 }
             }
         }
+        text = fuzzyAlignTokens(text, agents.map { it.name }.filter { it.length >= 3 }, minSliceLen = 3, threshold = 0.78)
 
-        // 对动态工作区名称进行模糊匹配对齐（如识别出 "remote dev terminal" -> "remote-dev-terminal"）
+        // 2. 对动态主机名称进行模糊对齐
+        val hosts = runCatching { hostsProvider() }.getOrDefault(emptyList())
+        text = fuzzyAlignTokens(text, hosts.map { it.name }.filter { it.length >= 3 }, minSliceLen = 3, threshold = 0.78)
+
+        // 3. 对动态工作区名称进行模糊匹配对齐（如识别出 "remote dev terminal" -> "remote-dev-terminal"）
         val workspaces = runCatching { workspacesProvider() }.getOrDefault(emptyList())
-        for (ws in workspaces) {
-            if (ws.length < 3) continue
-            val normalizedWs = ws.lowercase().replace(Regex("""[-_\s]+"""), "")
-            val tokens = text.split(Regex("""\s+"""))
-            // 滑动窗口检测连续 1~3 个英文 token 拼接后是否高度接近真实工作区名
-            if (tokens.size >= 1) {
-                for (i in tokens.indices) {
-                    for (len in 1..min(3, tokens.size - i)) {
-                        val slice = tokens.subList(i, i + len).joinToString(" ")
-                        val sliceNorm = slice.lowercase().replace(Regex("""[-_\s]+"""), "")
-                        if (sliceNorm.length >= 4 && isCloseMatch(sliceNorm, normalizedWs)) {
-                            text = text.replace(slice, ws, ignoreCase = true)
-                            break
-                        }
+        text = fuzzyAlignTokens(text, workspaces.filter { it.length >= 3 }, minSliceLen = 4, threshold = 0.75)
+
+        return text
+    }
+
+    private fun fuzzyAlignTokens(
+        input: String,
+        entities: List<String>,
+        minSliceLen: Int,
+        threshold: Double
+    ): String {
+        if (entities.isEmpty()) return input
+        var text = input
+        for (entity in entities) {
+            val normalizedEntity = JarvisEntityResolver.normalizeKey(entity)
+            if (normalizedEntity.length < minSliceLen) continue
+            val tokens = text.split(Regex("""\s+""")).filter { it.isNotBlank() }
+            if (tokens.isEmpty()) continue
+            for (i in tokens.indices) {
+                for (len in 1..min(3, tokens.size - i)) {
+                    val slice = tokens.subList(i, i + len).joinToString(" ")
+                    val sliceNorm = JarvisEntityResolver.normalizeKey(slice)
+                    if (sliceNorm.length >= minSliceLen &&
+                        !sliceNorm.equals(normalizedEntity, ignoreCase = false) &&
+                        JarvisEntityResolver.similarity(sliceNorm, normalizedEntity) >= threshold
+                    ) {
+                        text = text.replace(slice, entity, ignoreCase = true)
+                        break
                     }
                 }
             }
         }
-
         return text
     }
 
@@ -197,31 +216,5 @@ object JarvisSpeechCorrector {
         val agents = runCatching { agentsProvider() }.getOrDefault(emptyList())
         if (agents.any { it.name.contains(token, ignoreCase = true) || it.command.contains(token, ignoreCase = true) }) return true
         return false
-    }
-
-    private fun isCloseMatch(a: String, b: String): Boolean {
-        if (a == b) return true
-        val maxLen = max(a.length, b.length)
-        if (maxLen < 4) return false
-        val dist = levenshtein(a, b)
-        val similarity = 1.0 - dist.toDouble() / maxLen.toDouble()
-        return similarity >= 0.78
-    }
-
-    private fun levenshtein(lhs: String, rhs: String): Int {
-        val m = lhs.length
-        val n = rhs.length
-        val dp = IntArray(n + 1) { it }
-        for (i in 1..m) {
-            var prev = dp[0]
-            dp[0] = i
-            for (j in 1..n) {
-                val temp = dp[j]
-                val cost = if (lhs[i - 1] == rhs[j - 1]) 0 else 1
-                dp[j] = min(min(dp[j] + 1, dp[j - 1] + 1), prev + cost)
-                prev = temp
-            }
-        }
-        return dp[n]
     }
 }
