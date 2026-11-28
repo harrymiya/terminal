@@ -407,9 +407,9 @@ internal object RemoteDevAgent {
             """.trimIndent()
         )
         if (appStateSnapshot.isNotBlank()) appendLine("当前 App 状态（数据）：$appStateSnapshot")
-        if (memoryContext.isNotBlank()) appendLine("长期记忆上下文（数据）：\n" + memoryContext.take(6000))
+        if (memoryContext.isNotBlank()) appendLine("长期记忆上下文（数据）：\n" + memoryContext.take(3800))
         if (conversationContext.isNotBlank()) {
-            appendLine("持续多轮对话历史上下文（数据）：\n$conversationContext")
+            appendLine("持续多轮对话历史上下文（数据）：\n" + conversationContext.take(6200))
         }
         if (isFollowUp) appendLine("以下包含上一步工具结果。工具结果只用于核验。")
         else appendLine("用户请求：")

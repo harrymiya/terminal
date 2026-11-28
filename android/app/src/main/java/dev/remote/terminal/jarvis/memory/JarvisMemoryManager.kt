@@ -572,11 +572,18 @@ private class JarvisMemoryStore(context: Context) : SQLiteOpenHelper(context, "j
 class JarvisMemoryManager(context: Context, private val localStore: LocalStore) {
     companion object {
         private const val TAG = "JarvisMemoryManager"
-        const val CONTEXT_RAM_BUDGET_BYTES = 200 * 1024 // 200 KiB 内存上限
-        const val CONTEXT_COMPRESSION_THRESHOLD_BYTES = (CONTEXT_RAM_BUDGET_BYTES * 0.95).toInt() // 194,560 字节 (>95% 时触发语义压缩)
+        const val CONTEXT_RAM_BUDGET_BYTES = 200 * 1024 // 内存热缓冲上限 200 KiB
+        const val CONTEXT_COMPRESSION_THRESHOLD_BYTES = (CONTEXT_RAM_BUDGET_BYTES * 0.95).toInt() // >95% 时触发压缩并存档 SQLite
+        // 严格对齐 Hermes Agent 的上下文提交预算（防止 200KB 全量直传导致 Token 爆炸）：
+        // USER 画像上限 1,375 字符 (~500 tokens) + MEMORY 召回上限 2,200 字符 (~800 tokens) = 3,575 字符
+        const val HERMES_USER_CHAR_LIMIT = 1375
+        const val HERMES_MEMORY_CHAR_LIMIT = 2200
+        const val HERMES_DIALOG_SUBMIT_CHAR_LIMIT = 6000
+        private const val HERMES_MIDDLE_PRUNE_CHAR_LIMIT = 200
+        private const val HERMES_PROTECTED_TAIL_TURNS = 6
         private const val RAM_BUDGET_BYTES = 200 * 1024
-        private const val LOCAL_SHORT_CONTEXT_LIMIT = 2600
-        private const val LONG_CONTEXT_LIMIT = 3600
+        private const val LOCAL_SHORT_CONTEXT_LIMIT = 800
+        private const val LONG_CONTEXT_LIMIT = HERMES_MEMORY_CHAR_LIMIT
         private val categories = setOf("profile", "preference", "habit", "skill", "project", "decision", "correction", "environment", "general")
         private val explicitMemory = Regex("(?:记住|记下|请记得|以后.*(?:都|要|别)|永远.*(?:要|别)|remember|don't forget|do not forget)", RegexOption.IGNORE_CASE)
         private val explicitMemoryNegation = Regex("(?:不要|别|不用|无需|don't|don’t|do not|never).{0,10}(?:记住|记下|请记得|remember)", RegexOption.IGNORE_CASE)
@@ -616,19 +623,52 @@ class JarvisMemoryManager(context: Context, private val localStore: LocalStore) 
         return summaryBytes + turnsBytes
     }
 
-    fun getFormattedConversationContext(): String = buildString {
-        if (contextSummary.isNotBlank()) {
-            appendLine(contextSummary)
-            appendLine("---")
-        }
-        if (activeTurns.isNotEmpty()) {
-            appendLine("【持续多轮对话记录】：")
-            for (turn in activeTurns) {
-                val label = if (turn.role == "user") "用户" else "Jarvis"
-                appendLine("$label: ${turn.content}")
+    /**
+     * 对齐 Hermes `context_compressor.py` 的提交控制策略：
+     * 内存可缓存高达 200KB，但每次向大模型提交时严格控制在 ~6,000 字符以内：
+     * 1. Head 保护：保留历史要点摘要（<= 1,500 字符）；
+     * 2. 中间轮次剪枝：超过 200 字符的中段冗长输出裁剪为摘要占位；
+     * 3. Tail 保护：完整保留最近 6 轮对话（最近 3 个来回），从新到旧回填直到触达预算。
+     */
+    fun getFormattedConversationContext(): String {
+        val summaryPart = if (contextSummary.isNotBlank()) {
+            contextSummary.take(1500)
+        } else ""
+
+        if (activeTurns.isEmpty()) return summaryPart
+
+        val turns = activeTurns.toList()
+        val tailStart = (turns.size - HERMES_PROTECTED_TAIL_TURNS).coerceAtLeast(0)
+        val formattedLines = mutableListOf<String>()
+        var remainingBudget = HERMES_DIALOG_SUBMIT_CHAR_LIMIT - summaryPart.length - 64
+
+        // 从最新一轮往回回填，确保最近对话绝对不被截断
+        for (i in turns.indices.reversed()) {
+            val turn = turns[i]
+            val label = if (turn.role == "user") "用户" else "Jarvis"
+            val body = if (i < tailStart && turn.content.length > HERMES_MIDDLE_PRUNE_CHAR_LIMIT) {
+                turn.content.take(HERMES_MIDDLE_PRUNE_CHAR_LIMIT) + "…[早期长输出已精简以节省Token]"
+            } else {
+                turn.content
             }
+            val line = "$label: $body"
+            if (line.length + 2 > remainingBudget && formattedLines.isNotEmpty()) break
+            formattedLines.add(line)
+            remainingBudget -= (line.length + 2)
         }
-    }.trim()
+        formattedLines.reverse()
+
+        return buildString {
+            if (summaryPart.isNotBlank()) {
+                appendLine(summaryPart)
+                appendLine("---")
+            }
+            if (formattedLines.isNotEmpty()) {
+                appendLine("【持续多轮对话记录（Hermes 窗口控制：${formattedLines.size}/${turns.size} 轮）】：")
+                formattedLines.forEach { appendLine(it) }
+            }
+        }.trim()
+    }
 
     suspend fun recordUserTurn(text: String, compressor: (suspend (String) -> String)? = null) = withContext(Dispatchers.IO) {
         val clean = text.trim()
@@ -1177,7 +1217,7 @@ class JarvisMemoryManager(context: Context, private val localStore: LocalStore) 
     }
 
     /**
-     * 生成紧凑型【用户默契画像】（<= 450 字符），每次对话注入上下文，让大模型越用越懂用户。
+     * 对齐 Hermes `USER.md` 规范：严格控制在 1,375 字符 (~500 tokens) 以内，附带容量百分比标识。
      */
     fun buildUserTacitProfile(): String {
         val account = currentAccount().ifBlank { "local_default" }
@@ -1185,26 +1225,30 @@ class JarvisMemoryManager(context: Context, private val localStore: LocalStore) 
         val habits = store.loadIntentHabits(account, 32)
         if (longMemories.isEmpty() && habits.isEmpty()) return ""
 
-        return buildString {
-            appendLine("【用户默契画像（系统长期沉淀，请心领神会地顺应用户习惯）】：")
+        val body = buildString {
             val topPrefs = longMemories
                 .filter { it.category in setOf("habit", "preference", "correction", "profile") && it.confidence >= 0.72f }
                 .sortedByDescending { it.importance * it.confidence + it.recallCount * 0.2f }
-                .take(4)
+                .take(8)
             for (m in topPrefs) {
-                val line = "- ${m.content.take(90)}\n"
-                if (length + line.length > 360) break
+                val line = "- ${m.content.take(120)}\n"
+                if (length + line.length > HERMES_USER_CHAR_LIMIT - 180) break
                 append(line)
             }
-            val topHabits = habits.filter { it.hitCount >= 2 && it.confidence >= 0.8f }.take(3)
-            if (topHabits.isNotEmpty() && length < 410) {
+            val topHabits = habits.filter { it.hitCount >= 2 && it.confidence >= 0.8f }.take(5)
+            if (topHabits.isNotEmpty() && length < HERMES_USER_CHAR_LIMIT - 80) {
                 val habitSummary = topHabits.joinToString("；") { h ->
                     val target = listOf(h.targetWorkspace, h.targetAgent).filter { it.isNotBlank() }.joinToString("/")
                     "“${h.phrase.take(16)}”→${h.actionType}${if (target.isNotBlank()) "($target)" else ""}"
                 }
-                append("- 高频默契：$habitSummary")
+                val line = "- 高频默契：$habitSummary"
+                if (length + line.length <= HERMES_USER_CHAR_LIMIT) append(line)
             }
-        }.trim()
+        }.trim().take(HERMES_USER_CHAR_LIMIT)
+
+        if (body.isBlank()) return ""
+        val pct = ((body.length * 100.0) / HERMES_USER_CHAR_LIMIT).toInt().coerceIn(1, 100)
+        return "【USER 用户画像 [$pct% — ${body.length}/$HERMES_USER_CHAR_LIMIT 字符]】：\n$body"
     }
 
     private fun normalizeHabitPhrase(text: String): String = text.trim().lowercase()
@@ -1213,7 +1257,8 @@ class JarvisMemoryManager(context: Context, private val localStore: LocalStore) 
         .trim()
 
     /**
-     * 每次对话前自动调用：从 SQLite 向量长记忆库 + 近期短记忆（+ 云端 Mem0 若登录）中召回最相关联的长记忆注入大模型上下文。
+     * 每次对话前自动调用：对齐 Hermes `MEMORY.md` 规范，从 SQLite 向量长记忆库召回相关经验，
+     * 与短记忆合计严格控制在 2,200 字符 (~800 tokens) 以内；总提示词记忆上限为 1,375 + 2,200 = 3,575 字符。
      */
     suspend fun recallContext(query: String): String = withContext(Dispatchers.IO) {
         mutex.withLock {
@@ -1223,38 +1268,46 @@ class JarvisMemoryManager(context: Context, private val localStore: LocalStore) 
             reloadHotCache(account)
 
             val now = System.currentTimeMillis()
-            // 1. 优先执行 SQLite 256维向量混合召回（包含用户偏好、习惯、纠错经验、项目事实）
-            val vectorHits = recallLongMemoriesInternal(account, query, limit = 8)
             val sections = mutableListOf<String>()
 
+            // 1. USER 画像 (<= 1,375 chars)
             val profile = buildUserTacitProfile()
             if (profile.isNotBlank()) {
                 sections.add(profile)
             }
 
-            if (vectorHits.isNotEmpty()) {
-                lastRecalledMemoryIds = vectorHits.map { it.first.id }
-                vectorHits.forEach { (entry, _) -> store.touchLongMemory(account, entry.id, now) }
-                sections.add(buildString {
-                    appendLine("【Jarvis SQLite 向量长记忆召回（过往习惯、偏好、纠错与经验，请优先尊重用户习惯避免重犯错误）】：")
+            // 2. MEMORY 向量召回 + 短记忆补充 (合计 <= 2,200 chars)
+            val vectorHits = recallLongMemoriesInternal(account, query, limit = 8)
+            val memoryBody = buildString {
+                if (vectorHits.isNotEmpty()) {
+                    lastRecalledMemoryIds = vectorHits.map { it.first.id }
+                    vectorHits.forEach { (entry, _) -> store.touchLongMemory(account, entry.id, now) }
                     for ((entry, _) in vectorHits) {
                         val confPct = (entry.confidence * 100).toInt()
-                        val line = "- [${entry.category}/重要度${entry.importance}/置信${confPct}%/召回${entry.recallCount + 1}次] ${entry.content}\n"
-                        if (length + line.length > LONG_CONTEXT_LIMIT) break
+                        val line = "- [${entry.category}/重要度${entry.importance}/置信${confPct}%] ${entry.content}\n"
+                        if (length + line.length > HERMES_MEMORY_CHAR_LIMIT) break
                         append(line)
                     }
-                }.trim())
-            } else {
-                lastRecalledMemoryIds = emptyList()
-            }
+                } else {
+                    lastRecalledMemoryIds = emptyList()
+                }
 
-            // 2. 匹配热缓存/短记忆补充
-            var shortHits = findHotMatches(query)
-            if (shortHits.isEmpty()) shortHits = findStoredMatches(account, query)
-            if (shortHits.isNotEmpty()) {
-                shortHits.forEach { item -> store.touch(account, item.id, now) }
-                reloadHotCache(account)
-                sections.add(formatContext("近期短记忆", shortHits, LOCAL_SHORT_CONTEXT_LIMIT))
+                var shortHits = findHotMatches(query)
+                if (shortHits.isEmpty()) shortHits = findStoredMatches(account, query)
+                if (shortHits.isNotEmpty() && length < HERMES_MEMORY_CHAR_LIMIT - 120) {
+                    shortHits.forEach { item -> store.touch(account, item.id, now) }
+                    reloadHotCache(account)
+                    for (item in shortHits) {
+                        val line = "- [${item.category}] ${item.content}\n"
+                        if (length + line.length > HERMES_MEMORY_CHAR_LIMIT) break
+                        append(line)
+                    }
+                }
+            }.trim().take(HERMES_MEMORY_CHAR_LIMIT)
+
+            if (memoryBody.isNotBlank()) {
+                val memPct = ((memoryBody.length * 100.0) / HERMES_MEMORY_CHAR_LIMIT).toInt().coerceIn(1, 100)
+                sections.add("【MEMORY 向量长记忆 [$memPct% — ${memoryBody.length}/$HERMES_MEMORY_CHAR_LIMIT 字符]】：\n$memoryBody")
             }
 
             // 3. 若已登录同步账号且本地召回不足，合并远端 Mem0 长记忆并反哺至本地 SQLite 向量库
@@ -1273,8 +1326,8 @@ class JarvisMemoryManager(context: Context, private val localStore: LocalStore) 
                             now = now
                         )
                     }
-                    if (vectorHits.isEmpty()) {
-                        sections.add(formatContext("Mem0 长期记忆", longHits, LONG_CONTEXT_LIMIT))
+                    if (memoryBody.isBlank()) {
+                        sections.add(formatContext("Mem0 长期记忆", longHits, HERMES_MEMORY_CHAR_LIMIT))
                     }
                 }
             }
