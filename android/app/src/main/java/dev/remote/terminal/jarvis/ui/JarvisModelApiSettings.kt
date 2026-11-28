@@ -28,9 +28,13 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.OffsetMapping
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.TransformedText
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import dev.remote.terminal.data.LocalStore
 import dev.remote.terminal.jarvis.model.ApiChatModel
@@ -128,13 +132,12 @@ internal fun JarvisModelApiSettings(store: LocalStore, onFormState: (dirty: Bool
         OutlinedTextField(
             value = keyInput, onValueChange = { keyInput = it; status = "" }, enabled = !busy,
             label = { Text("API Key") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
-            placeholder = { if (reuseSavedKey) Text("••••••••") },
-            visualTransformation = PasswordVisualTransformation(),
+            visualTransformation = if (reuseSavedKey && keyInput.isEmpty()) SavedKeyMask else ApiKeyPasswordMask,
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Done),
             keyboardActions = KeyboardActions(onDone = { submit(false) }),
             supportingText = {
                 Text(when {
-                    reuseSavedKey && keyInput.isBlank() -> "•••••••• · Key 已加密保存。输入新 Key 可替换。"
+                    reuseSavedKey && keyInput.isEmpty() -> "输入新 Key 可替换。"
                     reuseSavedKey -> "点击保存后替换已保存的 Key。"
                     hasSavedKey -> "API 地址已更改，请输入新地址对应的 Key。"
                     else -> "尚未保存 API Key。"
@@ -172,6 +175,20 @@ internal fun JarvisModelApiSettings(store: LocalStore, onFormState: (dirty: Bool
             },
             confirmButton = { if (!result.running) TextButton(onClick = { testResult = null }) { Text("知道了") } }
         )
+    }
+}
+
+private val ApiKeyPasswordMask = PasswordVisualTransformation()
+
+// The saved key stays in the vault. All positions in its display mask map to the empty input.
+private val SavedKeyMask = VisualTransformation { text ->
+    if (text.isEmpty()) {
+        TransformedText(AnnotatedString("••••••••"), object : OffsetMapping {
+            override fun originalToTransformed(offset: Int): Int = 0
+            override fun transformedToOriginal(offset: Int): Int = 0
+        })
+    } else {
+        ApiKeyPasswordMask.filter(text)
     }
 }
 
