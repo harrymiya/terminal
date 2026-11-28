@@ -234,33 +234,9 @@ object JarvisToolRegistry {
                 val state = appStateProvider?.invoke() ?: JSONObject()
                 val sessions = state.optJSONArray("sessions") ?: JSONArray()
                 val shared = state.optJSONArray("shared_tasks") ?: JSONArray()
-                val hostCount = state.optJSONArray("hosts")?.length() ?: 0
-                fun brief(item: JSONObject): String {
-                    val name = item.optString("title")
-                        .ifBlank { item.optString("display_name") }
-                        .ifBlank { item.optString("workspace") }
-                        .ifBlank { item.optString("directory_name") }
-                        .ifBlank { "未命名实例" }
-                    val status = when {
-                        item.optBoolean("needs_action") -> "需要确认"
-                        item.optBoolean("is_streaming") -> "正在输出"
-                        item.optBoolean("connected") -> item.optString("status").ifBlank { "已连接" }
-                        else -> item.optString("status").ifBlank { "未连接" }
-                    }
-                    val lastLine = item.optString("last_line").ifBlank { item.optString("screen_tail") }
-                        .lineSequence().map { it.trim() }.lastOrNull { it.isNotBlank() }.orEmpty()
-                    return "$name：$status${if (lastLine.isNotBlank()) "，最近输出 ${lastLine.take(36)}" else ""}"
-                }
-                val details = buildList {
-                    val local = (0 until minOf(sessions.length(), 4)).mapNotNull { sessions.optJSONObject(it) }.map(::brief)
-                    val remote = (0 until minOf(shared.length(), 4)).mapNotNull { shared.optJSONObject(it) }.map(::brief)
-                    if (local.isNotEmpty()) add("本地 ${local.joinToString("；")}")
-                    if (remote.isNotEmpty()) add("远端共享 ${remote.joinToString("；")}")
-                }
-                val totalCount = sessions.length() + shared.length()
                 return McpToolResult(
                     content = state.toString(2),
-                    voiceSummary = "当前有 $hostCount 台主机、$totalCount 个工作区实例。${details.joinToString("。", postfix = if (details.isEmpty()) "" else "。")}",
+                    voiceSummary = workspaceStatusSummary(sessions, shared),
                     expectsFollowUp = true
                 )
             }
@@ -275,20 +251,9 @@ object JarvisToolRegistry {
             override suspend fun execute(arguments: JSONObject): McpToolResult {
                 val state = appStateProvider?.invoke() ?: JSONObject()
                 val arr = state.optJSONArray("sessions") ?: JSONArray()
-                if (arr.length() == 0) {
-                    return McpToolResult(content = "[]", voiceSummary = "当前没有打开任何工作区终端。", expectsFollowUp = true)
-                }
-                val names = mutableListOf<String>()
-                for (i in 0 until arr.length()) {
-                    val obj = arr.optJSONObject(i) ?: continue
-                    val ws = obj.optString("workspace").ifBlank { obj.optString("display_name") }
-                    val agent = obj.optString("agent")
-                    val conn = if (obj.optBoolean("connected")) "在线" else "重连/断开"
-                    names.add("${i}号 ${ws}(${agent},$conn)")
-                }
                 return McpToolResult(
                     content = arr.toString(2),
-                    voiceSummary = "当前已打开 ${arr.length()} 个工作区实例：${names.joinToString("、")}。",
+                    voiceSummary = workspaceStatusSummary(arr),
                     expectsFollowUp = true
                 )
             }

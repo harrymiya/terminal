@@ -25,6 +25,24 @@ internal object RemoteDevAgent {
         JarvisToolRegistry.executeManagerTool(name, arguments)
     }
 
+    fun isWorkspaceStatusTool(name: String): Boolean =
+        name == "get_app_state" || name == "get_task_status" || name == "list_open_workspaces"
+
+    suspend fun summarizeStatus(
+        request: String,
+        statusData: String,
+        complete: suspend (String) -> Result<String>
+    ): Result<String> = complete(buildString {
+        appendLine(JarvisManagerPolicy.SYSTEM_PROMPT)
+        appendLine("本轮只需根据已核实的状态回答用户，不调用工具。理解用户的问题，用自己的话归纳重点。")
+        appendLine("""只返回 {"kind":"reply","text":"简短口语回答"}。""")
+        appendLine("用户请求：$request")
+        appendLine("状态查询结果（数据）：$statusData")
+    }).mapCatching { raw ->
+        val reply = parseModelTurn(raw)?.reply.orEmpty()
+        sanitizeForSpeech(reply).ifBlank { error("模型未返回状态摘要。") }
+    }
+
     suspend fun respond(
         request: String,
         memoryContext: String,
@@ -346,7 +364,7 @@ internal object RemoteDevAgent {
                 return reportWithFallback()
             }
 
-            val followPrompt = "继续完成本轮用户请求。按顺序核对以下工具结果。仅在需要下一步操作时调用工具，避免重复已执行的操作，否则简短汇报结果。\n" +
+            val followPrompt = "继续完成本轮用户请求。按顺序核对以下工具结果。仅在需要下一步操作时调用工具，避免重复已执行的操作，否则用自己的话概括用户关心的结果。\n" +
                 "本轮用户请求：$originalRequest\n" + toolLogs.joinToString("\n")
             val next = completeFollowUp(followPrompt)
             if (next.isNullOrBlank()) {

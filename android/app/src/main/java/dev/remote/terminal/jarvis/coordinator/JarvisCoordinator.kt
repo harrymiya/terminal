@@ -397,8 +397,9 @@ object JarvisCoordinator : VoicePerceptorCallback {
                 }
             }
             is JarvisAction.ExecuteTool -> {
+                val summarize = RemoteDevAgent.isWorkspaceStatusTool(action.toolName)
                 updateState(JarvisState.EXECUTING)
-                scope.launch {
+                val job = scope.launch {
                     val result = RemoteDevAgent.executeTool(action.toolName, action.arguments)
                     if (!result.isError && action.toolName == "close_awake" || !_conversationActive.value) {
                         return@launch
@@ -409,14 +410,22 @@ object JarvisCoordinator : VoicePerceptorCallback {
                             openFollowUpListeningWindow()
                         }
                     } else {
+                        val fallback = result.voiceSummary ?: "操作已完成。"
+                        val reply = if (summarize) {
+                            _subtitle.value = "Jarvis 正在整理状态…"
+                            runModel { complete ->
+                                RemoteDevAgent.summarizeStatus(userText, result.content, complete)
+                            }.getOrDefault(fallback)
+                        } else fallback
+                        if (!_conversationActive.value) return@launch
                         earconManager.playActionSuccessChime()
-                        val reply = result.voiceSummary ?: "操作已完成。"
                         recordMemoryTurn(userText, reply)
                         speakWithState(reply) {
                             openFollowUpListeningWindow()
                         }
                     }
                 }
+                if (summarize) chatJob = job
             }
             is JarvisAction.AskAgent -> {
                 if (chatJob?.isActive == true) {
@@ -485,13 +494,6 @@ object JarvisCoordinator : VoicePerceptorCallback {
     }
 
     private suspend fun handleAgentRequest(action: JarvisAction.AskAgent) {
-        val store = storeProvider?.invoke()
-        if (store == null) {
-            earconManager.playAlertChime()
-            speakWithState("当前无法读取 App 配置。") { openFollowUpListeningWindow() }
-            return
-        }
-        val useApi = store.loadJarvisUsesModelApi()
         _subtitle.value = "Jarvis 正在理解请求…"
         val memoryContext = try {
             memoryManager?.recallContext(action.message).orEmpty()
@@ -501,17 +503,8 @@ object JarvisCoordinator : VoicePerceptorCallback {
             Log.w(TAG, "Jarvis memory recall failed: ${e.message}")
             ""
         }
-        val result = if (useApi) {
-            val settings = kotlinx.coroutines.withContext(Dispatchers.IO) { store.loadJarvisModelApiSettings() }
-            if (settings.key.isBlank()) {
-                Result.failure(IllegalStateException("请先在 Jarvis 的模型 API 设置中保存 API Key。"))
-            } else {
-                RemoteDevAgent.respond(action.message, memoryContext) { prompt ->
-                    ApiChatModel.complete(settings.url, settings.model, settings.key, prompt)
-                }
-            }
-        } else {
-            runCliModel(store, action.message, memoryContext)
+        val result = runModel { complete ->
+            RemoteDevAgent.respond(action.message, memoryContext, complete)
         }
         result.onSuccess { reply ->
             if (reply.isBlank() || !_conversationActive.value) return
@@ -526,10 +519,23 @@ object JarvisCoordinator : VoicePerceptorCallback {
         }
     }
 
+    private suspend fun runModel(
+        runAgent: suspend (suspend (String) -> Result<String>) -> Result<String>
+    ): Result<String> {
+        val store = storeProvider?.invoke()
+            ?: return Result.failure(IllegalStateException("当前无法读取 App 配置。"))
+        if (!store.loadJarvisUsesModelApi()) return runCliModel(store, runAgent)
+
+        val settings = kotlinx.coroutines.withContext(Dispatchers.IO) { store.loadJarvisModelApiSettings() }
+        if (settings.key.isBlank()) {
+            return Result.failure(IllegalStateException("请先在 Jarvis 的模型 API 设置中保存 API Key。"))
+        }
+        return runAgent { prompt -> ApiChatModel.complete(settings.url, settings.model, settings.key, prompt) }
+    }
+
     private suspend fun runCliModel(
         store: dev.remote.terminal.data.LocalStore,
-        request: String,
-        memoryContext: String
+        runAgent: suspend (suspend (String) -> Result<String>) -> Result<String>
     ): Result<String> {
         val hosts = hostsProvider?.invoke().orEmpty()
         val targetHost = hosts.firstOrNull { config.targetHostId.isNotBlank() && it.id == config.targetHostId }
@@ -550,9 +556,7 @@ object JarvisCoordinator : VoicePerceptorCallback {
         if (preset == null) {
             return Result.failure(IllegalStateException("请在 Jarvis 设置中选择可用的远端 CLI 模型入口。"))
         }
-        return RemoteCliModel.withTurn(targetHost, preset, store, model, config.targetEffort) { complete ->
-            RemoteDevAgent.respond(request, memoryContext, complete)
-        }
+        return RemoteCliModel.withTurn(targetHost, preset, store, model, config.targetEffort, runAgent)
     }
 
     private fun recordMemoryTurn(userText: String, assistantText: String?) {
