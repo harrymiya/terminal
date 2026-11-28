@@ -102,8 +102,14 @@ internal object RemoteDevAgent {
             }
         }
         val legacyCalls = extractMcpCalls(body)
-        return legacyCalls.takeIf { it.isNotEmpty() && it.all { call -> JarvisToolRegistry.isManagerTool(call.toolName) } }
-            ?.let { ModelTurn(calls = it) }
+        if (legacyCalls.isNotEmpty() && legacyCalls.all { call -> JarvisToolRegistry.isManagerTool(call.toolName) }) {
+            return ModelTurn(calls = legacyCalls)
+        }
+        // 模型直接返回自然口语时直接播报，避免触发耗时的二次格式纠偏请求
+        if (body.isNotBlank() && !body.startsWith("{") && !body.contains("RDT_MCP:", ignoreCase = true) && !unavailableToolsReply.containsMatchIn(body)) {
+            return ModelTurn(reply = body)
+        }
+        return null
     }
 
     /**
@@ -394,7 +400,7 @@ internal object RemoteDevAgent {
         isFollowUp: Boolean = false
     ): String = buildString {
         appendLine(JarvisManagerPolicy.SYSTEM_PROMPT)
-        appendLine(JarvisToolRegistry.buildMcpProtocolManual(userPrompt))
+        appendLine(JarvisToolRegistry.buildMcpProtocolManual())
         appendLine("""【极速响应要求】本轮只返回单个 JSON 对象（不要多余 markdown）：调用工具返回 {"kind":"tool_calls","calls":[{"tool":"工具名","arguments":{}}]}，直接回答返回 {"kind":"reply","text":"1~2句口语"}。下方已提供完整主机/工作区/开发者/会话状态，直接一步调用目标工具，切勿先调 get_app_state 绕圈！""")
         appendLine("【ASR语义还原】输入来自语音识别，若含同音错字（如克劳德=Claude、扣代=Codex、白肯德=backend），结合下方真实实体和历史上下文自动纠偏并直接执行。")
         if (appStateSnapshot.isNotBlank()) appendLine("App 状态：$appStateSnapshot")

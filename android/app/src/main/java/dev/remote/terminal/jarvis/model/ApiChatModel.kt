@@ -39,8 +39,8 @@ internal object ApiChatModel {
                 val connection = target.toURL().openConnection() as HttpsURLConnection
                 try {
                     connection.instanceFollowRedirects = false
-                    connection.connectTimeout = if (connectionTest) 6_000 else 4_500
-                    connection.readTimeout = if (connectionTest) 12_000 else 16_000
+                    connection.connectTimeout = if (connectionTest) 6_000 else 4_000
+                    connection.readTimeout = if (connectionTest) 12_000 else 14_000
                     connection.requestMethod = "POST"
                     connection.doOutput = true
                     connection.setRequestProperty("Authorization", "Bearer $apiKey")
@@ -49,11 +49,13 @@ internal object ApiChatModel {
                     val body = JSONObject()
                         .put("model", model)
                         .put("stream", false)
-                        .put("max_tokens", if (connectionTest) 64 else 512)
+                        .put("max_tokens", if (connectionTest) 64 else 384)
                         .put("response_format", JSONObject().put("type", "json_object"))
                         .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", prompt)))
                     if (target.host.equals("api.deepseek.com", true)) {
                         body.put("thinking", JSONObject().put("type", "disabled"))
+                    } else if (target.host.contains("siliconflow", true)) {
+                        body.put("enable_thinking", false)
                     }
                     val bytes = body.toString().toByteArray(Charsets.UTF_8)
                     connection.setFixedLengthStreamingMode(bytes.size)

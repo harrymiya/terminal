@@ -1356,42 +1356,23 @@ object JarvisToolRegistry {
         }
     }
 
-    fun buildMcpProtocolManual(userRequest: String = ""): String {
+    @Volatile
+    private var cachedStaticManual: String? = null
+
+    fun buildMcpProtocolManual(): String {
+        cachedStaticManual?.let { return it }
         val defs = managerDefinitions()
         val compactIndex = buildString {
             for (def in defs) {
                 val props = def.inputSchema.optJSONObject("properties")?.keys()?.asSequence()?.toList().orEmpty()
-                val argStr = if (props.isEmpty()) "" else props.take(6).joinToString(",")
-                appendLine("- ${def.name}($argStr): ${def.description.take(42)}")
+                val argStr = if (props.isEmpty()) "" else props.take(5).joinToString(",")
+                appendLine("- ${def.name}($argStr): ${def.description.take(34)}")
             }
         }.trim()
 
-        val q = userRequest.lowercase()
-        val priorityTools = defs.sortedByDescending { def ->
-            var score = 0
-            if (def.name in setOf("dispatch_task", "open_terminal", "web_search", "manage_memory", "start_watching_task")) score += 2
-            if (q.isNotBlank()) {
-                if (q.contains("搜") || q.contains("查") || q.contains("网") || q.contains("是什么") || q.contains("怎么")) {
-                    if (def.name in setOf("web_search", "web_fetch")) score += 10
-                }
-                if (q.contains("派发") || q.contains("开发") || q.contains("工作区") || q.contains("打开") || q.contains("修") || q.contains("跑")) {
-                    if (def.name in setOf("dispatch_task", "open_terminal", "focus_terminal", "select_agent")) score += 10
-                }
-                if (q.contains("看着") || q.contains("盯") || q.contains("监工")) {
-                    if (def.name in setOf("start_watching_task", "stop_watching_task", "get_watch_status")) score += 10
-                }
-                if (q.contains("记") || q.contains("偏好") || q.contains("习惯") || q.contains("忘")) {
-                    if (def.name == "manage_memory") score += 10
-                }
-                if (q.contains("关") || q.contains("重命名") || q.contains("重连") || q.contains("切换")) {
-                    if (def.name in setOf("close_terminal", "rename_terminal", "reconnect_terminal", "navigate_screen")) score += 10
-                }
-            }
-            score
-        }.take(5)
-
-        val focusedSchemas = JSONArray().apply {
-            priorityTools.forEach { def ->
+        val coreNames = setOf("dispatch_task", "open_terminal", "web_search", "manage_memory")
+        val coreSchemas = JSONArray().apply {
+            defs.filter { it.name in coreNames }.forEach { def ->
                 put(JSONObject().apply {
                     put("name", def.name)
                     put("inputSchema", def.inputSchema)
@@ -1399,11 +1380,13 @@ object JarvisToolRegistry {
             }
         }
 
-        return """
-            【可用 Android 工具（极速精简索引，严禁重复查询已知状态）】
+        val built = """
+            【可用 Android 工具（精简索引，禁先查已知状态）】
             $compactIndex
-            核心工具参数：$focusedSchemas
+            常用工具参数：$coreSchemas
         """.trimIndent()
+        cachedStaticManual = built
+        return built
     }
 
     suspend fun executeManagerTool(name: String, arguments: JSONObject): McpToolResult {

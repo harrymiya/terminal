@@ -33,7 +33,7 @@ import java.util.concurrent.ConcurrentHashMap
 internal object RemoteCliModel {
 
     private const val TAG = "RemoteCliModel"
-    private const val EXEC_TIMEOUT_MS = 25_000L
+    private const val EXEC_TIMEOUT_MS = 20_000L
     private data class CachedSession(
         val session: Session,
         val address: String,
@@ -79,15 +79,10 @@ internal object RemoteCliModel {
         store: LocalStore,
         model: String,
         effort: String
-    ) = withContext(Dispatchers.IO) {
-        val command = resolveEffectiveCommand(preset.command, model)
-        if (!supports(preset.command, model)) return@withContext
-        val key = "${host.id}:$command:$model:$effort"
-        runCatching {
-            val session = getOrOpenSession(host, store).session
-            if (antigravityExecutable(command) != null) {
-                getOrSpawnWorker(session, key, command, model, effort)
-            }
+    ) {
+        withContext(Dispatchers.IO) {
+            // 仅预热 SSH TCP/会话连接池，不提前阻塞 CLI 进程锁
+            runCatching { getOrOpenSession(host, store) }
         }
     }
 
@@ -103,7 +98,7 @@ internal object RemoteCliModel {
         if (!supports(preset.command, model)) {
             return@withContext Result.failure(IOException("当前预设不是受支持的远端 CLI 模型入口。"))
         }
-        val key = "${host.id}:$command:$model:$effort"
+        val key = java.util.UUID.randomUUID().toString()
         try {
             val session = getOrOpenSession(host, store).session
             runAgent { prompt -> complete(session, command, key, prompt, model, effort) }
@@ -111,10 +106,11 @@ internal object RemoteCliModel {
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "Remote CLI model call failed: ${e.message}", e)
+            Result.failure(e)
+        } finally {
             streamWorkers.remove(key)?.closeQuietly()
             conversationIds.remove(key)
             codexThreadIds.remove(key)
-            Result.failure(e)
         }
     }
 
@@ -191,6 +187,11 @@ internal object RemoteCliModel {
 
                 val deadline = t0 + EXEC_TIMEOUT_MS
                 while (SystemClock.elapsedRealtime() < deadline) {
+                    if (!worker.stdout.ready()) {
+                        if (worker.channel.isClosed) throw IOException("常驻开发者输出流意外结束")
+                        kotlinx.coroutines.delay(15)
+                        continue
+                    }
                     val line = worker.stdout.readLine()
                         ?: throw IOException("常驻开发者输出流意外结束")
                     val trimmed = line.trim()

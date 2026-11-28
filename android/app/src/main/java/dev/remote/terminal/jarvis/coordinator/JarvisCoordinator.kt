@@ -237,12 +237,15 @@ object JarvisCoordinator : VoicePerceptorCallback {
     }
 
     private fun enterConversationMode() {
+        val coldWake = !_conversationActive.value
         _conversationActive.value = true
         conversationAwakeUntilMs = SystemClock.elapsedRealtime() + CONVERSATION_WINDOW_MS
-        scope.launch(Dispatchers.IO) {
-            runCatching { memoryManager?.restoreContextFromSqlite() }
-                .onFailure { Log.w(TAG, "Failed to restore context from SQLite: ${it.message}") }
-            prewarmCliModelIfNeeded()
+        if (coldWake) {
+            scope.launch(Dispatchers.IO) {
+                runCatching { memoryManager?.restoreContextFromSqlite() }
+                    .onFailure { Log.w(TAG, "Failed to restore context from SQLite: ${it.message}") }
+                prewarmCliModelIfNeeded()
+            }
         }
     }
 
@@ -300,7 +303,7 @@ object JarvisCoordinator : VoicePerceptorCallback {
         }
         scope.launch(Dispatchers.IO) {
             runCatching {
-                memoryManager?.distillSessionToLongMemory { prompt -> distillLongMemoriesWithModel(prompt) }
+                memoryManager?.distillSessionToLongMemory(null)
                 memoryManager?.flushContextToSqlite()
             }.onFailure { Log.w(TAG, "Failed to flush/distill context to SQLite on awake exit: ${it.message}") }
         }

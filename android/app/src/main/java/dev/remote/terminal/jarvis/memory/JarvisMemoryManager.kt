@@ -608,10 +608,19 @@ class JarvisMemoryManager(context: Context, private val localStore: LocalStore) 
     private var lastRecalledMemoryIds: List<String> = emptyList()
     @Volatile
     private var lastMatchedHabitId: String? = null
+    @Volatile
+    private var cachedLongMemories: List<JarvisLongMemoryEntry> = emptyList()
+    @Volatile
+    private var cachedIntentHabits: List<JarvisIntentHabit> = emptyList()
+    @Volatile
+    private var cachedHotSnapshot: List<JarvisMemoryItem> = emptyList()
+    @Volatile
+    private var cachedAccountLoaded: String = ""
 
     init {
         val account = currentAccount().ifBlank { "local_default" }
         reloadHotCache(account)
+        refreshVectorCaches(account)
         val (savedSummary, _) = store.loadConversationState(account)
         contextSummary = savedSummary
         val savedTurns = store.loadActiveTurns(account, CONTEXT_RAM_BUDGET_BYTES - contextSummary.toByteArray(Charsets.UTF_8).size)
@@ -790,7 +799,7 @@ class JarvisMemoryManager(context: Context, private val localStore: LocalStore) 
         val clean = content.trim().take(1200)
         val vec = JarvisVectorEmbedder.embed(clean)
         val keywords = terms(clean).take(24).joinToString(",")
-        val existing = store.loadLongMemories(account, 2000)
+        val existing = getCachedLongMemories(account)
 
         // 检查同主题冲突（例如切换了某工作区的默认开发者）或高语义相似度合并
         var matched: JarvisLongMemoryEntry? = null
@@ -831,7 +840,10 @@ class JarvisMemoryManager(context: Context, private val localStore: LocalStore) 
                     source = source
                 )
             }
-            return store.upsertLongMemory(account, updated)
+            return store.upsertLongMemory(account, updated).also {
+                cachedLongMemories = store.loadLongMemories(account, 2000)
+                cachedAccountLoaded = account
+            }
         }
 
         val entry = JarvisLongMemoryEntry(
@@ -848,7 +860,10 @@ class JarvisMemoryManager(context: Context, private val localStore: LocalStore) 
             recallCount = 0,
             source = source
         )
-        return store.upsertLongMemory(account, entry)
+        return store.upsertLongMemory(account, entry).also {
+            cachedLongMemories = store.loadLongMemories(account, 2000)
+            cachedAccountLoaded = account
+        }
     }
 
     /**
@@ -943,12 +958,20 @@ class JarvisMemoryManager(context: Context, private val localStore: LocalStore) 
         mutex.withLock {
             val account = currentAccount().ifBlank { "local_default" }
             val direct = store.deleteLongMemory(account, queryOrId)
-            if (direct > 0) return@withLock direct
+            if (direct > 0) {
+                cachedLongMemories = store.loadLongMemories(account, 2000)
+                cachedAccountLoaded = account
+                return@withLock direct
+            }
             val matches = recallLongMemoriesInternal(account, queryOrId, 3)
                 .filter { it.second >= 0.42f }
             var removed = 0
             for ((entry, _) in matches) {
                 removed += store.deleteLongMemory(account, entry.id)
+            }
+            if (removed > 0) {
+                cachedLongMemories = store.loadLongMemories(account, 2000)
+                cachedAccountLoaded = account
             }
             removed
         }
@@ -968,7 +991,7 @@ class JarvisMemoryManager(context: Context, private val localStore: LocalStore) 
      * score = 0.48*VectorCosine + 0.24*LexicalOverlap + 0.16*(Importance*Confidence) + 0.12*(Reinforcement+Recency)
      */
     private fun recallLongMemoriesInternal(account: String, query: String, limit: Int = 8): List<Pair<JarvisLongMemoryEntry, Float>> {
-        val all = store.loadLongMemories(account, 2000)
+        val all = getCachedLongMemories(account)
         if (all.isEmpty()) return emptyList()
 
         val qVec = JarvisVectorEmbedder.embed(query)
@@ -1004,6 +1027,7 @@ class JarvisMemoryManager(context: Context, private val localStore: LocalStore) 
     }
 
     suspend fun checkAndCompressContext(compressor: (suspend (String) -> String)? = null) = withContext(Dispatchers.IO) {
+        var refineInput: Triple<String, String, String>? = null
         mutex.withLock {
             val account = currentAccount().ifBlank { "local_default" }
             val currentBytes = currentContextBytes()
@@ -1018,22 +1042,19 @@ class JarvisMemoryManager(context: Context, private val localStore: LocalStore) 
             store.saveAllConversationTurns(account, turnsToCompress.map { it.copy(isCompressed = true) })
             store.markTurnsAsCompressed(account, turnsToCompress.map { it.id })
 
-            // 2. 压缩上下文含义，总结要点
+            // 2. 先在 < 2ms 内完成本地摘要归档并立即释放 mutex，避免网络 LLM 调用阻塞实时语音对话
             val turnsText = buildString {
                 for (turn in turnsToCompress) {
                     val label = if (turn.role == "user") "用户" else "Jarvis"
                     appendLine("$label: ${turn.content}")
                 }
             }
-
-            val summaryResult = runCatching {
-                compressor?.invoke(turnsText)?.takeIf { it.isNotBlank() }
-            }.getOrNull() ?: generateExtractiveSummary(turnsToCompress)
-
-            contextSummary = if (contextSummary.isBlank()) {
-                "【历史对话核心要点归纳】：\n$summaryResult"
+            val extractive = generateExtractiveSummary(turnsToCompress)
+            val prevSummary = contextSummary
+            contextSummary = if (prevSummary.isBlank()) {
+                "【历史对话核心要点归纳】：\n$extractive"
             } else {
-                "【历史对话核心要点归纳】：\n$summaryResult\n[前情要点]：\n${contextSummary.take(1200)}"
+                "【历史对话核心要点归纳】：\n$extractive\n[前情要点]：\n${prevSummary.take(1200)}"
             }
 
             // 3. 内存中仅保留最新的活跃轮次继续对话
@@ -1044,6 +1065,27 @@ class JarvisMemoryManager(context: Context, private val localStore: LocalStore) 
             // 4. 将压缩状态存入 SQLite
             store.saveConversationState(account, contextSummary, currentContextBytes(), System.currentTimeMillis())
             Log.i(TAG, "Context compression finished. Reduced memory size to: ${currentContextBytes()} bytes (< 200KB).")
+
+            if (compressor != null) {
+                refineInput = Triple(account, turnsText, prevSummary)
+            }
+        }
+
+        // 5. 锁外异步润色摘要，不阻塞任何实时请求
+        val pending = refineInput ?: return@withContext
+        if (compressor != null) {
+            kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
+                val refined = runCatching { compressor.invoke(pending.second)?.takeIf { it.isNotBlank() } }.getOrNull()
+                    ?: return@launch
+                mutex.withLock {
+                    contextSummary = if (pending.third.isBlank()) {
+                        "【历史对话核心要点归纳】：\n$refined"
+                    } else {
+                        "【历史对话核心要点归纳】：\n$refined\n[前情要点]：\n${pending.third.take(1200)}"
+                    }
+                    store.saveConversationState(pending.first, contextSummary, currentContextBytes(), System.currentTimeMillis())
+                }
+            }
         }
     }
 
@@ -1085,26 +1127,32 @@ class JarvisMemoryManager(context: Context, private val localStore: LocalStore) 
     suspend fun restoreContextFromSqlite() = withContext(Dispatchers.IO) {
         mutex.withLock {
             val account = currentAccount().ifBlank { "local_default" }
-            val (savedSummary, _) = store.loadConversationState(account)
-            contextSummary = savedSummary
-            val savedTurns = store.loadActiveTurns(account, CONTEXT_RAM_BUDGET_BYTES - contextSummary.toByteArray(Charsets.UTF_8).size)
-            activeTurns.clear()
-            activeTurns.addAll(savedTurns)
-            reloadHotCache(account)
-            Log.i(TAG, "Restored conversation context from SQLite: ${activeTurns.size} turns, summary length: ${contextSummary.length}, total bytes: ${currentContextBytes()}")
+            restoreContextFromSqliteLocked(account)
         }
+    }
+
+    private fun restoreContextFromSqliteLocked(account: String) {
+        val (savedSummary, _) = store.loadConversationState(account)
+        contextSummary = savedSummary
+        val savedTurns = store.loadActiveTurns(account, CONTEXT_RAM_BUDGET_BYTES - contextSummary.toByteArray(Charsets.UTF_8).size)
+        activeTurns.clear()
+        activeTurns.addAll(savedTurns)
+        reloadHotCache(account)
+        refreshVectorCaches(account)
+        Log.i(TAG, "Restored conversation context from SQLite: ${activeTurns.size} turns, summary length: ${contextSummary.length}, total bytes: ${currentContextBytes()}")
     }
 
     suspend fun initialize() = withContext(Dispatchers.IO) {
         mutex.withLock {
             val account = currentAccount().ifBlank { "local_default" }
-            ensureAccount(account)
-            restoreContextFromSqlite()
+            activeAccount = account
+            restoreContextFromSqliteLocked(account)
             if (account != "local_default") {
                 runCatching { syncShortMemory(account) }
                 runCatching { syncPendingTurns(account) }
             }
             reloadHotCache(account)
+            refreshVectorCaches(account)
         }
     }
 
@@ -1127,7 +1175,7 @@ class JarvisMemoryManager(context: Context, private val localStore: LocalStore) 
         val now = System.currentTimeMillis()
         mutex.withLock {
             val account = currentAccount().ifBlank { "local_default" }
-            val existing = store.loadIntentHabits(account, 256)
+            val existing = getCachedIntentHabits(account)
             var matched: JarvisIntentHabit? = null
             for (h in existing) {
                 val sim = JarvisVectorEmbedder.cosineSimilarity(vec, h.vector)
@@ -1167,6 +1215,8 @@ class JarvisMemoryManager(context: Context, private val localStore: LocalStore) 
                 store.upsertIntentHabit(account, habit)
                 lastMatchedHabitId = id
             }
+            cachedIntentHabits = store.loadIntentHabits(account, 256)
+            cachedAccountLoaded = account
         }
     }
 
@@ -1177,7 +1227,7 @@ class JarvisMemoryManager(context: Context, private val localStore: LocalStore) 
         val norm = normalizeHabitPhrase(utterance)
         if (norm.length < 2) return null
         val account = currentAccount().ifBlank { "local_default" }
-        val habits = store.loadIntentHabits(account, 256)
+        val habits = getCachedIntentHabits(account)
         if (habits.isEmpty()) return null
 
         val uVec = JarvisVectorEmbedder.embed(norm)
@@ -1195,7 +1245,13 @@ class JarvisMemoryManager(context: Context, private val localStore: LocalStore) 
         }
         if (best != null) {
             lastMatchedHabitId = best.id
-            store.adjustHabitConfidence(account, best.id, 0.02f, System.currentTimeMillis())
+            val matchedId = best.id
+            kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
+                runCatching {
+                    store.adjustHabitConfidence(account, matchedId, 0.02f, System.currentTimeMillis())
+                    cachedIntentHabits = store.loadIntentHabits(account, 256)
+                }
+            }
         }
         return best
     }
@@ -1214,6 +1270,7 @@ class JarvisMemoryManager(context: Context, private val localStore: LocalStore) 
             lastRecalledMemoryIds.forEach { mid ->
                 store.adjustLongMemoryConfidence(account, mid, if (isPositive) 0.04f else -0.15f, now)
             }
+            refreshVectorCaches(account)
         }
     }
 
@@ -1222,8 +1279,8 @@ class JarvisMemoryManager(context: Context, private val localStore: LocalStore) 
      */
     fun buildUserTacitProfile(): String {
         val account = currentAccount().ifBlank { "local_default" }
-        val longMemories = store.loadLongMemories(account, 200)
-        val habits = store.loadIntentHabits(account, 32)
+        val longMemories = getCachedLongMemories(account).take(200)
+        val habits = getCachedIntentHabits(account).take(32)
         if (longMemories.isEmpty() && habits.isEmpty()) return ""
 
         val body = buildString {
@@ -1258,63 +1315,68 @@ class JarvisMemoryManager(context: Context, private val localStore: LocalStore) 
         .trim()
 
     /**
-     * 每次对话前自动调用：对齐 Hermes `MEMORY.md` 规范，从 SQLite 向量长记忆库召回相关经验，
-     * 与短记忆合计严格控制在 2,200 字符 (~800 tokens) 以内；总提示词记忆上限为 1,375 + 2,200 = 3,575 字符。
+     * 每次对话前自动调用：对齐 Hermes `MEMORY.md` 规范，从内存镜像缓存（由 SQLite 向量库热加载）秒级召回相关经验，
+     * 零锁零磁盘 I/O，与短记忆合计严格控制在 2,200 字符 (~800 tokens) 以内；总提示词记忆上限为 1,375 + 2,200 = 3,575 字符。
      */
-    suspend fun recallContext(query: String): String = withContext(Dispatchers.IO) {
-        mutex.withLock {
-            val account = currentAccount().ifBlank { "local_default" }
-            if (query.isBlank()) return@withLock ""
-            ensureAccount(account)
-            reloadHotCache(account)
+    suspend fun recallContext(query: String): String = withContext(Dispatchers.Default) {
+        val account = currentAccount().ifBlank { "local_default" }
+        if (query.isBlank()) return@withContext ""
 
-            val now = System.currentTimeMillis()
-            val sections = mutableListOf<String>()
+        val now = System.currentTimeMillis()
+        val sections = mutableListOf<String>()
 
-            // 1. USER 画像 (<= 1,375 chars)
-            val profile = buildUserTacitProfile()
-            if (profile.isNotBlank()) {
-                sections.add(profile)
+        // 1. USER 画像 (<= 1,375 chars)
+        val profile = buildUserTacitProfile()
+        if (profile.isNotBlank()) {
+            sections.add(profile)
+        }
+
+        // 2. MEMORY 向量召回 + 热缓存短记忆补充 (合计 <= 2,200 chars，全内存计算 < 1ms)
+        val vectorHits = recallLongMemoriesInternal(account, query, limit = 8)
+        val touchedLongIds = mutableListOf<String>()
+        val touchedShortIds = mutableListOf<String>()
+
+        val memoryBody = buildString {
+            if (vectorHits.isNotEmpty()) {
+                lastRecalledMemoryIds = vectorHits.map { it.first.id }
+                vectorHits.forEach { (entry, _) -> touchedLongIds.add(entry.id) }
+                for ((entry, _) in vectorHits) {
+                    val confPct = (entry.confidence * 100).toInt()
+                    val line = "- [${entry.category}/重要度${entry.importance}/置信${confPct}%] ${entry.content}\n"
+                    if (length + line.length > HERMES_MEMORY_CHAR_LIMIT) break
+                    append(line)
+                }
+            } else {
+                lastRecalledMemoryIds = emptyList()
             }
 
-            // 2. MEMORY 向量召回 + 短记忆补充 (合计 <= 2,200 chars)
-            val vectorHits = recallLongMemoriesInternal(account, query, limit = 8)
-            val memoryBody = buildString {
-                if (vectorHits.isNotEmpty()) {
-                    lastRecalledMemoryIds = vectorHits.map { it.first.id }
-                    vectorHits.forEach { (entry, _) -> store.touchLongMemory(account, entry.id, now) }
-                    for ((entry, _) in vectorHits) {
-                        val confPct = (entry.confidence * 100).toInt()
-                        val line = "- [${entry.category}/重要度${entry.importance}/置信${confPct}%] ${entry.content}\n"
-                        if (length + line.length > HERMES_MEMORY_CHAR_LIMIT) break
-                        append(line)
-                    }
-                } else {
-                    lastRecalledMemoryIds = emptyList()
+            val shortHits = findHotMatches(query)
+            if (shortHits.isNotEmpty() && length < HERMES_MEMORY_CHAR_LIMIT - 120) {
+                shortHits.forEach { item -> touchedShortIds.add(item.id) }
+                for (item in shortHits) {
+                    val line = "- [${item.category}] ${item.content}\n"
+                    if (length + line.length > HERMES_MEMORY_CHAR_LIMIT) break
+                    append(line)
                 }
-
-                var shortHits = findHotMatches(query)
-                if (shortHits.isEmpty()) shortHits = findStoredMatches(account, query)
-                if (shortHits.isNotEmpty() && length < HERMES_MEMORY_CHAR_LIMIT - 120) {
-                    shortHits.forEach { item -> store.touch(account, item.id, now) }
-                    reloadHotCache(account)
-                    for (item in shortHits) {
-                        val line = "- [${item.category}] ${item.content}\n"
-                        if (length + line.length > HERMES_MEMORY_CHAR_LIMIT) break
-                        append(line)
-                    }
-                }
-            }.trim().take(HERMES_MEMORY_CHAR_LIMIT)
-
-            if (memoryBody.isNotBlank()) {
-                val memPct = ((memoryBody.length * 100.0) / HERMES_MEMORY_CHAR_LIMIT).toInt().coerceIn(1, 100)
-                sections.add("【MEMORY 向量长记忆 [$memPct% — ${memoryBody.length}/$HERMES_MEMORY_CHAR_LIMIT 字符]】：\n$memoryBody")
             }
+        }.trim().take(HERMES_MEMORY_CHAR_LIMIT)
 
-            // 3. 若已登录同步账号且本地召回不足，异步后台拉取远端 Mem0 反哺至本地 SQLite，绝不阻塞当前实时对话轮次
-            if (account != "local_default" && vectorHits.size < 3) {
-                kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
-                    runCatching {
+        if (memoryBody.isNotBlank()) {
+            val memPct = ((memoryBody.length * 100.0) / HERMES_MEMORY_CHAR_LIMIT).toInt().coerceIn(1, 100)
+            sections.add("【MEMORY 向量长记忆 [$memPct% — ${memoryBody.length}/$HERMES_MEMORY_CHAR_LIMIT 字符]】：\n$memoryBody")
+        }
+
+        // 3. 将触发次数统计与远端 Mem0 反哺全部下沉到后台异步，绝不阻塞当前实时对话响应
+        if (touchedLongIds.isNotEmpty() || touchedShortIds.isNotEmpty() || (account != "local_default" && vectorHits.size < 3)) {
+            kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
+                runCatching {
+                    if (touchedLongIds.isNotEmpty()) {
+                        touchedLongIds.forEach { id -> store.touchLongMemory(account, id, now) }
+                    }
+                    if (touchedShortIds.isNotEmpty()) {
+                        touchedShortIds.forEach { id -> store.touch(account, id, now) }
+                    }
+                    if (account != "local_default" && vectorHits.size < 3) {
                         syncShortMemory(account)
                         val longHits = searchLongMemory(query)
                         if (longHits.isNotEmpty()) {
@@ -1336,9 +1398,9 @@ class JarvisMemoryManager(context: Context, private val localStore: LocalStore) 
                     }
                 }
             }
-
-            sections.joinToString("\n\n").trim()
         }
+
+        sections.joinToString("\n\n").trim()
     }
 
     suspend fun beginTurn(userText: String) = withContext(Dispatchers.IO) {
@@ -1379,10 +1441,34 @@ class JarvisMemoryManager(context: Context, private val localStore: LocalStore) 
 
     private fun currentAccount(): String = runCatching { localStore.loadSyncUsername().trim().lowercase() }.getOrDefault("")
 
+    private fun refreshVectorCaches(account: String) {
+        val effective = account.ifBlank { "local_default" }
+        cachedLongMemories = store.loadLongMemories(effective, 2000)
+        cachedIntentHabits = store.loadIntentHabits(effective, 256)
+        cachedAccountLoaded = effective
+    }
+
+    private fun getCachedLongMemories(account: String): List<JarvisLongMemoryEntry> {
+        val effective = account.ifBlank { "local_default" }
+        if (cachedAccountLoaded != effective) {
+            refreshVectorCaches(effective)
+        }
+        return cachedLongMemories
+    }
+
+    private fun getCachedIntentHabits(account: String): List<JarvisIntentHabit> {
+        val effective = account.ifBlank { "local_default" }
+        if (cachedAccountLoaded != effective) {
+            refreshVectorCaches(effective)
+        }
+        return cachedIntentHabits
+    }
+
     private fun ensureAccount(account: String) {
         if (activeAccount == account) return
         activeAccount = account
         reloadHotCache(account)
+        refreshVectorCaches(account)
         val (savedSummary, _) = store.loadConversationState(account)
         contextSummary = savedSummary
         val savedTurns = store.loadActiveTurns(account, CONTEXT_RAM_BUDGET_BYTES - contextSummary.toByteArray(Charsets.UTF_8).size)
@@ -1401,6 +1487,7 @@ class JarvisMemoryManager(context: Context, private val localStore: LocalStore) 
                 hotBytes += size
             }
         }
+        cachedHotSnapshot = hot.values.toList()
     }
 
     private fun addHot(item: JarvisMemoryItem) {
@@ -1415,10 +1502,11 @@ class JarvisMemoryManager(context: Context, private val localStore: LocalStore) 
             hotBytes -= evicted.content.toByteArray(Charsets.UTF_8).size + 160
             hot.remove(evicted.id)
         }
+        cachedHotSnapshot = hot.values.toList()
     }
 
     private fun findHotMatches(query: String): List<JarvisMemoryItem> {
-        return findMatches(hot.values, query)
+        return findMatches(cachedHotSnapshot, query)
     }
 
     private fun findStoredMatches(account: String, query: String): List<JarvisMemoryItem> {
