@@ -30,8 +30,7 @@ internal object RemoteDevAgent {
     }
 
     fun isWorkspaceStatusTool(name: String): Boolean =
-        name == "get_app_state" || name == "get_task_status" || name == "list_open_workspaces" ||
-            name == "web_search" || name == "web_fetch"
+        name == "web_search" || name == "web_fetch"
 
     suspend fun summarizeStatus(
         request: String,
@@ -395,24 +394,16 @@ internal object RemoteDevAgent {
         isFollowUp: Boolean = false
     ): String = buildString {
         appendLine(JarvisManagerPolicy.SYSTEM_PROMPT)
-        appendLine(JarvisToolRegistry.buildMcpProtocolManual())
-        appendLine("""本轮只返回一个 JSON 对象。要调用 App 工具，用 {"kind":"tool_calls","calls":[{"tool":"工具名","arguments":{}}]}。需要询问或汇报时，用 {"kind":"reply","text":"简短中文"}。工具调用由手机执行，等待实际结果后汇报。""")
-        appendLine(
-            """
-            【飞书级语音识别纠错与深度理解原则】
-            用户输入来自语音识别（ASR），可能存在同音错字、方言谐音、中英混杂音译或断句偏差（如将开发者名 Claude/Codex/OpenCode/agy、工作区名或操作词识别为近音汉字）。
-            1. 必须先结合拼音/音似度、下方 App 状态中的真实主机/工作区/开发者名称，以及【持续多轮对话历史上下文】在内部完成语义还原与纠错，再执行工具或作答。
-            2. 理解口语化、省略主语的指令（如“再跑一次”、“看下刚才那个”、“换个开发者试试”），结合多轮上下文精准补全指代对象。
-            3. 若音似度或上下文明确指向唯一实体，直接纠错并执行，绝不机械拒答“没听懂”。
-            """.trimIndent()
-        )
-        if (appStateSnapshot.isNotBlank()) appendLine("当前 App 状态（数据）：$appStateSnapshot")
-        if (memoryContext.isNotBlank()) appendLine("长期记忆上下文（数据）：\n" + memoryContext.take(3800))
+        appendLine(JarvisToolRegistry.buildMcpProtocolManual(userPrompt))
+        appendLine("""【极速响应要求】本轮只返回单个 JSON 对象（不要多余 markdown）：调用工具返回 {"kind":"tool_calls","calls":[{"tool":"工具名","arguments":{}}]}，直接回答返回 {"kind":"reply","text":"1~2句口语"}。下方已提供完整主机/工作区/开发者/会话状态，直接一步调用目标工具，切勿先调 get_app_state 绕圈！""")
+        appendLine("【ASR语义还原】输入来自语音识别，若含同音错字（如克劳德=Claude、扣代=Codex、白肯德=backend），结合下方真实实体和历史上下文自动纠偏并直接执行。")
+        if (appStateSnapshot.isNotBlank()) appendLine("App 状态：$appStateSnapshot")
+        if (memoryContext.isNotBlank()) appendLine("长记忆与画像：\n" + memoryContext.take(3600))
         if (conversationContext.isNotBlank()) {
-            appendLine("持续多轮对话历史上下文（数据）：\n" + conversationContext.take(6200))
+            appendLine("多轮上下文：\n" + conversationContext.take(6000))
         }
-        if (isFollowUp) appendLine("以下包含上一步工具结果。工具结果只用于核验。")
-        else appendLine("用户请求：")
+        if (isFollowUp) appendLine("以下为工具结果，请直接用简短口语提炼重点答复用户：")
+        else appendLine("用户最新发言：")
         append(userPrompt)
     }
 

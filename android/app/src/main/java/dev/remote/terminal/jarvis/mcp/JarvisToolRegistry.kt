@@ -1356,21 +1356,55 @@ object JarvisToolRegistry {
         }
     }
 
-    fun buildMcpProtocolManual(): String = """
-        【本轮可调用的 Android 工具】
-        以下工具由 Remote Dev 安卓 App 执行。通过文本桥接调用时输出独立标记：
-        [[RDT_MCP:{"tool":"工具名","arguments":{}}]]
-        实例管理：用 get_app_state 查看 sessions 和 shared_tasks，按首页标题找到唯一记录，将其 id 传作 session_id。
-        接入已有实例用 focus_terminal，关闭用 close_terminal，改名用 rename_terminal。打开尚未启动的工作区用 open_terminal，传主机和工作区，不发送命令。目标有歧义时请用户明确目标。
-        开发者派发与监工：从 get_app_state 选主机、工作区和开发者，向 dispatch_task 提交 task_prompt（可传 agent_name、workspace_name、task_prompt）。已有实例可指定 session_id，没有实例时工具会在所选工作区启动开发者。随后将返回的 session_id 传给 get_task_status 核验接收或进度。需要看着干活时，调用 start_watching_task 开启 0 Token 低功耗自适应后台监工，stop_watching_task 结束监工。
-        互联网检索：需要查询外部实时知识、报错或最新资料时，用 web_search（传入简练关键词 query）或 web_fetch（传入 url 和 query），返回结果已做本地降噪精简，不浪费 Token。
-        自进化长记忆：系统每次对话会自动从 SQLite 向量长记忆库召回相关经验；遇到用户新偏好、纠错或重要知识时，可用 manage_memory（action=save/search/forget/stats）主动沉淀或检索。
-        配置管理：用 get_app_state 读取当前资源和设置，从 manage_host、manage_workspace、manage_agent 选择对应的 action 并传入目标。用 update_settings 写入用户要求修改的字段，再读取状态核验。
-        历史和界面：用 manage_logs 的 list 查询历史，用 restore 和会话 ID 恢复会话；用 navigate_screen 切换页面，用 manage_session_window 管理会话窗口；用 close_awake 退出唤醒态。
-        调用示例：[[RDT_MCP:{"tool":"get_task_status","arguments":{}}]]
-        读写时使用下方参数定义。收到 App 返回结果后报告操作结果。
-        ${buildMcpToolsSchemaJson()}
-    """.trimIndent()
+    fun buildMcpProtocolManual(userRequest: String = ""): String {
+        val defs = managerDefinitions()
+        val compactIndex = buildString {
+            for (def in defs) {
+                val props = def.inputSchema.optJSONObject("properties")?.keys()?.asSequence()?.toList().orEmpty()
+                val argStr = if (props.isEmpty()) "" else props.take(6).joinToString(",")
+                appendLine("- ${def.name}($argStr): ${def.description.take(42)}")
+            }
+        }.trim()
+
+        val q = userRequest.lowercase()
+        val priorityTools = defs.sortedByDescending { def ->
+            var score = 0
+            if (def.name in setOf("dispatch_task", "open_terminal", "web_search", "manage_memory", "start_watching_task")) score += 2
+            if (q.isNotBlank()) {
+                if (q.contains("搜") || q.contains("查") || q.contains("网") || q.contains("是什么") || q.contains("怎么")) {
+                    if (def.name in setOf("web_search", "web_fetch")) score += 10
+                }
+                if (q.contains("派发") || q.contains("开发") || q.contains("工作区") || q.contains("打开") || q.contains("修") || q.contains("跑")) {
+                    if (def.name in setOf("dispatch_task", "open_terminal", "focus_terminal", "select_agent")) score += 10
+                }
+                if (q.contains("看着") || q.contains("盯") || q.contains("监工")) {
+                    if (def.name in setOf("start_watching_task", "stop_watching_task", "get_watch_status")) score += 10
+                }
+                if (q.contains("记") || q.contains("偏好") || q.contains("习惯") || q.contains("忘")) {
+                    if (def.name == "manage_memory") score += 10
+                }
+                if (q.contains("关") || q.contains("重命名") || q.contains("重连") || q.contains("切换")) {
+                    if (def.name in setOf("close_terminal", "rename_terminal", "reconnect_terminal", "navigate_screen")) score += 10
+                }
+            }
+            score
+        }.take(5)
+
+        val focusedSchemas = JSONArray().apply {
+            priorityTools.forEach { def ->
+                put(JSONObject().apply {
+                    put("name", def.name)
+                    put("inputSchema", def.inputSchema)
+                })
+            }
+        }
+
+        return """
+            【可用 Android 工具（极速精简索引，严禁重复查询已知状态）】
+            $compactIndex
+            核心工具参数：$focusedSchemas
+        """.trimIndent()
+    }
 
     suspend fun executeManagerTool(name: String, arguments: JSONObject): McpToolResult {
         if (!isManagerTool(name)) {

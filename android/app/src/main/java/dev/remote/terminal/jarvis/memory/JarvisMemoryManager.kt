@@ -7,6 +7,7 @@ import android.database.sqlite.SQLiteOpenHelper
 import android.util.Log
 import dev.remote.terminal.data.LocalStore
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -1310,24 +1311,28 @@ class JarvisMemoryManager(context: Context, private val localStore: LocalStore) 
                 sections.add("【MEMORY 向量长记忆 [$memPct% — ${memoryBody.length}/$HERMES_MEMORY_CHAR_LIMIT 字符]】：\n$memoryBody")
             }
 
-            // 3. 若已登录同步账号且本地召回不足，合并远端 Mem0 长记忆并反哺至本地 SQLite 向量库
+            // 3. 若已登录同步账号且本地召回不足，异步后台拉取远端 Mem0 反哺至本地 SQLite，绝不阻塞当前实时对话轮次
             if (account != "local_default" && vectorHits.size < 3) {
-                runCatching { syncShortMemory(account) }
-                val longHits = runCatching { searchLongMemory(query) }.getOrDefault(emptyList())
-                if (longHits.isNotEmpty()) {
-                    for (remoteItem in longHits) {
-                        upsertLongMemoryInternal(
-                            account = account,
-                            content = remoteItem.content,
-                            category = remoteItem.category,
-                            importance = remoteItem.importance,
-                            confidence = 0.85f,
-                            source = "mem0_synced",
-                            now = now
-                        )
-                    }
-                    if (memoryBody.isBlank()) {
-                        sections.add(formatContext("Mem0 长期记忆", longHits, HERMES_MEMORY_CHAR_LIMIT))
+                kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
+                    runCatching {
+                        syncShortMemory(account)
+                        val longHits = searchLongMemory(query)
+                        if (longHits.isNotEmpty()) {
+                            val bgNow = System.currentTimeMillis()
+                            mutex.withLock {
+                                for (remoteItem in longHits) {
+                                    upsertLongMemoryInternal(
+                                        account = account,
+                                        content = remoteItem.content,
+                                        category = remoteItem.category,
+                                        importance = remoteItem.importance,
+                                        confidence = 0.85f,
+                                        source = "mem0_synced",
+                                        now = bgNow
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1350,7 +1355,11 @@ class JarvisMemoryManager(context: Context, private val localStore: LocalStore) 
             }
             ""
         }
-        if (account.isNotBlank() && account != "local_default") runCatching { syncShortMemory(account) }
+        if (account.isNotBlank() && account != "local_default") {
+            kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
+                runCatching { syncShortMemory(account) }
+            }
+        }
     }
 
     suspend fun recordTurn(userText: String, assistantText: String) = withContext(Dispatchers.IO) {

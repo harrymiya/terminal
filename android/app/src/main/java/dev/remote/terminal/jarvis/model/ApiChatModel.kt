@@ -39,8 +39,8 @@ internal object ApiChatModel {
                 val connection = target.toURL().openConnection() as HttpsURLConnection
                 try {
                     connection.instanceFollowRedirects = false
-                    connection.connectTimeout = if (connectionTest) 8_000 else 10_000
-                    connection.readTimeout = if (connectionTest) 15_000 else 90_000
+                    connection.connectTimeout = if (connectionTest) 6_000 else 4_500
+                    connection.readTimeout = if (connectionTest) 12_000 else 16_000
                     connection.requestMethod = "POST"
                     connection.doOutput = true
                     connection.setRequestProperty("Authorization", "Bearer $apiKey")
@@ -49,7 +49,7 @@ internal object ApiChatModel {
                     val body = JSONObject()
                         .put("model", model)
                         .put("stream", false)
-                        .put("max_tokens", if (connectionTest) 64 else 4096)
+                        .put("max_tokens", if (connectionTest) 64 else 512)
                         .put("response_format", JSONObject().put("type", "json_object"))
                         .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", prompt)))
                     if (target.host.equals("api.deepseek.com", true)) {

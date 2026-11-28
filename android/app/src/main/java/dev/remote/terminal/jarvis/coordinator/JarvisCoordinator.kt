@@ -242,7 +242,24 @@ object JarvisCoordinator : VoicePerceptorCallback {
         scope.launch(Dispatchers.IO) {
             runCatching { memoryManager?.restoreContextFromSqlite() }
                 .onFailure { Log.w(TAG, "Failed to restore context from SQLite: ${it.message}") }
+            prewarmCliModelIfNeeded()
         }
+    }
+
+    private suspend fun prewarmCliModelIfNeeded() {
+        val store = storeProvider?.invoke() ?: return
+        if (store.loadJarvisUsesModelApi()) return
+        val hosts = hostsProvider?.invoke().orEmpty()
+        val targetHost = hosts.firstOrNull { config.targetHostId.isNotBlank() && it.id == config.targetHostId }
+            ?: hosts.firstOrNull { it.id == selectedHostIdProvider() }
+            ?: hosts.firstOrNull() ?: return
+        val hostPresets = dev.remote.terminal.data.hostAgents(targetHost, agentsProvider?.invoke().orEmpty())
+        val model = config.targetModel
+        val preset = hostPresets.firstOrNull {
+            (config.targetAgentCommand.isBlank() || it.command == config.targetAgentCommand) &&
+                RemoteCliModel.supports(it.command, model)
+        } ?: return
+        runCatching { RemoteCliModel.prewarm(targetHost, preset, store, model, config.targetEffort) }
     }
 
     private fun resetConversationIdleTimer() {
@@ -428,14 +445,12 @@ object JarvisCoordinator : VoicePerceptorCallback {
                     } else if (Regex("""(?:不对|错了|记错了|搞错了|不是这个|不是那样)""").containsMatchIn(trimmed)) {
                         mgr.applyFeedback(isPositive = false)
                     }
+                    runCatching { mgr.beginTurn(text) }
                     mgr.recordUserTurn(text) { prompt -> summarizeTextWithModel(prompt) }
                 }
             }
 
-            runCatching { memoryManager?.beginTurn(text) }
-                .onFailure { Log.w(TAG, "Jarvis memory initialization failed: ${it.message}") }
             val context = JarvisContext(workspaces = workspaceListProvider())
-
             val action = intentRouter?.resolveIntent(text, context) ?: JarvisAction.None
             if (action !is JarvisAction.DirectReply && action != JarvisAction.None) {
                 earconManager.playThinkingChime()
@@ -561,10 +576,11 @@ object JarvisCoordinator : VoicePerceptorCallback {
     }
 
     private suspend fun handleAgentRequest(action: JarvisAction.AskAgent) {
-        _subtitle.value = "Jarvis 正在理解请求…"
+        val t0 = SystemClock.elapsedRealtime()
+        _subtitle.value = "Jarvis 正在思考…"
         val conversationContext = memoryManager?.getFormattedConversationContext().orEmpty()
         val recallQuery = if (conversationContext.isNotBlank()) {
-            "${action.message} ${conversationContext.takeLast(240)}"
+            "${action.message} ${conversationContext.takeLast(200)}"
         } else {
             action.message
         }
@@ -579,6 +595,7 @@ object JarvisCoordinator : VoicePerceptorCallback {
         val result = runModel { complete ->
             RemoteDevAgent.respond(action.message, memoryContext, conversationContext, complete)
         }
+        Log.i(TAG, "Agent turn completed in ${SystemClock.elapsedRealtime() - t0}ms (success=${result.isSuccess})")
         result.onSuccess { reply ->
             if (reply.isBlank() || !_conversationActive.value) return
             recordMemoryTurn(action.message, reply)
