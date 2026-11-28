@@ -111,10 +111,11 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.ViewAgenda
 import androidx.compose.material.icons.filled.Wifi
+import dev.remote.terminal.jarvis.ui.AgentCyberVector
+import dev.remote.terminal.jarvis.ui.JarvisQuickToggleButton
 import androidx.compose.material3.AlertDialog
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
@@ -521,14 +522,62 @@ private fun RemoteTerminalApp(store: LocalStore) {
         AutoConfirmEngine.globalEnabled = autoEnterEnabled
         AutoConfirmEngine.globalDelaySeconds = autoEnterDelaySeconds
 
+        val snackbars = remember { SnackbarHostState() }
+        val scope = rememberCoroutineScope()
+        var jarvisEnabled by remember { mutableStateOf(store.loadJarvisEnabled()) }
+        val jarvisState by dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.state.collectAsState()
+
         val permissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
             androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
         ) { permissions ->
-            val audioGranted = permissions[android.Manifest.permission.RECORD_AUDIO] == true
-            if (audioGranted && store.loadJarvisEnabled()) {
-                dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.start()
+            val audioGranted = permissions[android.Manifest.permission.RECORD_AUDIO] == true ||
+                androidx.core.content.ContextCompat.checkSelfPermission(
+                    appContext, android.Manifest.permission.RECORD_AUDIO
+                ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+            if (audioGranted) {
+                if (store.loadJarvisEnabled()) {
+                    jarvisEnabled = true
+                    dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.toggleEnabled(true)
+                }
+            } else {
+                jarvisEnabled = false
+                store.saveJarvisEnabled(false)
+                dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.toggleEnabled(false)
+                scope.launch {
+                    snackbars.showSnackbar("需要麦克风权限才能开启 Jarvis 语音助手")
+                }
             }
         }
+
+        fun toggleJarvisFromUi(wantEnable: Boolean) {
+            if (!wantEnable) {
+                jarvisEnabled = false
+                store.saveJarvisEnabled(false)
+                dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.toggleEnabled(false)
+            } else {
+                val audioOk = androidx.core.content.ContextCompat.checkSelfPermission(
+                    appContext, android.Manifest.permission.RECORD_AUDIO
+                ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                val btOk = android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.S ||
+                    androidx.core.content.ContextCompat.checkSelfPermission(
+                        appContext, android.Manifest.permission.BLUETOOTH_CONNECT
+                    ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                if (audioOk && btOk) {
+                    jarvisEnabled = true
+                    store.saveJarvisEnabled(true)
+                    dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.toggleEnabled(true)
+                } else {
+                    val reqs = mutableListOf(android.Manifest.permission.RECORD_AUDIO)
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+                        reqs.add(android.Manifest.permission.BLUETOOTH_CONNECT)
+                    }
+                    store.saveJarvisEnabled(true)
+                    jarvisEnabled = true
+                    permissionLauncher.launch(reqs.toTypedArray())
+                }
+            }
+        }
+
         LaunchedEffect(Unit) {
             dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.storeProvider = { store }
             dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.hostsProvider = { hosts.toList() }
@@ -560,12 +609,23 @@ private fun RemoteTerminalApp(store: LocalStore) {
                 vibrator?.vibrate(android.os.VibrationEffect.createOneShot(80, android.os.VibrationEffect.DEFAULT_AMPLITUDE))
             }
             if (store.loadJarvisEnabled()) {
-                dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.start()
-                val permissionsToRequest = mutableListOf(android.Manifest.permission.RECORD_AUDIO)
-                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
-                    permissionsToRequest.add(android.Manifest.permission.BLUETOOTH_CONNECT)
+                val audioOk = androidx.core.content.ContextCompat.checkSelfPermission(
+                    appContext, android.Manifest.permission.RECORD_AUDIO
+                ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                if (audioOk) {
+                    dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.start()
                 }
-                permissionLauncher.launch(permissionsToRequest.toTypedArray())
+                val btOk = android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.S ||
+                    androidx.core.content.ContextCompat.checkSelfPermission(
+                        appContext, android.Manifest.permission.BLUETOOTH_CONNECT
+                    ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                if (!audioOk || !btOk) {
+                    val reqs = mutableListOf(android.Manifest.permission.RECORD_AUDIO)
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+                        reqs.add(android.Manifest.permission.BLUETOOTH_CONNECT)
+                    }
+                    permissionLauncher.launch(reqs.toTypedArray())
+                }
             }
         }
 
@@ -600,8 +660,6 @@ private fun RemoteTerminalApp(store: LocalStore) {
         var startupShared by remember { mutableStateOf<List<Pair<HostProfile, org.json.JSONObject>>>(emptyList()) }
         var syncLoading by remember { mutableStateOf(false) }
         val sessionSyncErrors = remember { androidx.compose.runtime.mutableStateMapOf<String, String>() }
-        val snackbars = remember { SnackbarHostState() }
-        val scope = rememberCoroutineScope()
         val dirtyWorkspaces = remember { store.loadDirtyWorkspaces().toMutableSet() }
         val dirtyHostProfiles = remember { store.loadDirtyHostProfiles().toMutableSet() }
         val workspaceVersions = remember { mutableMapOf<String, Int>() }
@@ -3406,6 +3464,9 @@ private fun RemoteTerminalApp(store: LocalStore) {
                             scope.launch { runCatching { syncOperationLogs() } }
                         },
                         onOpenSettings = { route = AppRoute.SETTINGS },
+                        jarvisEnabled = jarvisEnabled,
+                        jarvisState = jarvisState,
+                        onToggleJarvis = { toggleJarvisFromUi(!jarvisEnabled) },
                         onStartTask = { host, dir, agent -> openTask(host, dir, agent) },
                         onResumeSession = { index -> activePage = index; sessions[index].unread = false; route = AppRoute.TERMINAL },
                         onRenameSession = { session -> renamingSession = session; renamingName = session.task.displayName },
@@ -3502,6 +3563,8 @@ private fun RemoteTerminalApp(store: LocalStore) {
                             store.saveDeviceLayoutMode(mode)
                         },
                         isTablet = isTablet,
+                        jarvisEnabled = jarvisEnabled,
+                        onJarvisEnabledChange = ::toggleJarvisFromUi,
                         onBack = { route = if (!offlineMode && syncUrl.isNotBlank() && syncToken.isBlank()) AppRoute.LOGIN else AppRoute.HOME },
                     )
                     AppRoute.LOGIN -> SyncLoginScreen(
@@ -3580,6 +3643,8 @@ private fun RemoteTerminalApp(store: LocalStore) {
                             store.saveDeviceLayoutMode(mode)
                         },
                         isTablet = isTablet,
+                        jarvisEnabled = jarvisEnabled,
+                        onJarvisEnabledChange = ::toggleJarvisFromUi,
                         onBack = { route = if (!offlineMode && syncUrl.isNotBlank() && syncToken.isBlank()) AppRoute.LOGIN else AppRoute.HOME },
                     )
                     AppRoute.LOGIN -> SyncLoginScreen(
@@ -3651,6 +3716,9 @@ private fun RemoteTerminalApp(store: LocalStore) {
                         onCloseSession = { session -> closingSession = session },
                         onRenameSession = { session -> renamingSession = session; renamingName = session.task.displayName },
                         onOpenSettings = { route = AppRoute.SETTINGS },
+                        jarvisEnabled = jarvisEnabled,
+                        jarvisState = jarvisState,
+                        onToggleJarvis = { toggleJarvisFromUi(!jarvisEnabled) },
                         onRefresh = {
                             scope.launch {
                                 syncLoading = true
@@ -3882,6 +3950,9 @@ private fun HomeScreen(
     onOpenRemoteInstance: (HostProfile, org.json.JSONObject) -> Unit,
     syncErrors: List<String>,
     onManage: () -> Unit, onAddHost: () -> Unit, onAddDirectory: () -> Unit, onOpenAgents: () -> Unit, onOpenLogs: () -> Unit, onOpenSettings: () -> Unit,
+    jarvisEnabled: Boolean,
+    jarvisState: dev.remote.terminal.jarvis.api.JarvisState,
+    onToggleJarvis: () -> Unit,
     onStartTask: (HostProfile, ProjectDirectory, AgentPreset) -> Unit, onResumeSession: (Int) -> Unit,
     onRenameSession: (TerminalSessionState) -> Unit,
     syncLoading: Boolean,
@@ -3904,25 +3975,33 @@ private fun HomeScreen(
         Row(
             Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 20.dp, vertical = 14.dp),
+                .padding(horizontal = 16.dp, vertical = 14.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Column(Modifier.weight(1f)) {
-                NeonGlowBrandLogo(fontSize = 19.sp, letterSpacing = 1.4.sp)
-                Text("随时接回你的开发现场 · v${BuildConfig.VERSION_NAME}", color = Muted, fontSize = 12.sp)
+            Column(Modifier.weight(1f).padding(end = 6.dp)) {
+                NeonGlowBrandLogo(fontSize = 18.sp, letterSpacing = 1.1.sp)
+                Text("v${BuildConfig.VERSION_NAME}", color = Muted, fontSize = 12.sp)
             }
-            IconButton(onClick = onManage, modifier = Modifier.size(40.dp)) {
-                Icon(Icons.Default.Dns, contentDescription = "管理主机和目录", tint = Muted, modifier = Modifier.size(22.dp))
+            IconButton(onClick = onManage, modifier = Modifier.size(36.dp)) {
+                Icon(Icons.Default.Dns, contentDescription = "管理主机和目录", tint = Muted, modifier = Modifier.size(21.dp))
             }
-            IconButton(onClick = onOpenAgents, modifier = Modifier.size(40.dp)) {
-                Icon(Icons.Default.SmartToy, contentDescription = "编辑开发者", tint = Muted, modifier = Modifier.size(22.dp))
+            IconButton(onClick = onOpenAgents, modifier = Modifier.size(36.dp)) {
+                Icon(AgentCyberVector, contentDescription = "编辑开发者", tint = Muted, modifier = Modifier.size(21.dp))
             }
-            IconButton(onClick = onOpenLogs, modifier = Modifier.size(40.dp)) {
-                Icon(Icons.Default.History, contentDescription = "历史记录", tint = Muted, modifier = Modifier.size(22.dp))
+            IconButton(onClick = onOpenLogs, modifier = Modifier.size(36.dp)) {
+                Icon(Icons.Default.History, contentDescription = "历史记录", tint = Muted, modifier = Modifier.size(21.dp))
             }
-            IconButton(onClick = onOpenSettings, modifier = Modifier.size(40.dp)) {
-                Icon(Icons.Default.Settings, contentDescription = "设置", tint = Muted, modifier = Modifier.size(22.dp))
+            IconButton(onClick = onOpenSettings, modifier = Modifier.size(36.dp)) {
+                Icon(Icons.Default.Settings, contentDescription = "设置", tint = Muted, modifier = Modifier.size(21.dp))
             }
+            Spacer(Modifier.width(4.dp))
+            JarvisQuickToggleButton(
+                enabled = jarvisEnabled,
+                jarvisState = jarvisState,
+                onClick = onToggleJarvis,
+                buttonSize = 36.dp,
+                iconSize = 21.dp,
+            )
         }
         Column(
             Modifier
@@ -5697,6 +5776,9 @@ private fun PadSidebar(
     onCloseSession: (TerminalSessionState) -> Unit,
     onRenameSession: (TerminalSessionState) -> Unit,
     onOpenSettings: () -> Unit,
+    jarvisEnabled: Boolean,
+    jarvisState: dev.remote.terminal.jarvis.api.JarvisState,
+    onToggleJarvis: () -> Unit,
     onRefresh: () -> Unit,
     syncLoading: Boolean,
     offlineMode: Boolean,
@@ -5731,7 +5813,7 @@ private fun PadSidebar(
             Column(modifier = Modifier.weight(1f)) {
                 NeonGlowBrandLogo(fontSize = 17.sp, letterSpacing = 0.8.sp)
                 Text(
-                    text = "远程开发工作台 · v${BuildConfig.VERSION_NAME}",
+                    text = "v${BuildConfig.VERSION_NAME}",
                     color = Muted,
                     fontSize = 11.sp
                 )
@@ -5761,31 +5843,17 @@ private fun PadSidebar(
                     Icon(Icons.Default.Refresh, contentDescription = "刷新", tint = White, modifier = Modifier.size(18.dp))
                 }
             }
-            val jarvisState by dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.state.collectAsState()
-            IconButton(
-                onClick = {
-                    dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.triggerManualWake()
-                },
-                modifier = Modifier.size(32.dp)
-            ) {
-                val iconColor = when (jarvisState) {
-                    dev.remote.terminal.jarvis.api.JarvisState.LISTENING -> Coral
-                    dev.remote.terminal.jarvis.api.JarvisState.PROCESSING -> Blue
-                    dev.remote.terminal.jarvis.api.JarvisState.EXECUTING -> Mint
-                    dev.remote.terminal.jarvis.api.JarvisState.SPEAKING -> Mint
-                    dev.remote.terminal.jarvis.api.JarvisState.STANDBY -> Mint
-                    dev.remote.terminal.jarvis.api.JarvisState.DISABLED -> Muted
-                }
-                Icon(
-                    imageVector = if (jarvisState == dev.remote.terminal.jarvis.api.JarvisState.DISABLED) Icons.Default.MicOff else Icons.Default.Mic,
-                    contentDescription = "贾维斯语音中枢",
-                    tint = iconColor,
-                    modifier = Modifier.size(18.dp)
-                )
-            }
             IconButton(onClick = onOpenSettings, modifier = Modifier.size(32.dp)) {
                 Icon(Icons.Default.Settings, contentDescription = "设置", tint = White, modifier = Modifier.size(18.dp))
             }
+            Spacer(Modifier.width(2.dp))
+            JarvisQuickToggleButton(
+                enabled = jarvisEnabled,
+                jarvisState = jarvisState,
+                onClick = onToggleJarvis,
+                buttonSize = 32.dp,
+                iconSize = 18.dp,
+            )
         }
 
         // Section: 主机
@@ -6431,6 +6499,9 @@ private fun PadWorkspace(
     onCloseSession: (TerminalSessionState) -> Unit,
     onRenameSession: (TerminalSessionState) -> Unit,
     onOpenSettings: () -> Unit,
+    jarvisEnabled: Boolean,
+    jarvisState: dev.remote.terminal.jarvis.api.JarvisState,
+    onToggleJarvis: () -> Unit,
     onRefresh: () -> Unit,
     syncLoading: Boolean,
     offlineMode: Boolean,
@@ -6479,6 +6550,9 @@ private fun PadWorkspace(
                     onCloseSession = onCloseSession,
                     onRenameSession = onRenameSession,
                     onOpenSettings = onOpenSettings,
+                    jarvisEnabled = jarvisEnabled,
+                    jarvisState = jarvisState,
+                    onToggleJarvis = onToggleJarvis,
                     onRefresh = onRefresh,
                     syncLoading = syncLoading,
                     offlineMode = offlineMode,
@@ -6546,6 +6620,8 @@ private fun SettingsScreen(
     deviceLayoutMode: String,
     onDeviceLayoutModeChange: (String) -> Unit,
     isTablet: Boolean,
+    jarvisEnabled: Boolean = store.loadJarvisEnabled(),
+    onJarvisEnabledChange: ((Boolean) -> Unit)? = null,
     onBack: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -6558,7 +6634,7 @@ private fun SettingsScreen(
     var draftSyncInterval by remember(syncIntervalSeconds) { mutableStateOf(syncIntervalSeconds.toFloat()) }
     var draftDelay by remember(delaySeconds) { mutableStateOf(delaySeconds.toFloat()) }
     var draftQuotaInterval by remember(quotaIntervalSeconds) { mutableStateOf(quotaIntervalSeconds.toFloat()) }
-    var jarvisEnabled by remember { mutableStateOf(store.loadJarvisEnabled()) }
+    var localJarvisEnabled by remember(jarvisEnabled) { mutableStateOf(jarvisEnabled) }
     var jarvisWakeWord by remember { mutableStateOf(store.loadJarvisWakeWord()) }
     var jarvisNotifyFinished by remember { mutableStateOf(store.loadJarvisNotifyFinished()) }
     var jarvisBluetoothSco by remember { mutableStateOf(store.loadJarvisBluetoothSco()) }
@@ -6640,9 +6716,9 @@ private fun SettingsScreen(
                                         !store.hasJarvisModelApiKey() -> "模型 API · 待配置"
                                         else -> "模型 API · ${store.loadJarvisModelApiName()}"
                                     },
-                                    Icons.Default.SmartToy) { selectedSection = SettingsSection.MODEL.name }
+                                    AgentCyberVector) { selectedSection = SettingsSection.MODEL.name }
                                 SettingsLink(SettingsSection.VOICE,
-                                    if (jarvisEnabled) "已启用 · ${jarvisWakeWord.ifBlank { "贾维斯" }}" else "语音未启用",
+                                    if (localJarvisEnabled) "已启用 · ${jarvisWakeWord.ifBlank { "贾维斯" }}" else "语音未启用",
                                     Icons.Default.Mic) { selectedSection = SettingsSection.VOICE.name }
                             }
                             SettingsGroup("远程开发") {
@@ -6868,29 +6944,38 @@ private fun SettingsScreen(
                                     val audioGranted = permissions[android.Manifest.permission.RECORD_AUDIO] == true ||
                                         androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED
                                     if (audioGranted) {
-                                        jarvisEnabled = true
-                                        store.saveJarvisEnabled(true)
-                                        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.toggleEnabled(true)
+                                        localJarvisEnabled = true
+                                        onJarvisEnabledChange?.invoke(true) ?: run {
+                                            store.saveJarvisEnabled(true)
+                                            dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.toggleEnabled(true)
+                                        }
                                     } else {
-                                        jarvisEnabled = false
-                                        store.saveJarvisEnabled(false)
+                                        localJarvisEnabled = false
+                                        onJarvisEnabledChange?.invoke(false) ?: run {
+                                            store.saveJarvisEnabled(false)
+                                            dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.toggleEnabled(false)
+                                        }
                                         voiceMessage = "需要麦克风权限才能响应「贾维斯」唤醒"
                                     }
                                 }
-                                Switch(checked = jarvisEnabled, onCheckedChange = { wantEnable ->
+                                Switch(checked = localJarvisEnabled, onCheckedChange = { wantEnable ->
                                     voiceMessage = ""
                                     if (!wantEnable) {
-                                        jarvisEnabled = false
-                                        store.saveJarvisEnabled(false)
-                                        dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.toggleEnabled(false)
+                                        localJarvisEnabled = false
+                                        onJarvisEnabledChange?.invoke(false) ?: run {
+                                            store.saveJarvisEnabled(false)
+                                            dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.toggleEnabled(false)
+                                        }
                                     } else {
                                         val audioOk = androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED
                                         val btOk = android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.S ||
                                             androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.BLUETOOTH_CONNECT) == android.content.pm.PackageManager.PERMISSION_GRANTED
                                         if (audioOk && btOk) {
-                                            jarvisEnabled = true
-                                            store.saveJarvisEnabled(true)
-                                            dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.toggleEnabled(true)
+                                            localJarvisEnabled = true
+                                            onJarvisEnabledChange?.invoke(true) ?: run {
+                                                store.saveJarvisEnabled(true)
+                                                dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.toggleEnabled(true)
+                                            }
                                         } else {
                                             val reqs = mutableListOf(android.Manifest.permission.RECORD_AUDIO)
                                             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
@@ -6902,7 +6987,7 @@ private fun SettingsScreen(
                                 })
                             }
                             if (voiceMessage.isNotBlank()) Text(voiceMessage, color = Coral, fontSize = 12.sp)
-                            if (jarvisEnabled) {
+                            if (localJarvisEnabled) {
                                 val jarvisDiagStatus by dev.remote.terminal.jarvis.coordinator.JarvisCoordinator.diagnosticStatus.collectAsState()
                                 OutlinedTextField(
                                     value = jarvisWakeWord,

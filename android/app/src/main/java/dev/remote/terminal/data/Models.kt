@@ -540,7 +540,7 @@ class LocalStore(context: Context) {
 
     fun loadTiledMode(): Boolean = preferences.getBoolean("tiled_mode", true)
 
-    fun loadJarvisEnabled(): Boolean = preferences.getBoolean("jarvis_enabled", false)
+    fun loadJarvisEnabled(): Boolean = preferences.getBoolean("jarvis_enabled", true)
     fun saveJarvisEnabled(enabled: Boolean) = preferences.edit().putBoolean("jarvis_enabled", enabled).apply()
 
     fun loadJarvisWakeWord(): String = preferences.getString("jarvis_wake_word", "贾维斯") ?: "贾维斯"
