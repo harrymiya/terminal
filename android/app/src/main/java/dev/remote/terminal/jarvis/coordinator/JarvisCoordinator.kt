@@ -111,6 +111,9 @@ object JarvisCoordinator : VoicePerceptorCallback {
         dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.closeAwakeHandler = { farewell ->
             closeAwakeState(farewell)
         }
+        dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.memoryHandler = { action, args ->
+            handleMemoryTool(action, args)
+        }
 
         if (config.enabled) {
             start()
@@ -269,8 +272,10 @@ object JarvisCoordinator : VoicePerceptorCallback {
             chatJob = null
         }
         scope.launch(Dispatchers.IO) {
-            runCatching { memoryManager?.flushContextToSqlite() }
-                .onFailure { Log.w(TAG, "Failed to flush context to SQLite on awake exit: ${it.message}") }
+            runCatching {
+                memoryManager?.distillSessionToLongMemory { prompt -> distillLongMemoriesWithModel(prompt) }
+                memoryManager?.flushContextToSqlite()
+            }.onFailure { Log.w(TAG, "Failed to flush/distill context to SQLite on awake exit: ${it.message}") }
         }
         _conversationActive.value = false
         _idleRemainingSeconds.value = 0
@@ -453,6 +458,15 @@ object JarvisCoordinator : VoicePerceptorCallback {
                             }.getOrDefault(fallback)
                         } else fallback
                         if (!_conversationActive.value) return@launch
+                        if (action.toolName == "dispatch_task" || action.toolName == "open_terminal") {
+                            val ag = action.arguments.optString("agent_name").ifBlank { action.arguments.optString("agent_command") }
+                            val ws = action.arguments.optString("workspace_name").ifBlank { action.arguments.optString("workspace_path") }
+                            if (ag.isNotBlank() && ws.isNotBlank()) {
+                                scope.launch(Dispatchers.IO) {
+                                    runCatching { memoryManager?.recordDeveloperWorkspaceHabit(ag, ws) }
+                                }
+                            }
+                        }
                         earconManager.playActionSuccessChime()
                         recordMemoryTurn(userText, reply)
                         speakWithState(reply) {
@@ -530,15 +544,20 @@ object JarvisCoordinator : VoicePerceptorCallback {
 
     private suspend fun handleAgentRequest(action: JarvisAction.AskAgent) {
         _subtitle.value = "Jarvis 正在理解请求…"
+        val conversationContext = memoryManager?.getFormattedConversationContext().orEmpty()
+        val recallQuery = if (conversationContext.isNotBlank()) {
+            "${action.message} ${conversationContext.takeLast(240)}"
+        } else {
+            action.message
+        }
         val memoryContext = try {
-            memoryManager?.recallContext(action.message).orEmpty()
+            memoryManager?.recallContext(recallQuery).orEmpty()
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Exception) {
             Log.w(TAG, "Jarvis memory recall failed: ${e.message}")
             ""
         }
-        val conversationContext = memoryManager?.getFormattedConversationContext().orEmpty()
         val result = runModel { complete ->
             RemoteDevAgent.respond(action.message, memoryContext, conversationContext, complete)
         }
@@ -614,6 +633,82 @@ object JarvisCoordinator : VoicePerceptorCallback {
                 complete("请将以下多轮对话内容压缩总结出核心要点，提炼用户意图、关键技术决策、工作区与任务进度，用精简中文输出要点：\n$prompt")
             }.getOrNull()
         }.getOrNull().orEmpty()
+    }
+
+    private suspend fun distillLongMemoriesWithModel(prompt: String): String {
+        return runCatching {
+            runModel { complete ->
+                complete(prompt)
+            }.getOrNull()
+        }.getOrNull().orEmpty()
+    }
+
+    private suspend fun handleMemoryTool(
+        action: String,
+        args: org.json.JSONObject
+    ): dev.remote.terminal.jarvis.mcp.ToolOpResult {
+        val mgr = memoryManager ?: return dev.remote.terminal.jarvis.mcp.ToolOpResult(
+            false, "memoryManager unavailable", "记忆管理器尚未初始化。"
+        )
+        return when (action) {
+            "save" -> {
+                val content = args.optString("content").trim()
+                if (content.isBlank()) {
+                    dev.remote.terminal.jarvis.mcp.ToolOpResult(false, "Missing content", "请提供要记住的内容。")
+                } else {
+                    val category = args.optString("category", "general")
+                    val importance = args.optInt("importance", 4)
+                    val id = mgr.saveLongTermInsight(content, category, importance, 0.95f, "agent_saved")
+                    dev.remote.terminal.jarvis.mcp.ToolOpResult(
+                        true,
+                        "Saved long-term vector memory id=$id",
+                        "好的，我已经牢记这条经验了。"
+                    )
+                }
+            }
+            "search" -> {
+                val query = args.optString("query").ifBlank { args.optString("content") }.trim()
+                if (query.isBlank()) {
+                    dev.remote.terminal.jarvis.mcp.ToolOpResult(false, "Missing query", "请提供要检索的关键词。")
+                } else {
+                    val hits = mgr.searchVectorLongMemory(query, 6)
+                    if (hits.isEmpty()) {
+                        dev.remote.terminal.jarvis.mcp.ToolOpResult(true, "No matching long memories found", "长记忆库中暂时没有相关记录。", expectsFollowUp = true)
+                    } else {
+                        val detail = hits.joinToString("\n") { "- [${it.category}/重要度${it.importance}] ${it.content}" }
+                        dev.remote.terminal.jarvis.mcp.ToolOpResult(
+                            true,
+                            detail,
+                            "为您检索到 ${hits.size} 条相关长期记忆。",
+                            expectsFollowUp = true
+                        )
+                    }
+                }
+            }
+            "forget" -> {
+                val target = args.optString("query").ifBlank { args.optString("content") }.trim()
+                if (target.isBlank()) {
+                    dev.remote.terminal.jarvis.mcp.ToolOpResult(false, "Missing query", "请说明要遗忘的记忆内容。")
+                } else {
+                    val removed = mgr.forgetLongMemory(target)
+                    dev.remote.terminal.jarvis.mcp.ToolOpResult(
+                        true,
+                        "Removed $removed memory entries",
+                        if (removed > 0) "已从长期记忆库移除相关记录。" else "没有找到需要遗忘的匹配记忆。"
+                    )
+                }
+            }
+            "stats" -> {
+                val (count, top) = mgr.getLongMemoryStats()
+                val topSummary = if (top.isEmpty()) "" else "核心经验包括：" + top.take(2).joinToString("；") { it.content.take(40) }
+                dev.remote.terminal.jarvis.mcp.ToolOpResult(
+                    true,
+                    "SQLite vector long-memory count=$count",
+                    "当前本地 SQLite 向量长记忆库共沉淀了 $count 条经验。$topSummary"
+                )
+            }
+            else -> dev.remote.terminal.jarvis.mcp.ToolOpResult(false, "Unsupported memory action: $action", "不支持的记忆操作类型 $action。")
+        }
     }
 
     /**

@@ -116,6 +116,9 @@ class JarvisIntentRouter(
         private val WatchStatusRegex = Regex(
             """(?i)(?:监工状态|看着怎么样|看的怎么样|盯得怎么样|盯得如何|监工进度)"""
         )
+        private val MemoryStatsRegex = Regex(
+            """(?i)(?:记忆统计|长记忆库|记住了多少|沉淀了多少记忆|查看长记忆)"""
+        )
 
         // 开发者选择与工作区任务派发相关正则 (Tier-1: 0 Token)
         private val DispatchWithDeveloperRegex = Regex(
@@ -243,6 +246,11 @@ class JarvisIntentRouter(
         if (WatchStatusRegex.containsMatchIn(cleanText)) {
             Log.i(TAG, "Tier-1 matched: MCP get_watch_status (0 Token)")
             return@withContext JarvisAction.ExecuteTool("get_watch_status")
+        }
+
+        if (MemoryStatsRegex.containsMatchIn(cleanText)) {
+            Log.i(TAG, "Tier-1 matched: MCP manage_memory stats (0 Token)")
+            return@withContext JarvisAction.ExecuteTool("manage_memory", JSONObject().put("action", "stats"))
         }
 
         if (StartWatchRegex.containsMatchIn(cleanText)) {

@@ -143,6 +143,7 @@ object JarvisToolRegistry {
     var manageLogsHandler: (suspend (action: String, args: JSONObject) -> ToolOpResult)? = null
     var updateSettingsHandler: (suspend (args: JSONObject) -> ToolOpResult)? = null
     var sessionWindowHandler: ((selector: SessionSelector, action: String, args: JSONObject) -> ToolOpResult)? = null
+    var memoryHandler: (suspend (action: String, args: JSONObject) -> ToolOpResult)? = null
 
     init {
         registerBuiltinMcpTools()
@@ -1194,6 +1195,36 @@ object JarvisToolRegistry {
                 }
             }
         })
+
+        // 38. manage_memory (SQLite 向量长记忆读写与自进化检索)
+        register(object : JarvisMcpTool {
+            override val definition = McpToolDefinition(
+                name = "manage_memory",
+                description = "管理 Jarvis 本地 SQLite 向量长记忆库（Hermes 自进化引擎）：save 沉淀偏好/纠错/技能；search 语义向量检索历史经验；forget 遗忘过时或错误记忆；stats 查看已积累的长记忆统计。",
+                inputSchema = JSONObject().apply {
+                    put("type", "object")
+                    put("properties", JSONObject().apply {
+                        put("action", JSONObject().put("type", "string").put("description", "save | search | forget | stats"))
+                        put("content", JSONObject().put("type", "string").put("description", "save 时传入要长期记住的经验、偏好或纠错事实"))
+                        put("query", JSONObject().put("type", "string").put("description", "search 或 forget 时的语义检索词"))
+                        put("category", JSONObject().put("type", "string").put("description", "preference | habit | skill | project | decision | correction | profile"))
+                        put("importance", JSONObject().put("type", "integer").put("description", "重要程度 1~5，默认 4"))
+                    })
+                    put("required", JSONArray().put("action"))
+                }
+            )
+            override suspend fun execute(arguments: JSONObject): McpToolResult {
+                val action = arguments.optString("action", "").trim().lowercase()
+                val res = memoryHandler?.invoke(action, arguments)
+                    ?: ToolOpResult(false, "memoryHandler unavailable", "长记忆服务暂不可用。")
+                return McpToolResult(
+                    isError = !res.ok,
+                    content = res.detail,
+                    voiceSummary = res.voiceSummary,
+                    expectsFollowUp = res.expectsFollowUp
+                )
+            }
+        })
     }
 
     fun register(tool: JarvisMcpTool) {
@@ -1224,6 +1255,7 @@ object JarvisToolRegistry {
             setOf("navigate_screen", "manage_session_window", "update_settings", "trigger_sync") to "切换页面、调整窗口和设置、同步数据",
             setOf("dispatch_task", "get_task_status") to "选择开发者打开工作区并派发任务、查看进度",
             setOf("start_watching_task", "stop_watching_task", "get_watch_status") to "看着干活（0 Token 科学低功耗监工）",
+            setOf("manage_memory") to "通过 SQLite 向量长记忆库自进化学习偏好与经验",
             setOf("close_awake") to "退出唤醒态"
         )
         val actions = groups.filter { (names, _) -> names.all(::isManagerTool) }.map { it.second }
@@ -1250,6 +1282,7 @@ object JarvisToolRegistry {
         实例管理：用 get_app_state 查看 sessions 和 shared_tasks，按首页标题找到唯一记录，将其 id 传作 session_id。
         接入已有实例用 focus_terminal，关闭用 close_terminal，改名用 rename_terminal。打开尚未启动的工作区用 open_terminal，传主机和工作区，不发送命令。目标有歧义时请用户明确目标。
         开发者派发与监工：从 get_app_state 选主机、工作区和开发者，向 dispatch_task 提交 task_prompt（可传 agent_name、workspace_name、task_prompt）。已有实例可指定 session_id，没有实例时工具会在所选工作区启动开发者。随后将返回的 session_id 传给 get_task_status 核验接收或进度。需要看着干活时，调用 start_watching_task 开启 0 Token 低功耗自适应后台监工，stop_watching_task 结束监工。
+        自进化长记忆：系统每次对话会自动从 SQLite 向量长记忆库召回相关经验；遇到用户新偏好、纠错或重要知识时，可用 manage_memory（action=save/search/forget/stats）主动沉淀或检索。
         配置管理：用 get_app_state 读取当前资源和设置，从 manage_host、manage_workspace、manage_agent 选择对应的 action 并传入目标。用 update_settings 写入用户要求修改的字段，再读取状态核验。
         历史和界面：用 manage_logs 的 list 查询历史，用 restore 和会话 ID 恢复会话；用 navigate_screen 切换页面，用 manage_session_window 管理会话窗口；用 close_awake 退出唤醒态。
         调用示例：[[RDT_MCP:{"tool":"get_task_status","arguments":{}}]]

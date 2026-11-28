@@ -18,6 +18,8 @@ import java.security.MessageDigest
 import java.util.LinkedHashMap
 import java.util.UUID
 import java.util.concurrent.CopyOnWriteArrayList
+import kotlin.math.exp
+import kotlin.math.ln
 
 private data class JarvisMemoryItem(
     val id: String,
@@ -29,6 +31,21 @@ private data class JarvisMemoryItem(
     val lastRecalledAt: Long = 0,
     val recallCount: Int = 0,
     val source: String = "jarvis",
+)
+
+data class JarvisLongMemoryEntry(
+    val id: String,
+    val content: String,
+    val category: String,
+    val importance: Int,
+    val confidence: Float,
+    val keywords: String,
+    val vector: FloatArray,
+    val createdAt: Long,
+    val updatedAt: Long,
+    val lastRecalledAt: Long = 0L,
+    val recallCount: Int = 0,
+    val source: String = "distilled"
 )
 
 private data class PendingJarvisTurn(
@@ -47,7 +64,7 @@ data class JarvisConversationTurn(
     val isCompressed: Boolean = false
 )
 
-private class JarvisMemoryStore(context: Context) : SQLiteOpenHelper(context, "jarvis_memory.db", null, 2) {
+private class JarvisMemoryStore(context: Context) : SQLiteOpenHelper(context, "jarvis_memory.db", null, 3) {
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
             "CREATE TABLE IF NOT EXISTS memories (account TEXT NOT NULL, id TEXT NOT NULL, content TEXT NOT NULL, content_hash TEXT NOT NULL, " +
@@ -62,10 +79,12 @@ private class JarvisMemoryStore(context: Context) : SQLiteOpenHelper(context, "j
         )
         db.execSQL("CREATE INDEX IF NOT EXISTS pending_turns_time ON pending_turns(account,created_at ASC)")
         createConversationTables(db)
+        createLongMemoryTable(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         createConversationTables(db)
+        createLongMemoryTable(db)
     }
 
     private fun createConversationTables(db: SQLiteDatabase) {
@@ -91,8 +110,35 @@ private class JarvisMemoryStore(context: Context) : SQLiteOpenHelper(context, "j
         )
     }
 
+    private fun createLongMemoryTable(db: SQLiteDatabase) {
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS long_memories (" +
+                "account TEXT NOT NULL, " +
+                "id TEXT NOT NULL, " +
+                "content TEXT NOT NULL, " +
+                "content_hash TEXT NOT NULL, " +
+                "category TEXT NOT NULL, " +
+                "importance INTEGER NOT NULL, " +
+                "confidence REAL NOT NULL DEFAULT 0.8, " +
+                "keywords TEXT NOT NULL DEFAULT '', " +
+                "vector_blob BLOB NOT NULL, " +
+                "created_at INTEGER NOT NULL, " +
+                "updated_at INTEGER NOT NULL, " +
+                "last_recalled_at INTEGER NOT NULL DEFAULT 0, " +
+                "recall_count INTEGER NOT NULL DEFAULT 0, " +
+                "source TEXT NOT NULL DEFAULT 'distilled', " +
+                "PRIMARY KEY(account, id), " +
+                "UNIQUE(account, content_hash))"
+        )
+        db.execSQL("CREATE INDEX IF NOT EXISTS long_memories_rank ON long_memories(account, importance DESC, updated_at DESC)")
+    }
+
     private fun ensureConversationTables() {
         createConversationTables(writableDatabase)
+    }
+
+    private fun ensureLongMemoryTable() {
+        createLongMemoryTable(writableDatabase)
     }
 
     @Synchronized
@@ -148,6 +194,100 @@ private class JarvisMemoryStore(context: Context) : SQLiteOpenHelper(context, "j
             "UPDATE memories SET recall_count = recall_count + 1, last_recalled_at = ?, updated_at = MAX(updated_at, ?) WHERE account = ? AND id = ?",
             arrayOf<Any?>(at, at, account, id)
         )
+    }
+
+    @Synchronized
+    fun loadLongMemories(account: String, limit: Int = 2000): List<JarvisLongMemoryEntry> {
+        ensureLongMemoryTable()
+        val result = mutableListOf<JarvisLongMemoryEntry>()
+        readableDatabase.query(
+            "long_memories",
+            arrayOf("id", "content", "category", "importance", "confidence", "keywords", "vector_blob", "created_at", "updated_at", "last_recalled_at", "recall_count", "source"),
+            "account = ?",
+            arrayOf(account),
+            null, null,
+            "importance DESC, recall_count DESC, updated_at DESC",
+            limit.coerceIn(1, 2000).toString()
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                result.add(
+                    JarvisLongMemoryEntry(
+                        id = cursor.getString(0),
+                        content = cursor.getString(1),
+                        category = cursor.getString(2),
+                        importance = cursor.getInt(3),
+                        confidence = cursor.getFloat(4),
+                        keywords = cursor.getString(5),
+                        vector = JarvisVectorEmbedder.fromBlob(cursor.getBlob(6)),
+                        createdAt = cursor.getLong(7),
+                        updatedAt = cursor.getLong(8),
+                        lastRecalledAt = cursor.getLong(9),
+                        recallCount = cursor.getInt(10),
+                        source = cursor.getString(11)
+                    )
+                )
+            }
+        }
+        return result
+    }
+
+    @Synchronized
+    fun upsertLongMemory(account: String, entry: JarvisLongMemoryEntry): JarvisLongMemoryEntry {
+        ensureLongMemoryTable()
+        val hash = contentHash(entry.content)
+        val db = writableDatabase
+        val existingId = db.query(
+            "long_memories", arrayOf("id"), "account = ? AND content_hash = ?", arrayOf(account, hash), null, null, null
+        ).use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
+        val effective = if (existingId != null && existingId != entry.id) entry.copy(id = existingId) else entry
+        db.insertWithOnConflict(
+            "long_memories", null,
+            ContentValues().apply {
+                put("account", account)
+                put("id", effective.id)
+                put("content", effective.content)
+                put("content_hash", hash)
+                put("category", effective.category)
+                put("importance", effective.importance.coerceIn(1, 5))
+                put("confidence", effective.confidence.coerceIn(0.1f, 1.0f))
+                put("keywords", effective.keywords)
+                put("vector_blob", JarvisVectorEmbedder.toBlob(effective.vector))
+                put("created_at", effective.createdAt)
+                put("updated_at", effective.updatedAt)
+                put("last_recalled_at", effective.lastRecalledAt)
+                put("recall_count", effective.recallCount.coerceAtLeast(0))
+                put("source", effective.source)
+            },
+            SQLiteDatabase.CONFLICT_REPLACE
+        )
+        db.execSQL(
+            "DELETE FROM long_memories WHERE account = ? AND id NOT IN (SELECT id FROM long_memories WHERE account = ? ORDER BY importance DESC, recall_count DESC, updated_at DESC LIMIT 2000)",
+            arrayOf(account, account)
+        )
+        return effective
+    }
+
+    @Synchronized
+    fun touchLongMemory(account: String, id: String, at: Long) {
+        ensureLongMemoryTable()
+        writableDatabase.execSQL(
+            "UPDATE long_memories SET recall_count = recall_count + 1, confidence = MIN(1.0, confidence + 0.02), last_recalled_at = ?, updated_at = MAX(updated_at, ?) WHERE account = ? AND id = ?",
+            arrayOf<Any?>(at, at, account, id)
+        )
+    }
+
+    @Synchronized
+    fun deleteLongMemory(account: String, id: String): Int {
+        ensureLongMemoryTable()
+        return writableDatabase.delete("long_memories", "account = ? AND id = ?", arrayOf(account, id))
+    }
+
+    @Synchronized
+    fun countLongMemories(account: String): Int {
+        ensureLongMemoryTable()
+        readableDatabase.rawQuery("SELECT COUNT(*) FROM long_memories WHERE account = ?", arrayOf(account)).use { cursor ->
+            return if (cursor.moveToFirst()) cursor.getInt(0) else 0
+        }
     }
 
     @Synchronized
@@ -300,11 +440,10 @@ private class JarvisMemoryStore(context: Context) : SQLiteOpenHelper(context, "j
 }
 
 /**
- * Jarvis memory tiers:
- * 1. 200 KiB 内存热上下文 (Hot Dialog & Fact Cache)；
- * 2. SQLite 本地持久化短记忆与多轮对话完整含义记录 (Durable SQLite Memory & Dialog History)；
- * 3. 超过 95% 200KB 时自动压缩上下文语义并存档，下次唤醒恢复；
- * 4. 退出唤醒态时自动全量同步至 SQLite。
+ * Jarvis 自进化混合记忆中枢 (Hermes-Style Self-Evolving Memory Engine)：
+ * 1. 200 KiB 内存持续多轮对话缓存（>95% 自动语义压缩 + SQLite 完整存档，唤醒恢复、退出持久）；
+ * 2. SQLite 原生 256 维向量长记忆库（`long_memories`）：支持端侧向量余弦相似度 + 词法 BM25 + 艾宾浩斯遗忘衰减 + 赫布强化（越用权重越高）；
+ * 3. 自进化学习机制：实时捕获用户偏好、纠错经验、开发者-工作区习惯，并支持冲突覆盖与对话蒸馏沉淀，越用越聪明。
  */
 class JarvisMemoryManager(context: Context, private val localStore: LocalStore) {
     companion object {
@@ -313,10 +452,11 @@ class JarvisMemoryManager(context: Context, private val localStore: LocalStore) 
         const val CONTEXT_COMPRESSION_THRESHOLD_BYTES = (CONTEXT_RAM_BUDGET_BYTES * 0.95).toInt() // 194,560 字节 (>95% 时触发语义压缩)
         private const val RAM_BUDGET_BYTES = 200 * 1024
         private const val LOCAL_SHORT_CONTEXT_LIMIT = 2600
-        private const val LONG_CONTEXT_LIMIT = 2600
-        private val categories = setOf("profile", "preference", "project", "decision", "goal", "environment", "general")
+        private const val LONG_CONTEXT_LIMIT = 3600
+        private val categories = setOf("profile", "preference", "habit", "skill", "project", "decision", "correction", "environment", "general")
         private val explicitMemory = Regex("(?:记住|记下|请记得|以后.*(?:都|要|别)|永远.*(?:要|别)|remember|don't forget|do not forget)", RegexOption.IGNORE_CASE)
         private val explicitMemoryNegation = Regex("(?:不要|别|不用|无需|don't|don’t|do not|never).{0,10}(?:记住|记下|请记得|remember)", RegexOption.IGNORE_CASE)
+        private val correctionPattern = Regex("(?:不对|错了|记错了|别用|不要用|改用|改成|改为|应该是|不是这个|下次记得|以后别)", RegexOption.IGNORE_CASE)
         private val commandOnly = Regex("^(?:好|好的|确认|同意|允许|继续|停止|取消|中止|关闭|退出|读屏幕|看屏幕|重连|回车|yes|no|ok|confirm|cancel|stop)[。！!？?\\s]*$", RegexOption.IGNORE_CASE)
         private val tokenizer = Regex("[\\u4e00-\\u9fff]+|[a-zA-Z0-9_./-]+")
     }
@@ -367,6 +507,7 @@ class JarvisMemoryManager(context: Context, private val localStore: LocalStore) 
         if (clean.isBlank()) return@withContext
         val turn = JarvisConversationTurn(role = "user", content = clean)
         activeTurns.add(turn)
+        learnFromUserUtterance(clean)
         checkAndCompressContext(compressor)
     }
 
@@ -376,6 +517,321 @@ class JarvisMemoryManager(context: Context, private val localStore: LocalStore) 
         val turn = JarvisConversationTurn(role = "assistant", content = clean)
         activeTurns.add(turn)
         checkAndCompressContext(compressor)
+    }
+
+    /**
+     * 赫尔墨斯式自进化实时学习：从用户每句自然语言中捕获显式偏好、纠错指令与决策。
+     */
+    private suspend fun learnFromUserUtterance(text: String) {
+        if (commandOnly.matches(text)) return
+        val account = currentAccount().ifBlank { "local_default" }
+        val now = System.currentTimeMillis()
+        when {
+            correctionPattern.containsMatchIn(text) && text.length >= 6 -> {
+                upsertLongMemoryInternal(
+                    account = account,
+                    content = "用户纠错经验：$text",
+                    category = "correction",
+                    importance = 5,
+                    confidence = 0.98f,
+                    source = "correction",
+                    now = now
+                )
+            }
+            isExplicitMemoryRequest(text) -> {
+                val fact = explicitFact(text) ?: text
+                upsertLongMemoryInternal(
+                    account = account,
+                    content = fact,
+                    category = classify(fact),
+                    importance = 5,
+                    confidence = 1.0f,
+                    source = "explicit",
+                    now = now
+                )
+            }
+        }
+    }
+
+    /**
+     * 记录并强化「开发者 + 工作区」使用习惯，让 Jarvis 越用越懂用户的调度偏好。
+     */
+    suspend fun recordDeveloperWorkspaceHabit(agentName: String?, workspaceName: String?) = withContext(Dispatchers.IO) {
+        val agent = agentName?.trim().orEmpty()
+        val ws = workspaceName?.trim().orEmpty()
+        if (agent.isBlank() || ws.isBlank()) return@withContext
+        mutex.withLock {
+            val account = currentAccount().ifBlank { "local_default" }
+            val now = System.currentTimeMillis()
+            val content = "用户习惯在工作区 $ws 使用开发者 $agent 执行开发任务"
+            upsertLongMemoryInternal(
+                account = account,
+                content = content,
+                category = "habit",
+                importance = 4,
+                confidence = 0.78f,
+                source = "habit_observed",
+                now = now,
+                conflictEntityHint = "工作区 $ws 使用开发者"
+            )
+        }
+    }
+
+    /**
+     * 供工具层或大模型主动沉淀长期知识/偏好/技能到 SQLite 向量库。
+     */
+    suspend fun saveLongTermInsight(
+        content: String,
+        category: String = "general",
+        importance: Int = 4,
+        confidence: Float = 0.9f,
+        source: String = "agent_distilled"
+    ): String = withContext(Dispatchers.IO) {
+        val clean = content.trim().take(1200)
+        if (clean.isBlank()) return@withContext ""
+        val cat = category.lowercase().takeIf { it in categories } ?: classify(clean)
+        mutex.withLock {
+            val account = currentAccount().ifBlank { "local_default" }
+            val saved = upsertLongMemoryInternal(
+                account = account,
+                content = clean,
+                category = cat,
+                importance = importance.coerceIn(1, 5),
+                confidence = confidence.coerceIn(0.2f, 1.0f),
+                source = source,
+                now = System.currentTimeMillis()
+            )
+            saved.id
+        }
+    }
+
+    /**
+     * SQLite 向量长记忆写入：含语义冲突消解（高相似/同主题旧偏好替换）与赫布强化去重。
+     */
+    private fun upsertLongMemoryInternal(
+        account: String,
+        content: String,
+        category: String,
+        importance: Int,
+        confidence: Float,
+        source: String,
+        now: Long,
+        conflictEntityHint: String? = null
+    ): JarvisLongMemoryEntry {
+        val clean = content.trim().take(1200)
+        val vec = JarvisVectorEmbedder.embed(clean)
+        val keywords = terms(clean).take(24).joinToString(",")
+        val existing = store.loadLongMemories(account, 2000)
+
+        // 检查同主题冲突（例如切换了某工作区的默认开发者）或高语义相似度合并
+        var matched: JarvisLongMemoryEntry? = null
+        var maxSim = 0f
+        for (item in existing) {
+            if (conflictEntityHint != null && item.category == category && item.content.contains(conflictEntityHint, ignoreCase = true)) {
+                matched = item
+                maxSim = 1.0f
+                break
+            }
+            val sim = JarvisVectorEmbedder.cosineSimilarity(vec, item.vector)
+            if (sim > maxSim) {
+                maxSim = sim
+                if (sim >= 0.86f) matched = item
+            }
+        }
+
+        if (matched != null) {
+            val isSameMeaning = matched.content.equals(clean, ignoreCase = true)
+            val updated = if (isSameMeaning || (source != "correction" && maxSim >= 0.94f)) {
+                // 强化已有记忆（赫布强化）
+                matched.copy(
+                    importance = maxOf(matched.importance, importance),
+                    confidence = (matched.confidence + 0.08f).coerceAtMost(1.0f),
+                    updatedAt = now,
+                    recallCount = matched.recallCount + 1
+                )
+            } else {
+                // 冲突更新 / 纠错覆盖：用新认知取代旧条目
+                matched.copy(
+                    content = clean,
+                    category = category,
+                    importance = maxOf(matched.importance, importance),
+                    confidence = maxOf(confidence, 0.85f),
+                    keywords = keywords,
+                    vector = vec,
+                    updatedAt = now,
+                    source = source
+                )
+            }
+            return store.upsertLongMemory(account, updated)
+        }
+
+        val entry = JarvisLongMemoryEntry(
+            id = shaId("$category:$clean"),
+            content = clean,
+            category = category,
+            importance = importance.coerceIn(1, 5),
+            confidence = confidence.coerceIn(0.2f, 1.0f),
+            keywords = keywords,
+            vector = vec,
+            createdAt = now,
+            updatedAt = now,
+            lastRecalledAt = 0L,
+            recallCount = 0,
+            source = source
+        )
+        return store.upsertLongMemory(account, entry)
+    }
+
+    /**
+     * 退出唤醒态时或压缩对话时，将本轮会话沉淀蒸馏成原子化的长期记忆并存入 SQLite 向量库。
+     */
+    suspend fun distillSessionToLongMemory(distiller: (suspend (String) -> String)? = null) = withContext(Dispatchers.IO) {
+        val snapshot = activeTurns.toList()
+        if (snapshot.size < 2) return@withContext
+        val account = currentAccount().ifBlank { "local_default" }
+        val now = System.currentTimeMillis()
+
+        val dialogText = buildString {
+            for (turn in snapshot.takeLast(12)) {
+                val label = if (turn.role == "user") "用户" else "Jarvis"
+                appendLine("$label: ${turn.content}")
+            }
+        }.trim()
+
+        // 优先尝试大模型结构化经验蒸馏（若在线且配置了模型）
+        val distilledJson = runCatching {
+            distiller?.invoke(
+                "请从以下对话中提炼值得长期记住的原子知识（用户偏好、习惯、项目事实、重要决定、被纠正的错误），忽略一次性寒暄与常规查询。\n" +
+                    "返回 JSON 数组格式：[{\"content\":\"简洁客观的事实描述\",\"category\":\"preference|habit|project|decision|correction|profile\",\"importance\":4}]，若无可提炼内容返回 []。\n\n$dialogText"
+            )
+        }.getOrNull().orEmpty()
+
+        val parsedItems = parseDistilledJson(distilledJson)
+        mutex.withLock {
+            if (parsedItems.isNotEmpty()) {
+                for ((content, category, importance) in parsedItems) {
+                    upsertLongMemoryInternal(
+                        account = account,
+                        content = content,
+                        category = category,
+                        importance = importance,
+                        confidence = 0.88f,
+                        source = "llm_distilled",
+                        now = now
+                    )
+                }
+                Log.i(TAG, "Distilled ${parsedItems.size} long-term vector insights via LLM into SQLite")
+            } else {
+                // 离线/本地规则兜底蒸馏：保留高价值用户事实与决定
+                for (turn in snapshot) {
+                    if (turn.role == "user" && turn.content.length >= 12 && !commandOnly.matches(turn.content)) {
+                        val cat = classify(turn.content)
+                        if (cat in setOf("preference", "profile", "goal", "decision", "correction")) {
+                            upsertLongMemoryInternal(
+                                account = account,
+                                content = turn.content.take(240),
+                                category = cat,
+                                importance = 4,
+                                confidence = 0.78f,
+                                source = "local_distilled",
+                                now = now
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun parseDistilledJson(raw: String): List<Triple<String, String, Int>> {
+        if (raw.isBlank()) return emptyList()
+        val cleaned = raw.trim()
+            .removePrefix("```json")
+            .removePrefix("```")
+            .removeSuffix("```")
+            .trim()
+        val arr = runCatching { JSONArray(cleaned) }.getOrNull() ?: return emptyList()
+        val result = mutableListOf<Triple<String, String, Int>>()
+        for (i in 0 until minOf(arr.length(), 6)) {
+            val obj = arr.optJSONObject(i) ?: continue
+            val content = obj.optString("content").trim()
+            if (content.length < 6) continue
+            val cat = obj.optString("category", "general").lowercase().takeIf { it in categories } ?: classify(content)
+            val imp = obj.optInt("importance", 3).coerceIn(1, 5)
+            result.add(Triple(content, cat, imp))
+        }
+        return result
+    }
+
+    suspend fun searchVectorLongMemory(query: String, limit: Int = 8): List<JarvisLongMemoryEntry> = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            val account = currentAccount().ifBlank { "local_default" }
+            recallLongMemoriesInternal(account, query, limit).map { it.first }
+        }
+    }
+
+    suspend fun forgetLongMemory(queryOrId: String): Int = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            val account = currentAccount().ifBlank { "local_default" }
+            val direct = store.deleteLongMemory(account, queryOrId)
+            if (direct > 0) return@withLock direct
+            val matches = recallLongMemoriesInternal(account, queryOrId, 3)
+                .filter { it.second >= 0.42f }
+            var removed = 0
+            for ((entry, _) in matches) {
+                removed += store.deleteLongMemory(account, entry.id)
+            }
+            removed
+        }
+    }
+
+    suspend fun getLongMemoryStats(): Pair<Int, List<JarvisLongMemoryEntry>> = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            val account = currentAccount().ifBlank { "local_default" }
+            val count = store.countLongMemories(account)
+            val top = store.loadLongMemories(account, 5)
+            count to top
+        }
+    }
+
+    /**
+     * 混合向量 + 词法 + 艾宾浩斯衰退 + 赫布强化检索算法：
+     * score = 0.48*VectorCosine + 0.24*LexicalOverlap + 0.16*(Importance*Confidence) + 0.12*(Reinforcement+Recency)
+     */
+    private fun recallLongMemoriesInternal(account: String, query: String, limit: Int = 8): List<Pair<JarvisLongMemoryEntry, Float>> {
+        val all = store.loadLongMemories(account, 2000)
+        if (all.isEmpty()) return emptyList()
+
+        val qVec = JarvisVectorEmbedder.embed(query)
+        val qTerms = terms(query)
+        val now = System.currentTimeMillis()
+
+        val scored = all.mapNotNull { entry ->
+            val cosSim = JarvisVectorEmbedder.cosineSimilarity(qVec, entry.vector).coerceAtLeast(0f)
+            val entryTerms = entry.keywords.split(',').filter { it.isNotBlank() }.toSet().ifEmpty { terms(entry.content) }
+            val overlap = if (qTerms.isEmpty()) 0f else qTerms.count { it in entryTerms }.toFloat() / qTerms.size.coerceAtLeast(1)
+            val exactBoost = if (query.length >= 2 && entry.content.contains(query.trim(), ignoreCase = true)) 0.25f else 0f
+            val lexicalScore = (overlap + exactBoost).coerceAtMost(1f)
+
+            val importanceScore = (entry.importance / 5.0f) * entry.confidence
+            val daysOld = ((now - entry.updatedAt).coerceAtLeast(0L) / 86_400_000.0)
+            val stabilityDays = 30.0 * (1.0 + entry.recallCount * 0.5)
+            val recencyDecay = exp(-daysOld / stabilityDays).toFloat()
+            val reinforcementBoost = (ln(1.0 + entry.recallCount) * 0.14).toFloat().coerceAtMost(0.5f)
+
+            val totalScore = (0.48f * cosSim) +
+                (0.24f * lexicalScore) +
+                (0.16f * importanceScore) +
+                (0.12f * (recencyDecay * 0.5f + reinforcementBoost))
+
+            // 纠错经验与核心偏好额外加权
+            val priorityBonus = if (entry.category == "correction" || (entry.category == "preference" && entry.importance >= 5)) 0.08f else 0f
+            val finalScore = totalScore + priorityBonus
+
+            if (finalScore < 0.22f && cosSim < 0.20f) null else entry to finalScore
+        }.sortedByDescending { it.second }
+
+        return scored.take(limit)
     }
 
     suspend fun checkAndCompressContext(compressor: (suspend (String) -> String)? = null) = withContext(Dispatchers.IO) {
@@ -483,39 +939,66 @@ class JarvisMemoryManager(context: Context, private val localStore: LocalStore) 
         }
     }
 
+    /**
+     * 每次对话前自动调用：从 SQLite 向量长记忆库 + 近期短记忆（+ 云端 Mem0 若登录）中召回最相关联的长记忆注入大模型上下文。
+     */
     suspend fun recallContext(query: String): String = withContext(Dispatchers.IO) {
         mutex.withLock {
             val account = currentAccount().ifBlank { "local_default" }
             if (query.isBlank()) return@withLock ""
             ensureAccount(account)
             reloadHotCache(account)
+
+            val now = System.currentTimeMillis()
+            // 1. 优先执行 SQLite 256维向量混合召回（包含用户偏好、习惯、纠错经验、项目事实）
+            val vectorHits = recallLongMemoriesInternal(account, query, limit = 8)
+            val sections = mutableListOf<String>()
+
+            if (vectorHits.isNotEmpty()) {
+                vectorHits.forEach { (entry, _) -> store.touchLongMemory(account, entry.id, now) }
+                sections.add(buildString {
+                    appendLine("【Jarvis SQLite 向量长记忆召回（过往习惯、偏好、纠错与经验，请优先尊重用户习惯避免重犯错误）】：")
+                    for ((entry, score) in vectorHits) {
+                        val confPct = (entry.confidence * 100).toInt()
+                        val line = "- [${entry.category}/重要度${entry.importance}/置信${confPct}%/召回${entry.recallCount + 1}次] ${entry.content}\n"
+                        if (length + line.length > LONG_CONTEXT_LIMIT) break
+                        append(line)
+                    }
+                }.trim())
+            }
+
+            // 2. 匹配热缓存/短记忆补充
             var shortHits = findHotMatches(query)
             if (shortHits.isEmpty()) shortHits = findStoredMatches(account, query)
             if (shortHits.isNotEmpty()) {
-                val now = System.currentTimeMillis()
                 shortHits.forEach { item -> store.touch(account, item.id, now) }
                 reloadHotCache(account)
-                return@withLock formatContext("近期短记忆", shortHits, LOCAL_SHORT_CONTEXT_LIMIT)
+                sections.add(formatContext("近期短记忆", shortHits, LOCAL_SHORT_CONTEXT_LIMIT))
             }
 
-            if (account != "local_default") {
+            // 3. 若已登录同步账号且本地召回不足，合并远端 Mem0 长记忆并反哺至本地 SQLite 向量库
+            if (account != "local_default" && vectorHits.size < 3) {
                 runCatching { syncShortMemory(account) }
-                reloadHotCache(account)
-                shortHits = findHotMatches(query)
-                if (shortHits.isEmpty()) shortHits = findStoredMatches(account, query)
-                if (shortHits.isNotEmpty()) {
-                    val now = System.currentTimeMillis()
-                    shortHits.forEach { item -> store.touch(account, item.id, now) }
-                    reloadHotCache(account)
-                    return@withLock formatContext("近期短记忆", shortHits, LOCAL_SHORT_CONTEXT_LIMIT)
-                }
-
                 val longHits = runCatching { searchLongMemory(query) }.getOrDefault(emptyList())
                 if (longHits.isNotEmpty()) {
-                    return@withLock formatContext("Mem0 长期记忆", longHits, LONG_CONTEXT_LIMIT)
+                    for (remoteItem in longHits) {
+                        upsertLongMemoryInternal(
+                            account = account,
+                            content = remoteItem.content,
+                            category = remoteItem.category,
+                            importance = remoteItem.importance,
+                            confidence = 0.85f,
+                            source = "mem0_synced",
+                            now = now
+                        )
+                    }
+                    if (vectorHits.isEmpty()) {
+                        sections.add(formatContext("Mem0 长期记忆", longHits, LONG_CONTEXT_LIMIT))
+                    }
                 }
             }
-            ""
+
+            sections.joinToString("\n\n").trim()
         }
     }
 
@@ -528,6 +1011,7 @@ class JarvisMemoryManager(context: Context, private val localStore: LocalStore) 
                 val item = makeItem(fact, "explicit", now, importance = 5)
                 val saved = store.upsert(account, item)
                 addHot(saved)
+                upsertLongMemoryInternal(account, fact, classify(fact), 5, 1.0f, "explicit", now)
                 return@withLock account
             }
             ""
@@ -659,7 +1143,8 @@ class JarvisMemoryManager(context: Context, private val localStore: LocalStore) 
     }
 
     private fun classify(content: String): String = when {
-        Regex("喜欢|偏好|习惯|prefer|favorite", RegexOption.IGNORE_CASE).containsMatchIn(content) -> "preference"
+        Regex("不对|错了|记错了|别用|不要用|改用|改成|纠正|correction", RegexOption.IGNORE_CASE).containsMatchIn(content) -> "correction"
+        Regex("喜欢|偏好|习惯|常用|默认|prefer|favorite|habit", RegexOption.IGNORE_CASE).containsMatchIn(content) -> "preference"
         Regex("项目|工作区|代码库|仓库|project|repository", RegexOption.IGNORE_CASE).containsMatchIn(content) -> "project"
         Regex("决定|约定|规则|decision|agreed", RegexOption.IGNORE_CASE).containsMatchIn(content) -> "decision"
         Regex("目标|计划|想要|goal|plan", RegexOption.IGNORE_CASE).containsMatchIn(content) -> "goal"
@@ -722,7 +1207,10 @@ class JarvisMemoryManager(context: Context, private val localStore: LocalStore) 
         store.removePendingTurns(account, pending.map { it.id })
         val memories = response.optJSONArray("memories") ?: JSONArray()
         for (index in 0 until memories.length()) {
-            memories.optJSONObject(index)?.let(::parseMemory)?.let { store.upsert(account, it) }
+            memories.optJSONObject(index)?.let(::parseMemory)?.let { item ->
+                store.upsert(account, item)
+                upsertLongMemoryInternal(account, item.content, item.category, item.importance, 0.9f, "mem0_consolidated", item.updatedAt)
+            }
         }
         if (memories.length() > 0) syncShortMemory(account)
     }
