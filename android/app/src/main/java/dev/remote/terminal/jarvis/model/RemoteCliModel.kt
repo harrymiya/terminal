@@ -86,14 +86,14 @@ internal object RemoteCliModel {
         }
     }
 
-    suspend fun withTurn(
+    suspend fun <T> withTurn(
         host: HostProfile,
         preset: AgentPreset,
         store: LocalStore,
         model: String,
         effort: String,
-        runAgent: suspend (suspend (String) -> Result<String>) -> Result<String>
-    ): Result<String> = withContext(Dispatchers.IO) {
+        runAgent: suspend (suspend (String) -> Result<String>) -> Result<T>
+    ): Result<T> = withContext(Dispatchers.IO) {
         val command = resolveEffectiveCommand(preset.command, model)
         if (!supports(preset.command, model)) {
             return@withContext Result.failure(IOException("当前预设不是受支持的远端 CLI 模型入口。"))

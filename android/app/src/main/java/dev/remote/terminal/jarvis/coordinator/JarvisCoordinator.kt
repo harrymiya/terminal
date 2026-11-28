@@ -671,9 +671,9 @@ object JarvisCoordinator : VoicePerceptorCallback {
         }
     }
 
-    private suspend fun runModel(
-        runAgent: suspend (suspend (String) -> Result<String>) -> Result<String>
-    ): Result<String> {
+    private suspend fun <T> runModel(
+        runAgent: suspend (suspend (String) -> Result<String>) -> Result<T>
+    ): Result<T> {
         val store = storeProvider?.invoke()
             ?: return Result.failure(IllegalStateException("当前无法读取 App 配置。"))
         if (!store.loadJarvisUsesModelApi()) return runCliModel(store, runAgent)
@@ -685,10 +685,10 @@ object JarvisCoordinator : VoicePerceptorCallback {
         return runAgent { prompt -> ApiChatModel.complete(settings.url, settings.model, settings.key, prompt) }
     }
 
-    private suspend fun runCliModel(
+    private suspend fun <T> runCliModel(
         store: dev.remote.terminal.data.LocalStore,
-        runAgent: suspend (suspend (String) -> Result<String>) -> Result<String>
-    ): Result<String> {
+        runAgent: suspend (suspend (String) -> Result<String>) -> Result<T>
+    ): Result<T> {
         val hosts = hostsProvider?.invoke().orEmpty()
         val targetHost = hosts.firstOrNull { config.targetHostId.isNotBlank() && it.id == config.targetHostId }
             ?: hosts.firstOrNull { it.id == selectedHostIdProvider() }
@@ -983,6 +983,119 @@ object JarvisCoordinator : VoicePerceptorCallback {
      */
     fun onApprovalRequired(promptDescription: String) {
         Log.d(TAG, "Approval prompt detected (handled automatically by AutoConfirmEngine): $promptDescription")
+    }
+
+    enum class WatchConfirmOutcome {
+        RESOLVED,
+        WAIT,
+        ASKED_USER,
+        UNAVAILABLE
+    }
+
+    /**
+     * 监工模式检测到开发者等待确认且本地 AutoConfirmEngine 无法自动解决时，
+     * 请求大模型理解屏幕上下文并完成按键/文本确认，或在高风险时语音请示用户。
+     */
+    suspend fun resolveWatchConfirmationWithModel(
+        sessionId: String,
+        workspaceName: String,
+        agentName: String,
+        screenTail: String,
+        pendingHostKey: Boolean = false
+    ): WatchConfirmOutcome {
+        if (pendingHostKey && sessionId.isNotBlank()) {
+            val res = RemoteDevAgent.executeTool(
+                "manage_session_window",
+                org.json.JSONObject()
+                    .put("action", "approve_host_key")
+                    .put("approve", true)
+                    .put("session_id", sessionId)
+            )
+            if (!res.isError) {
+                Log.i(TAG, "Watch overseer auto-approved pending host key for $workspaceName")
+                return WatchConfirmOutcome.RESOLVED
+            }
+        }
+        if (!hasConfiguredModel()) {
+            return WatchConfirmOutcome.UNAVAILABLE
+        }
+        val memContext = runCatching {
+            memoryManager?.recallContext("$workspaceName $agentName 确认 允许 选择 偏好 规则").orEmpty()
+        }.getOrDefault("")
+        val focusText = formatWorkingFocusPrompt()
+        val decisionRes = runModel { complete ->
+            RemoteDevAgent.resolveWatchConfirmation(
+                workspaceName = workspaceName,
+                agentName = agentName,
+                screenTail = screenTail,
+                workingFocus = focusText,
+                memoryContext = memContext,
+                complete = complete
+            )
+        }
+        val decision = decisionRes.getOrElse { err ->
+            Log.w(TAG, "Watch LLM confirmation resolution failed: ${err.message}")
+            return WatchConfirmOutcome.UNAVAILABLE
+        }
+        return when (decision) {
+            is RemoteDevAgent.WatchConfirmationDecision.Wait -> {
+                Log.d(TAG, "Watch LLM judged terminal is still running: ${decision.reason}")
+                WatchConfirmOutcome.WAIT
+            }
+            is RemoteDevAgent.WatchConfirmationDecision.AskUser -> {
+                Log.i(TAG, "Watch LLM requested user decision for $workspaceName: ${decision.question}")
+                speakIfIdle(decision.question, openFollowUp = true)
+                WatchConfirmOutcome.ASKED_USER
+            }
+            is RemoteDevAgent.WatchConfirmationDecision.Action -> {
+                var executedOk = false
+                if (decision.keys.isNotEmpty()) {
+                    val keyArgs = org.json.JSONObject()
+                        .put("keys", org.json.JSONArray(decision.keys))
+                        .put("sync", false)
+                    if (sessionId.isNotBlank()) keyArgs.put("session_id", sessionId)
+                    else if (workspaceName.isNotBlank()) keyArgs.put("workspace_name", workspaceName)
+                    val res = RemoteDevAgent.executeTool("send_terminal_keys", keyArgs)
+                    executedOk = !res.isError
+                } else if (decision.text.isNotEmpty()) {
+                    val textArgs = org.json.JSONObject()
+                        .put("text", decision.text)
+                        .put("press_enter", decision.pressEnter)
+                        .put("sync", false)
+                    if (sessionId.isNotBlank()) textArgs.put("session_id", sessionId)
+                    else if (workspaceName.isNotBlank()) textArgs.put("workspace_name", workspaceName)
+                    val res = RemoteDevAgent.executeTool("send_terminal_text", textArgs)
+                    executedOk = !res.isError
+                }
+                if (executedOk) {
+                    val summary = "监工已理解「$workspaceName」确认提示并自动处理：${decision.reason}"
+                    Log.i(TAG, summary)
+                    recordMemoryTurn("监工处理工作区 $workspaceName 的确认提示", summary)
+                    if (config.notifyOnTaskFinished) {
+                        speakIfIdle("工作区 $workspaceName 刚才等待确认，已帮您${decision.reason.take(26)}并继续。", openFollowUp = false)
+                    }
+                    WatchConfirmOutcome.RESOLVED
+                } else {
+                    WatchConfirmOutcome.UNAVAILABLE
+                }
+            }
+        }
+    }
+
+    private fun speakIfIdle(message: String, openFollowUp: Boolean) {
+        if (!config.enabled) return
+        scope.launch {
+            var waited = 0
+            while (isBusyTurn() && waited < 15_000) {
+                kotlinx.coroutines.delay(400)
+                waited += 400
+            }
+            if (!config.enabled || isBusyTurn()) return@launch
+            earconManager.playActionSuccessChime()
+            speakWithState(message) {
+                if (openFollowUp) openFollowUpListeningWindow()
+            }
+        }
     }
 
     /**

@@ -2085,6 +2085,13 @@ private fun RemoteTerminalApp(store: LocalStore) {
                         sent.voiceSummary ?: "任务派发失败。"
                     )
                 }
+                dev.remote.terminal.jarvis.watcher.JarvisWatchOverseer.startWatching(
+                    selector = dev.remote.terminal.jarvis.mcp.SessionSelector(
+                        sessionId = target.task.id,
+                        workspaceName = target.task.directory.name,
+                        agentName = target.task.agent.name
+                    )
+                )
                 val payload = org.json.JSONObject().apply {
                     put("dispatched", true)
                     put("session_id", target.task.id)
@@ -2495,7 +2502,7 @@ private fun RemoteTerminalApp(store: LocalStore) {
                             val seq = dev.remote.terminal.jarvis.mcp.McpKeyMap.resolveKey(keyName) ?: keyName
                             ctrl.send(seq)
                             sentSeqs.add(keyName)
-                            if (idx + 1 < keys.size) kotlinx.coroutines.delay(30L)
+                            if (idx + 1 < keys.size) kotlinx.coroutines.delay(70L)
                         }
                     }
                     target.clearAttention()
@@ -2538,6 +2545,34 @@ private fun RemoteTerminalApp(store: LocalStore) {
                     val full = target.buffer.visibleTextTail(lines.coerceIn(1, 100))
                     val lineList = full.lines().filter { it.isNotBlank() }
                     true to lineList.takeLast(lines.coerceIn(1, 100)).joinToString("\n").ifBlank { "终端屏幕当前无输出" }
+                }
+            }
+
+            dev.remote.terminal.jarvis.mcp.JarvisToolRegistry.watchSnapshotHandler = { selector, lines ->
+                val target = if (!selector.hasAnyFilter()) {
+                    sessions.firstOrNull { it.hostFingerprint != null }
+                        ?: sessions.firstOrNull { it.needsAction && it.autoEnterDeadline == null }
+                        ?: resolveSessionMatch(selector)
+                } else {
+                    resolveOrAttachShared(selector, waitMs = 550L)
+                }
+                target?.let { s ->
+                    val tail = s.buffer.visibleTextTail(lines.coerceIn(1, 100))
+                        .lines()
+                        .filter { it.isNotBlank() }
+                        .takeLast(lines.coerceIn(1, 100))
+                        .joinToString("\n")
+                    dev.remote.terminal.jarvis.mcp.WatchSessionSnapshot(
+                        sessionId = s.task.id,
+                        workspace = s.task.directory.name,
+                        agent = s.task.agent.name,
+                        connected = s.isSessionConnected,
+                        isStreaming = s.isStreaming,
+                        needsAction = s.needsAction,
+                        autoEnterPending = s.autoEnterDeadline != null,
+                        pendingHostKey = s.hostFingerprint != null,
+                        screenTail = tail
+                    )
                 }
             }
 
@@ -4159,37 +4194,74 @@ private fun HomeScreen(
             }
             Column(
                 Modifier.fillMaxWidth().padding(bottom = 18.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(homeCardGridGap),
             ) {
-                remoteOnlyInstances.forEach { (host, item) ->
-                    val workspace = item.optString("directory_name").ifBlank { item.optString("directory_path") }
-                    val agent = item.optString("agent_name")
-                    val title = item.optString("display_name").ifBlank {
-                        listOf(workspace, agent).filter { it.isNotBlank() }.joinToString(" · ").ifBlank { "远端工作实例" }
-                    }
-                    Surface(
-                        onClick = { onOpenRemoteInstance(host, item) },
-                        color = Panel,
-                        shape = RoundedCornerShape(12.dp),
-                        border = BorderStroke(1.dp, Blue.copy(alpha = 0.45f)),
-                        modifier = Modifier.fillMaxWidth(),
+                remoteOnlyInstances.chunked(2).forEach { rowInstances ->
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(homeCardGridGap),
                     ) {
-                        Row(
-                            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                                Text(title, color = White, fontSize = 12.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                Text(
-                                    listOf(host.name, workspace, agent).filter { it.isNotBlank() }.joinToString(" · "),
-                                    color = Muted,
-                                    fontSize = 10.sp,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
+                        rowInstances.forEach { (host, item) ->
+                            val workspace = item.optString("directory_name").ifBlank { item.optString("directory_path") }
+                            val agent = item.optString("agent_name")
+                            val agentCmd = item.optString("agent_command")
+                            val matchedAgent = agents.firstOrNull {
+                                (agentCmd.isNotBlank() && it.command.equals(agentCmd, true)) ||
+                                    (agent.isNotBlank() && it.name.equals(agent, true))
                             }
-                            Spacer(Modifier.width(10.dp))
-                            Text("点按接入", color = Blue, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                            val title = item.optString("display_name").ifBlank {
+                                listOf(workspace, agent).filter { it.isNotBlank() }.joinToString(" · ").ifBlank { "远端工作实例" }
+                            }
+                            Surface(
+                                onClick = { onOpenRemoteInstance(host, item) },
+                                color = Panel,
+                                shape = RoundedCornerShape(12.dp),
+                                border = BorderStroke(1.dp, Blue.copy(alpha = 0.45f)),
+                                modifier = Modifier.weight(1f),
+                            ) {
+                                Column(
+                                    Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 9.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                                ) {
+                                    Row(
+                                        Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        AgentMark(matchedAgent?.icon ?: "", 16.dp)
+                                        Spacer(Modifier.width(6.dp))
+                                        Text(
+                                            title,
+                                            color = White,
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Medium,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f),
+                                        )
+                                        Spacer(Modifier.width(4.dp))
+                                        Box(Modifier.size(6.dp).background(Blue, CircleShape))
+                                    }
+                                    Row(
+                                        Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                    ) {
+                                        Text(
+                                            listOf(host.name, workspace).filter { it.isNotBlank() }.joinToString(" · "),
+                                            color = Muted,
+                                            fontSize = 10.sp,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f, fill = false),
+                                        )
+                                        Spacer(Modifier.width(4.dp))
+                                        Text("点按接入", color = Blue, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+                                    }
+                                }
+                            }
+                        }
+                        if (rowInstances.size == 1) {
+                            Spacer(Modifier.weight(1f))
                         }
                     }
                 }

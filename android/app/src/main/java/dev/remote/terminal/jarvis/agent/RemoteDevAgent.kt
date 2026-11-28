@@ -32,6 +32,77 @@ internal object RemoteDevAgent {
     fun isWorkspaceStatusTool(name: String): Boolean =
         name == "web_search" || name == "web_fetch"
 
+    sealed class WatchConfirmationDecision {
+        data class Action(
+            val keys: List<String> = emptyList(),
+            val text: String = "",
+            val pressEnter: Boolean = true,
+            val reason: String = ""
+        ) : WatchConfirmationDecision()
+
+        data class AskUser(val question: String) : WatchConfirmationDecision()
+        data class Wait(val reason: String = "") : WatchConfirmationDecision()
+    }
+
+    suspend fun resolveWatchConfirmation(
+        workspaceName: String,
+        agentName: String,
+        screenTail: String,
+        workingFocus: String = "",
+        memoryContext: String = "",
+        complete: suspend (String) -> Result<String>
+    ): Result<WatchConfirmationDecision> {
+        val prompt = buildString {
+            appendLine(JarvisManagerPolicy.SYSTEM_PROMPT)
+            appendLine("【监工自动确认任务】当前你正在后台监工工作区「$workspaceName」（开发者：${agentName.ifBlank { "默认开发者" }}）。")
+            appendLine("系统内置的规则自动回车未能解开当前终端状态，请仔细阅读下方终端末尾屏幕，判断开发者是否在等待人工确认、选择菜单或输入回答。")
+            appendLine("请只返回单个 JSON 对象（不要多余文字）：")
+            appendLine("""1. 若需要按方向键/Tab/回车完成选择（注意观察当前光标 `❯` / `›` / `●` 在哪一项）：{"decision":"action","keys":["up","enter"],"reason":"简短中文原因"}（支持 up/down/left/right/tab/shift+tab/enter/esc）""")
+            appendLine("""2. 若需要输入选项编号、y/yes 或简短文本：{"decision":"action","text":"y","press_enter":true,"reason":"简短中文原因"}""")
+            appendLine("""3. 若经判断开发者仍在正常输出干活，并没有卡在等待用户输入：{"decision":"wait","reason":"仍在输出"}""")
+            appendLine("""4. 只有涉及高风险不可逆操作（如删库、强推覆盖主分支、删除大目录、输入真实账号密码）或语义高度歧义无法替用户决定时，才向用户请示：{"decision":"ask_user","question":"1~2句自然口语说明开发者在问什么并请示选择"}""")
+            if (workingFocus.isNotBlank()) appendLine(workingFocus)
+            if (memoryContext.isNotBlank()) appendLine("用户长期偏好与纠错记忆：\n" + memoryContext.take(1800))
+            appendLine("终端末尾屏幕内容：")
+            append(screenTail.takeLast(3200))
+        }
+        return complete(prompt).mapCatching { raw ->
+            val obj = extractFirstJsonObject(raw) ?: error("模型未返回有效的监工决策 JSON")
+            when (obj.optString("decision").trim().lowercase()) {
+                "wait" -> WatchConfirmationDecision.Wait(obj.optString("reason").trim())
+                "ask_user", "ask" -> {
+                    val q = sanitizeForSpeech(obj.optString("question").ifBlank { obj.optString("text") })
+                        .ifBlank { "工作区 $workspaceName 遇到重要确认项，需要您亲自决定一下。" }
+                    WatchConfirmationDecision.AskUser(q)
+                }
+                else -> {
+                    val keysArr = obj.optJSONArray("keys")
+                    val keys = buildList {
+                        if (keysArr != null) {
+                            for (i in 0 until keysArr.length()) {
+                                val k = keysArr.optString(i).trim()
+                                if (k.isNotBlank()) add(k)
+                            }
+                        }
+                    }
+                    val text = obj.optString("text", "")
+                    val pressEnter = obj.optBoolean("press_enter", true)
+                    val reason = sanitizeForSpeech(obj.optString("reason").trim()).ifBlank { "完成终端确认" }
+                    if (keys.isEmpty() && text.isBlank()) {
+                        WatchConfirmationDecision.Action(keys = listOf("enter"), reason = reason)
+                    } else {
+                        WatchConfirmationDecision.Action(
+                            keys = keys,
+                            text = text,
+                            pressEnter = pressEnter,
+                            reason = reason
+                        )
+                    }
+                }
+            }
+        }
+    }
+
     suspend fun summarizeStatus(
         request: String,
         statusData: String,

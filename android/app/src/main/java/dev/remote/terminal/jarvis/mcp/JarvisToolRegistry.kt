@@ -64,6 +64,19 @@ data class ToolOpResult(
     val expectsFollowUp: Boolean = false
 )
 
+/** 监工模式单次低功耗采样快照。 */
+data class WatchSessionSnapshot(
+    val sessionId: String,
+    val workspace: String,
+    val agent: String,
+    val connected: Boolean,
+    val isStreaming: Boolean,
+    val needsAction: Boolean,
+    val autoEnterPending: Boolean,
+    val pendingHostKey: Boolean,
+    val screenTail: String
+)
+
 /**
  * 移动端 MCP 工具注册表 (Jarvis Tool Registry)。
  * 为本地 Jarvis 语音与 AI 开发者提供全量、带同步等待与退出码回传的 Remote Dev 工作区及应用操作接口。
@@ -126,6 +139,7 @@ object JarvisToolRegistry {
     ) -> ToolOpResult)? = null
     var sendKeysHandler: (suspend (keys: List<String>, selector: SessionSelector, sync: Boolean, waitMs: Long) -> ToolOpResult)? = null
     var readScreenHandler: (suspend (selector: SessionSelector, lines: Int) -> Pair<Boolean, String>)? = null
+    var watchSnapshotHandler: (suspend (selector: SessionSelector, lines: Int) -> WatchSessionSnapshot?)? = null
     var setViewModeHandler: ((tiled: Boolean) -> Boolean)? = null
     var autoConfirmHandler: ((enabled: Boolean?, delaySeconds: Int?) -> ToolOpResult)? = null
     var triggerSyncHandler: (() -> Unit)? = null
@@ -1175,7 +1189,8 @@ object JarvisToolRegistry {
             override suspend fun execute(arguments: JSONObject): McpToolResult {
                 val status = dev.remote.terminal.jarvis.watcher.JarvisWatchOverseer.getStatus()
                 return if (status.isWatching) {
-                    val summary = "正在看着工作区【${status.workspace}】，已监工 ${status.durationSeconds} 秒，Token消耗为0。当前输出状态：${status.lastObservedSummary}"
+                    val assistNote = if (status.tokenUsed > 0) "，已协助理解确认 ${status.tokenUsed} 次" else "，平时零消耗"
+                    val summary = "正在看着工作区【${status.workspace}】，已监工 ${status.durationSeconds} 秒$assistNote。当前状态：${status.lastObservedSummary}"
                     McpToolResult(
                         content = JSONObject().apply {
                             put("is_watching", true)
