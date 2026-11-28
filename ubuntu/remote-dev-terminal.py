@@ -1957,6 +1957,7 @@ class App(Gtk.Window):
         dot.set_size_request(8, 8)
         dot.get_style_context().add_class("minimized-dot")
         content.pack_start(dot, False, False, 0)
+        icon_box = Gtk.Box()
         text = Gtk.Label(label=name)
         text.set_ellipsize(Pango.EllipsizeMode.END)
         text.set_max_width_chars(20)
@@ -1965,16 +1966,39 @@ class App(Gtk.Window):
         button.add(content)
         button.connect("clicked", lambda *_: self.restore_minimized_session(session))
         session["minimized_button"], session["minimized_dot"], session["minimized_label"] = button, dot, text
+        session["minimized_content"], session["minimized_icon"] = content, icon_box
+        self.update_session_minimized_icon(session, self.session_icon_value(session))
         self.minimized_buttons.pack_start(button, False, False, 0)
         button.show_all()
         self.scale_layout(button)
         self.update_minimized_scroller()
         self.rebuild_view()
 
+    def update_session_minimized_icon(self, session, icon_value):
+        icon_box = session.get("minimized_icon")
+        content = session.get("minimized_content")
+        if icon_box is None or content is None:
+            return False
+        changed = update_agent_icon(icon_box, icon_value)
+        has_icon = bool(icon_box.get_children())
+        parent = icon_box.get_parent()
+        if has_icon and parent is None:
+            content.pack_start(icon_box, False, False, 0)
+            content.reorder_child(icon_box, 1)
+            icon_box.show_all()
+            return True
+        if not has_icon and parent is content:
+            content.remove(icon_box)
+            return True
+        return changed
+
     def remove_minimized_button(self, session):
         button = session.pop("minimized_button", None)
         if button is not None:
             session.pop("minimized_dot", None)
+            session.pop("minimized_content", None)
+            session.pop("minimized_icon", None)
+            session.pop("minimized_label", None)
             session.pop("minimized_status", None)
             button.destroy()
             self.update_minimized_scroller()
@@ -2298,14 +2322,31 @@ class App(Gtk.Window):
             self.update_tab_header(self.tabs.get_nth_page(self.tabs.get_current_page()))
             self.rebuild_instances_sidebar(docked)
 
+    def match_session_agent_preset(self, session, presets=None):
+        agent = session.get("agent") or {}
+        item = session.get("item") or {}
+        presets = self.host_agents(session.get("host")) if presets is None else presets
+        agent_id = agent.get("id") or item.get("agent_id")
+        command = agent.get("command") or item.get("agent_command")
+        name = agent.get("name") or item.get("agent_name")
+        if agent_id:
+            preset = next((p for p in presets if p.get("id") and p["id"] == agent_id), None)
+            if preset is not None:
+                return preset
+        if command:
+            preset = next((p for p in presets if p.get("command") == command and p.get("name") == name), None)
+            if preset is not None:
+                return preset
+            preset = next((p for p in presets if p.get("command") == command), None)
+            if preset is not None:
+                return preset
+        return None
+
     def session_icon_value(self, session):
-        agent = session.get("agent", {})
-        presets = self.host_agents(session.get("host"))
-        preset = next((item for item in presets if item.get("id") and item["id"] == agent.get("id")), None)
-        if preset is None:
-            preset = next((item for item in presets if item["command"] == agent.get("command")
-                           and item["name"] == agent.get("name")), agent)
-        return preset.get("icon") or "✳"
+        agent = session.get("agent") or {}
+        item = session.get("item") or {}
+        preset = self.match_session_agent_preset(session)
+        return (preset or {}).get("icon") or item.get("agent_icon") or agent.get("icon") or "✳"
 
     def update_tab_header(self, terminal):
         session = next((session for session in self.sessions if session["terminal"] is terminal), None)
@@ -3118,11 +3159,15 @@ class App(Gtk.Window):
         self.rebuild_view()
         icons_changed = False
         for session in self.sessions:
+            icon_value = self.session_icon_value(session)
             icon_box = session.get("title_icon")
-            if icon_box is not None and update_agent_icon(icon_box, self.session_icon_value(session)):
+            if icon_box is not None and update_agent_icon(icon_box, icon_value):
                 icons_changed = True
-        if icons_changed and not self.tiled:
-            self.update_tab_header(self.tabs.get_nth_page(self.tabs.get_current_page()))
+            if self.update_session_minimized_icon(session, icon_value):
+                icons_changed = True
+        if icons_changed:
+            if not self.tiled:
+                self.update_tab_header(self.tabs.get_nth_page(self.tabs.get_current_page()))
             self.rebuild_instances_sidebar()
 
     def host_changed(self, *_):
@@ -3425,21 +3470,17 @@ class App(Gtk.Window):
 
     def move_agent(self, _button, index, offset):
         host = self.current_host()
-        agents = list(self.host_agents(host)) if host else []
+        agents = [dict(item) for item in (self.host_agents(host) if host else [])]
         target = index + offset
         if not (0 <= index < len(agents) and 0 <= target < len(agents)):
             return
         agents[index], agents[target] = agents[target], agents[index]
-        if host and host.get("agents") is not None:
-            host["agents"] = agents
+        self.replace_agents(agents)
+        if host:
             host["selected_agent"] = target
-        else:
-            self.replace_agents(agents)
-            if host:
-                host["selected_agent"] = target
         self.persist()
         self.refresh_host_content()
-        self.push_host_profile(host)
+        self.push_agent_list(host)
 
     def manage_agent(self, button, index, action):
         self.agents.set_active(index)
@@ -3630,7 +3671,7 @@ class App(Gtk.Window):
         if kind in ("directories", "agents") and not host:
             self.message("请先选择主机", "请先添加并选择主机。")
             return
-        items = host.setdefault("directories", []) if kind == "directories" else self.host_agents(host) if kind == "agents" else self.data[kind]
+        items = host.setdefault("directories", []) if kind == "directories" else [dict(item) for item in self.host_agents(host)] if kind == "agents" else self.data[kind]
         index = getattr(self, kind).get_active()
         if action != "add" and index < 0:
             return
@@ -3648,13 +3689,12 @@ class App(Gtk.Window):
                 if kind == "hosts": self.delete_host_profile(items[index].get("id", ""))
                 items.pop(index)
                 if kind == "agents":
+                    self.replace_agents(items)
                     host["selected_agent"] = min(index, max(0, len(items) - 1))
-                    if host.get("agents") is not None:
-                        host["agents"] = items
                 self.persist()
                 self.refresh()
                 if kind == "directories": self.push_workspace_list(host)
-                elif kind == "agents": self.push_host_profile(host)
+                elif kind == "agents": self.push_agent_list(host)
                 if kind == "hosts":
                     self.refresh_all_shared()
             return
@@ -3752,7 +3792,6 @@ class App(Gtk.Window):
                     values["legacy_address"] = old.get("legacy_address", old.get("address", ""))
                     values["sync_id"] = old.get("sync_id", "")
                     values["directories"] = old.get("directories", [])
-                    values["agents"] = old.get("agents", [dict(agent) for agent in self.data["agents"]])
                     values["selected_agent"] = old.get("selected_agent", 0)
                     if old.get("_sync_fingerprint"):
                         values["_sync_fingerprint"] = old["_sync_fingerprint"]
@@ -3774,18 +3813,17 @@ class App(Gtk.Window):
                 continue
             if action == "edit":
                 items[index] = values
-                if kind == "agents" and host.get("agents") is not None:
-                    host["agents"] = items
+                if kind == "agents":
+                    self.replace_agents(items)
             else:
                 items.append(values)
                 if kind == "agents":
+                    self.replace_agents(items)
                     host["selected_agent"] = len(items) - 1
-                    if host.get("agents") is not None:
-                        host["agents"] = items
             self.persist()
             self.refresh()
             if kind == "directories": self.push_workspace_list(host)
-            elif kind == "agents": self.push_host_profile(host)
+            elif kind == "agents": self.push_agent_list(host)
             if kind == "hosts":
                 target_host = items[index] if action == "edit" else items[-1]
                 target_host.pop("_resolved", None)
@@ -4168,8 +4206,14 @@ class App(Gtk.Window):
                         local_agent_revision = agent_revisions.get(identity, 0)
                         remote_agent_revision = agents.get("revision", 0)
                         if not self.agent_sync_in_flight:
-                            if agents.get("configured") and local_agent_revision < remote_agent_revision:
-                                self.replace_agents(agents["agents"]); agent_revisions[identity] = remote_agent_revision; changed = True
+                            remote_agents = agents.get("agents", [])
+                            has_host_override = any(h.get("agents") is not None for h in self.data.get("hosts", []))
+                            if agents.get("configured") and (
+                                local_agent_revision < remote_agent_revision
+                                or self.data.get("agents", []) != remote_agents
+                                or has_host_override
+                            ):
+                                self.replace_agents(remote_agents); agent_revisions[identity] = remote_agent_revision; changed = True
                             elif not agents.get("configured") and self.data.get("agents"):
                                 self.push_agent_list(local_host)
                         local_profile = profile.get("state", {})
@@ -4295,17 +4339,66 @@ class App(Gtk.Window):
             GLib.idle_add(finish)
         self.sync_executor.submit(worker)
 
+    def sync_sessions_with_agents(self, agents):
+        if not agents:
+            return
+        for session in getattr(self, "sessions", []):
+            preset = self.match_session_agent_preset(session, agents)
+            if preset is None:
+                continue
+            cur_agent = session.get("agent") if isinstance(session.get("agent"), dict) else {}
+            item = session.get("item") if isinstance(session.get("item"), dict) else None
+            old_name = cur_agent.get("name") or (item.get("agent_name") if item else "") or ""
+            new_name = preset.get("name") or old_name
+            session["agent"] = dict(preset)
+            if item is not None:
+                ws_name = item.get("directory_name") or item.get("directory_path") or "终端"
+                cur_display = item.get("display_name") or ""
+                title_source = session.get("title_source") or item.get("title_source", "default")
+                if old_name != new_name:
+                    if title_source == "default" and (not cur_display or cur_display in (f"{old_name} · {ws_name}", f"{ws_name} · {old_name}")):
+                        item["display_name"] = f"{new_name} · {ws_name}"
+                    else:
+                        suffix = f" · {ws_name} · {old_name}"
+                        if cur_display.endswith(suffix):
+                            item["display_name"] = cur_display[:-len(suffix)] + f" · {ws_name} · {new_name}"
+                item["agent_name"] = new_name
+                item["agent_icon"] = preset.get("icon") or "✳"
+            display_title = session_display_name(item, session["agent"])
+            session_title = session.get("session_title")
+            if session_title is not None and hasattr(session_title, "set_text"):
+                session_title.set_text(display_title)
+                if hasattr(session_title, "set_tooltip_text"):
+                    session_title.set_tooltip_text(self.session_title_tooltip(session, display_title))
+            minimized_label = session.get("minimized_label")
+            if minimized_label is not None and hasattr(minimized_label, "set_text"):
+                minimized_label.set_text(display_title)
+                if hasattr(minimized_label, "set_tooltip_text"):
+                    minimized_label.set_tooltip_text(self.session_title_tooltip(session, display_title))
+            minimized_button = session.get("minimized_button")
+            if minimized_button is not None and hasattr(minimized_button, "set_tooltip_text"):
+                minimized_button.set_tooltip_text(self.session_title_tooltip(session, display_title))
+            icon_value = self.session_icon_value(session)
+            title_icon = session.get("title_icon")
+            if title_icon is not None:
+                update_agent_icon(title_icon, icon_value)
+            self.update_session_minimized_icon(session, icon_value)
+
     def replace_agents(self, agents):
+        normalized = [dict(agent) for agent in agents]
         previous = self.data.get("agents", [])
-        identity_to_index = {agent.get("id"): i for i, agent in enumerate(agents) if agent.get("id")}
-        command_to_index = {agent["command"]: i for i, agent in enumerate(agents)}
+        identity_to_index = {agent.get("id"): i for i, agent in enumerate(normalized) if agent.get("id")}
+        command_to_index = {agent["command"]: i for i, agent in enumerate(normalized)}
         for host in self.data["hosts"]:
+            host_prev = host.pop("agents", None)
+            source_agents = host_prev if isinstance(host_prev, list) else previous
             index = host.get("selected_agent", 0)
-            if 0 <= index < len(previous):
-                agent = previous[index]
-                index = identity_to_index.get(agent.get("id"), command_to_index.get(agent["command"], index))
-            host["selected_agent"] = max(0, min(index, len(agents) - 1))
-        self.data["agents"] = agents
+            if 0 <= index < len(source_agents):
+                agent = source_agents[index]
+                index = identity_to_index.get(agent.get("id"), command_to_index.get(agent.get("command"), index))
+            host["selected_agent"] = max(0, min(index, len(normalized) - 1)) if normalized else 0
+        self.data["agents"] = normalized
+        self.sync_sessions_with_agents(normalized)
 
     def push_agent_list(self, host=None):
         if self.is_offline_mode() or not self.data.get("sync_url"): return
@@ -4544,7 +4637,7 @@ class App(Gtk.Window):
                                    "external_address": profile.get("external_address", ""), "address": profile.get("external_address") or profile.get("lan_address", ""),
                                    "port": profile["port"], "lan_port": profile.get("lan_port", profile["port"]), "external_port": profile.get("external_port", profile["port"]), "username": profile.get("username", ""), "icon": profile.get("icon", "⌘"),
                                    "selected_agent": next((i for i, item in enumerate(self.data.get("agents", [])) if item.get("command") == profile.get("selected_agent_command")), 0),
-                                   "directories": [], "agents": [dict(item) for item in self.data.get("agents", [])]})
+                                   "directories": []})
                 unique = []
                 seen_ids = set()
                 for host in result:
@@ -4570,10 +4663,6 @@ class App(Gtk.Window):
                         merged = dict(synced)
                         if latest is not None:
                             merged["directories"] = latest.get("directories", merged.get("directories", []))
-                            # Developer presets are local host configuration. A
-                            # profile refresh must not replace them with defaults
-                            # from a different machine/account snapshot.
-                            merged["agents"] = latest.get("agents", merged.get("agents", self.data.get("agents", [])))
                             merged["selected_agent"] = latest.get("selected_agent", merged.get("selected_agent", 0))
                         reconciled.append(merged)
                     reconciled_ids = {host.get("id") for host in reconciled}

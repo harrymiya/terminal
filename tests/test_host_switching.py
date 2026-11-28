@@ -272,5 +272,129 @@ class HostSwitchingTest(unittest.TestCase):
                 app.destroy()
 
 
+class UbuntuDeveloperSyncAndIconTest(unittest.TestCase):
+    def test_account_agent_sync_clears_stale_host_agents_and_updates_session_icons_and_names(self):
+        import json
+        import tempfile
+        try:
+            import gi
+            gi.require_version("Gtk", "3.0")
+            gi.require_version("Vte", "2.91")
+            from gi.repository import Gtk
+        except (ImportError, ValueError):
+            self.skipTest("GTK/VTE not available")
+
+        if not Gtk.init_check([])[0]:
+            self.skipTest("GTK display not available")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_dir = Path(tmpdir) / ".config" / "remote-dev-terminal"
+            config_dir.mkdir(parents=True)
+            config_path = config_dir / "config.json"
+            stale_agent = {"id": "a1", "name": "Codex", "command": "codex", "icon": "✳"}
+            test_config = {
+                "hosts": [
+                    {
+                        "id": "h1",
+                        "name": "Host1",
+                        "address": "127.0.0.1",
+                        "port": 22,
+                        "username": "user1",
+                        "directories": [{"name": "proj1", "path": "/home/user1/proj1"}],
+                        "agents": [dict(stale_agent), {"id": "a2", "name": "Shell", "command": "bash -l", "icon": "✳"}],
+                        "selected_agent": 0,
+                    }
+                ],
+                "agents": [dict(stale_agent)],
+                "sync_url": "http://127.0.0.1:18080",
+                "sync_token": "tok",
+                "auto_sync_enabled": True,
+            }
+            config_path.write_text(json.dumps(test_config), encoding="utf-8")
+
+            with patch.dict(os.environ, {"HOME": tmpdir, "XDG_CONFIG_HOME": str(Path(tmpdir) / ".config")}):
+                sys.modules.pop("core", None)
+                sys.modules.pop("remote-dev-terminal", None)
+                ubuntu_dir = str(Path(__file__).resolve().parents[1] / "ubuntu")
+                if ubuntu_dir in sys.path:
+                    sys.path.remove(ubuntu_dir)
+                sys.path.insert(0, ubuntu_dir)
+                mod = __import__("remote-dev-terminal")
+                app = mod.App()
+                try:
+                    app.persist = lambda: None
+
+                    term = mod.Vte.Terminal()
+                    title_icon = Gtk.Box()
+                    session_title = Gtk.Label(label="Codex · proj1")
+                    close_btn = Gtk.Button()
+                    sess = {
+                        "id": "s1",
+                        "terminal": term,
+                        "host": app.data["hosts"][0],
+                        "key": ("h1", 22, "user1", "/home/user1/proj1", "codex"),
+                        "state": {},
+                        "agent": {"name": "Codex", "command": "codex"},
+                        "item": {
+                            "id": "s1",
+                            "directory_name": "proj1",
+                            "directory_path": "/home/user1/proj1",
+                            "agent_name": "Codex",
+                            "agent_command": "codex",
+                            "display_name": "Codex · proj1",
+                            "title_source": "default",
+                        },
+                        "title_icon": title_icon,
+                        "session_title": session_title,
+                        "title_source": "default",
+                        "close_button": close_btn,
+                        "label": Gtk.Box(),
+                        "float_button": Gtk.Button(),
+                    }
+                    app.sessions = [sess]
+                    app.minimize_session(sess)
+                    self.assertEqual(len(sess["minimized_button"].get_child().get_children()), 2)
+
+                    synced_agents = [
+                        {"id": "a1", "name": "Codex 极速版", "command": "codex", "icon": "brand:codex"},
+                        {"id": "a2", "name": "我的 Shell", "command": "bash -l", "icon": "brand:shell"},
+                    ]
+                    app.replace_agents(synced_agents)
+                    app.refresh()
+
+                    self.assertNotIn("agents", app.data["hosts"][0])
+                    self.assertEqual(app.host_agents(app.data["hosts"][0]), synced_agents)
+                    self.assertEqual(sess["agent"]["name"], "Codex 极速版")
+                    self.assertEqual(sess["item"]["agent_name"], "Codex 极速版")
+                    self.assertEqual(sess["item"]["agent_icon"], "brand:codex")
+                    self.assertEqual(sess["session_title"].get_text(), "Codex 极速版 · proj1")
+                    self.assertEqual(len(title_icon.get_children()), 1)
+                    self.assertIsInstance(title_icon.get_children()[0], Gtk.Image)
+                    # Minimized instance card should now include the brand icon between dot and label.
+                    self.assertEqual(len(sess["minimized_button"].get_child().get_children()), 3)
+                    self.assertIsInstance(sess["minimized_icon"].get_children()[0], Gtk.Image)
+
+                    # Docked ungrouped instance card in sidebar should display the developer icon.
+                    app.remove_minimized_button(sess)
+                    app.tiled = False
+                    app.rebuild_instances_sidebar([sess])
+                    rows = app.instances_list.get_children()
+                    self.assertEqual(len(rows), 1)
+                    btn_children = rows[0].get_children()[0].get_child().get_children()
+                    self.assertIsInstance(btn_children[0], Gtk.Image)
+                    self.assertEqual(btn_children[1].get_text(), "Codex 极速版 · proj1")
+
+                    # Reordering developers pushes via push_agent_list, not push_host_profile.
+                    with patch.object(app, "push_agent_list") as push_agents, patch.object(app, "push_host_profile") as push_profile:
+                        app.move_agent(None, 1, -1)
+                        push_agents.assert_called_once()
+                        push_profile.assert_not_called()
+                        self.assertEqual([a["command"] for a in app.data["agents"]], ["bash -l", "codex"])
+                finally:
+                    app.sessions = []
+                    app.sync_executor.shutdown(wait=True)
+                    app.destroy()
+
+
 if __name__ == "__main__":
     unittest.main()
